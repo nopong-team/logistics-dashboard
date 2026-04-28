@@ -12,6 +12,7 @@
 
 import { Hono } from 'hono';
 import { wooRoutes } from './woo.js';
+import { adminRoutes } from './admin.js';
 
 const app = new Hono();
 
@@ -40,6 +41,10 @@ app.get('/api/status', (c) => {
 
 // WooCommerce routes (Step 4: /api/woo/sales as a 30-day live fetch with KV cache).
 app.route('/api/woo', wooRoutes);
+
+// Admin routes (Step 5: historical backfill into D1, reconciliation against Woo).
+// All routes here require an X-Admin-Key header matching env.ADMIN_KEY.
+app.route('/api/admin', adminRoutes);
 
 // Catch-all 404 for unknown /api/* paths and any non-asset path.
 app.notFound((c) => c.json({ error: 'not found', path: c.req.path }, 404));

@@ -29,12 +29,25 @@
 			"id": "856f0880e41b4823aee6e1bd94832e28",
 			"remote": true
 		}
+	],
+	// D1: source-of-truth database for historical orders.
+	// Schema lives in migrations/0001_init.sql, applied via `wrangler d1 migrations apply`.
+	// `remote: true` so `wrangler dev` reads/writes the real database — same trade-off
+	// as the KV binding, and we want dev to see the same data the Worker sees.
+	// Binding renamed `logistics_db` → `DB` to match Cloudflare's UPPERCASE convention
+	// (matches the `CACHE` KV binding above).
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "logistics-db",
+			"database_id": "34e869b7-670f-49bb-aadc-9356d2856f55",
+			"remote": true
+		}
 	]
 	// ──────────────────────────────────────────────────────────────────────────
 	// Still pending (NOT in this file):
 	//   • Secrets — set with `wrangler secret put NAME` (Cloudflare-side, never in git):
-	//       WOO_CA_URL, WOO_CA_KEY, WOO_CA_SECRET
-	//       WOO_US_URL, WOO_US_KEY, WOO_US_SECRET
-	//   • D1 binding — lands in Step 5 alongside the historical backfill schema.
+	//       WOO_US_URL, WOO_US_KEY, WOO_US_SECRET (US not yet ported)
+	//       ADMIN_KEY (gates /api/admin/* routes; see Step 5)
 	// ──────────────────────────────────────────────────────────────────────────
 }
