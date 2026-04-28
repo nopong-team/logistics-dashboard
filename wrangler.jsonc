@@ -1,0 +1,23 @@
+{
+  // Cloudflare Worker config for the No Pong Logistics Dashboard.
+  // Reference: https://developers.cloudflare.com/workers/wrangler/configuration/
+
+  "$schema": "node_modules/wrangler/config-schema.json",
+
+  "name": "logistics-dashboard",
+  "main": "src/index.js",
+  "compatibility_date": "2026-04-28",
+
+  // Account: No Pong (kept here for `wrangler deploy` from CLI; the dashboard's
+  //          Git-connected deploy uses the linked account directly so this is
+  //          informational, not a secret.)
+  "account_id": "779c1f48e5e23cb7897fbb5aff600b04",
+
+  // Observability — keep request logs visible in the dashboard for the smoke test.
+  "observability": {
+    "enabled": true
+  }
+
+  // No bindings yet. KV namespaces, D1 databases, secrets, custom domains, and
+  // cron triggers will be added as real /api/* endpoints come online.
+}

@@ -1,0 +1,13 @@
+{
+  "name": "logistics-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "No Pong — Logistics Dashboard Cloudflare Worker (logistics.apps.nopong.com)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
