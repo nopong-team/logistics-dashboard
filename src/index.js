@@ -18,6 +18,26 @@ const app = new Hono();
 // Health check — survives from the Step 3 hello-world.
 app.get('/api/ping', (c) => c.json({ hello: 'world' }));
 
+// /api/status — the dashboard's loadAllData() calls this first and treats any
+// non-200 as "server not running", which short-circuits every subsequent fetch
+// into a "static mode with sample data" fallback. We mirror the legacy Express
+// shape so loadAllData runs through and dispatches the per-source loaders for
+// any source we've actually got configured. Sources that aren't ported yet
+// just report `connected: false` and the dashboard skips them.
+app.get('/api/status', (c) => {
+  const env = c.env;
+  const wooCA = !!(env.WOO_CA_URL && env.WOO_CA_KEY && env.WOO_CA_SECRET);
+  const wooUS = !!(env.WOO_US_URL && env.WOO_US_KEY && env.WOO_US_SECRET);
+  return c.json({
+    xero:        { connected: false, live: false, cached: false, org: null },
+    amazon:      { connected: false },
+    wooCA:       { connected: wooCA },
+    wooUS:       { connected: wooUS },
+    logiwa:      { connected: false, source: 'csv-upload' },
+    salesBinder: { connected: false, cached: false },
+  });
+});
+
 // WooCommerce routes (Step 4: /api/woo/sales as a 30-day live fetch with KV cache).
 app.route('/api/woo', wooRoutes);
 
