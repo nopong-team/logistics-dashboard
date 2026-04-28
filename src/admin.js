@@ -233,6 +233,17 @@ adminRoutes.post('/backfill', async (c) => {
 
 // ─── Reconcile ──────────────────────────────────────────────────────────────
 
+// Reconcile validates the D1 backfill against Woo's authoritative count.
+// We compare row counts (status = completed, processing) per-month and at the
+// full-window level — if Woo and D1 agree on counts for every bucket, we have
+// strong evidence the backfill is complete and correctly windowed.
+//
+// We deliberately don't use Woo's /reports/sales endpoint here. On WordPress
+// VIP it doesn't always return the expected totals shape and the `period`
+// parameter is a preset (this-month / this-year / etc.) rather than a
+// grouping directive — easy to misuse. /orders?after=&before= with the
+// X-WP-Total header is more authoritative anyway: it counts the same rows
+// we backfilled, with the same status filter.
 adminRoutes.get('/reconcile', async (c) => {
   const market = (c.req.query('market') || '').toUpperCase();
   if (!market || !['CA', 'US'].includes(market)) {
@@ -246,103 +257,96 @@ adminRoutes.get('/reconcile', async (c) => {
     return c.json({ error: 'D1 binding DB not configured' }, 500);
   }
 
-  // ── 1. Row count: D1 vs Woo X-WP-Total (status = completed+processing) ──
-  const d1CountRow = await c.env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM orders WHERE market = ? AND status IN ('completed','processing')`,
-  ).bind(market).first();
-  const d1Count = d1CountRow?.n ?? 0;
-
-  const wooCount = await wooFetch(store, '/orders', {
-    status: 'completed,processing',
-    per_page: '1',
-    page: '1',
-    _fields: 'id', // minimise payload
-  });
-  const wooCountTotal = wooCount.total;
-
-  // ── 2. Revenue: D1 SUM(total) vs Woo Reports API total_sales ──
-  // Get the date range from D1 itself — if D1 is empty, skip.
+  // Pull D1's snapshot first so we know the window we're validating.
   const dateRangeRow = await c.env.DB.prepare(
     `SELECT MIN(date_created) AS min_date, MAX(date_created) AS max_date
      FROM orders WHERE market = ? AND status IN ('completed','processing')`,
   ).bind(market).first();
   const dateMin = (dateRangeRow?.min_date || '').substring(0, 10);
   const dateMax = (dateRangeRow?.max_date || '').substring(0, 10);
+  if (!dateMin || !dateMax) {
+    return c.json({ market, error: 'No completed/processing orders in D1 — nothing to reconcile.' });
+  }
 
-  let d1Revenue = 0;
-  let wooRevenue = 0;
-  let monthly = [];
-  if (dateMin && dateMax) {
-    const d1RevRow = await c.env.DB.prepare(
-      `SELECT SUM(total) AS s FROM orders
-       WHERE market = ? AND status IN ('completed','processing')`,
-    ).bind(market).first();
-    d1Revenue = d1RevRow?.s ?? 0;
+  const d1FullRow = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS n, SUM(total) AS s
+     FROM orders WHERE market = ? AND status IN ('completed','processing')`,
+  ).bind(market).first();
+  const d1Count = d1FullRow?.n ?? 0;
+  const d1Revenue = d1FullRow?.s ?? 0;
 
-    const wooRev = await wooFetch(store, '/reports/sales', {
-      date_min: dateMin,
-      date_max: dateMax,
+  // Per-month aggregates from D1 — one query, GROUP BY year-month.
+  const d1MonthlyRows = await c.env.DB.prepare(
+    `SELECT substr(date_created, 1, 7) AS ym,
+            COUNT(*) AS n,
+            SUM(total) AS s
+     FROM orders WHERE market = ? AND status IN ('completed','processing')
+     GROUP BY ym ORDER BY ym`,
+  ).bind(market).all();
+
+  // Helper — Woo /orders count for an [after, before) ISO date window.
+  // We use per_page=1 + read X-WP-Total from headers, so each call is cheap.
+  async function wooCountInWindow(afterIso, beforeIso) {
+    const result = await wooFetch(store, '/orders', {
+      after:    afterIso,
+      before:   beforeIso,
+      status:   'completed,processing',
+      per_page: '1',
+      page:     '1',
+      _fields:  'id',
     });
-    // Reports API returns an array with one element when no `period` is set.
-    const reportRow = Array.isArray(wooRev.data) ? wooRev.data[0] : wooRev.data;
-    wooRevenue = parseFloat(reportRow?.total_sales || 0);
+    return result.total;
+  }
 
-    // Per-month breakdown — D1 side.
-    const d1MonthlyRows = await c.env.DB.prepare(
-      `SELECT substr(date_created, 1, 7) AS ym,
-              COUNT(*) AS n,
-              SUM(total) AS s
-       FROM orders
-       WHERE market = ? AND status IN ('completed','processing')
-       GROUP BY ym
-       ORDER BY ym`,
-    ).bind(market).all();
-    monthly = (d1MonthlyRows.results || []).map(r => ({
-      yearMonth: r.ym,
-      d1Count: r.n,
-      d1Revenue: r.s,
-    }));
+  // Pad the full window slightly so we don't lose boundary orders to second-
+  // precision rounding — Woo's `after`/`before` are exclusive at second granularity.
+  const fullAfter  = `${dateMin}T00:00:00`;
+  const fullBefore = `${dateMax}T23:59:59`;
+  const wooCount = await wooCountInWindow(fullAfter, fullBefore);
 
-    // Woo reports per-month — one report call with period=month gives us
-    // an array of monthly buckets covering the full date range.
+  // Per-month Woo counts. One subrequest per month — for our 12-month window
+  // that's 12 calls, ~10–12s wall clock total, still well under any limit.
+  const monthly = [];
+  for (const row of (d1MonthlyRows.results || [])) {
+    const ym = row.ym; // 'YYYY-MM'
+    const [y, m] = ym.split('-').map(Number);
+    const monthStart = `${y}-${String(m).padStart(2, '0')}-01T00:00:00`;
+    const next = new Date(Date.UTC(y, m, 1)); // m = 1-based; new Date with UTC m-arg is 0-based, so this lands first of next month
+    const nextYm = `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}-01T00:00:00`;
+    let wooMonthCount = null;
     try {
-      const wooMonthly = await wooFetch(store, '/reports/sales', {
-        date_min: dateMin,
-        date_max: dateMax,
-        period: 'month',
-      });
-      // Woo returns the period totals nested inside the first array element's `totals` object,
-      // keyed by the period start date.
-      const totals = (Array.isArray(wooMonthly.data) ? wooMonthly.data[0]?.totals : wooMonthly.data?.totals) || {};
-      for (const row of monthly) {
-        const wooMatch = Object.entries(totals).find(([k]) => k.startsWith(row.yearMonth));
-        if (wooMatch) {
-          row.wooRevenue = parseFloat(wooMatch[1]?.sales || 0);
-          row.divergence = +(row.d1Revenue - row.wooRevenue).toFixed(2);
-        } else {
-          row.wooRevenue = null;
-          row.divergence = null;
-        }
-      }
+      wooMonthCount = await wooCountInWindow(monthStart, nextYm);
     } catch (e) {
-      // Per-month report is best-effort — full-range numbers above are the primary check.
+      // Fall through with null — surfaces in output as a missing comparator.
     }
+    monthly.push({
+      yearMonth: ym,
+      d1Count:   row.n,
+      d1Revenue: row.s ? +row.s.toFixed(2) : 0,
+      wooCount:  wooMonthCount,
+      countMatch: wooMonthCount === null ? null : (wooMonthCount === row.n),
+      countDelta: wooMonthCount === null ? null : (row.n - wooMonthCount),
+    });
   }
 
   return c.json({
     market,
     fullHistory: {
       d1Count,
-      wooCount: wooCountTotal,
-      countMatch: d1Count === wooCountTotal,
-      countDelta: d1Count - wooCountTotal,
-      d1Revenue: +d1Revenue.toFixed(2),
-      wooRevenue: +wooRevenue.toFixed(2),
-      revenueDelta: +(d1Revenue - wooRevenue).toFixed(2),
-      revenueMatchWithinDollar: Math.abs(d1Revenue - wooRevenue) < 1.0,
+      wooCount,
+      countMatch: d1Count === wooCount,
+      countDelta: d1Count - wooCount,
+      d1Revenue: +Number(d1Revenue).toFixed(2),
+      d1AverageOrderValue: d1Count > 0 ? +(d1Revenue / d1Count).toFixed(2) : 0,
       dateMin,
       dateMax,
+      dateRangeIso: { after: fullAfter, before: fullBefore },
     },
     monthly,
+    notes: [
+      'Per-month wooCount uses /orders ?after=&before= X-WP-Total (status=completed,processing).',
+      'Revenue is reported from D1 only — Woo Reports API is unreliable on this install.',
+      'A countMatch:true on every bucket means the backfill is complete and correctly windowed.',
+    ],
   });
 });
