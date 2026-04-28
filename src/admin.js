@@ -144,11 +144,14 @@ adminRoutes.post('/backfill', async (c) => {
     // Build the batch: order upserts, then delete-then-insert for items.
     const stmts = [];
     for (const o of orders) {
+      // raw_json deliberately set to NULL for backfill — JSON.stringify(o)
+      // for ~500 orders/chunk eats 1.5–3s of pure CPU and we don't read
+      // raw_json anywhere yet. Add back later if ever needed.
       stmts.push(
         c.env.DB.prepare(
           `INSERT OR REPLACE INTO orders
              (id, market, number, status, date_created, total, currency, raw_json, synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))`,
         ).bind(
           o.id,
           market,
@@ -157,7 +160,6 @@ adminRoutes.post('/backfill', async (c) => {
           o.date_created || '',
           parseFloat(o.total || 0),
           o.currency || store.currency,
-          JSON.stringify(o),
         ),
       );
       stmts.push(
