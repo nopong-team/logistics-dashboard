@@ -1,23 +1,40 @@
 {
-  // Cloudflare Worker config for the No Pong Logistics Dashboard.
-  // Reference: https://developers.cloudflare.com/workers/wrangler/configuration/
-
-  "$schema": "node_modules/wrangler/config-schema.json",
-
-  "name": "logistics-dashboard",
-  "main": "src/index.js",
-  "compatibility_date": "2026-04-28",
-
-  // Account: No Pong (kept here for `wrangler deploy` from CLI; the dashboard's
-  //          Git-connected deploy uses the linked account directly so this is
-  //          informational, not a secret.)
-  "account_id": "779c1f48e5e23cb7897fbb5aff600b04",
-
-  // Observability — keep request logs visible in the dashboard for the smoke test.
-  "observability": {
-    "enabled": true
-  }
-
-  // No bindings yet. KV namespaces, D1 databases, secrets, custom domains, and
-  // cron triggers will be added as real /api/* endpoints come online.
+	// Cloudflare Worker config for the No Pong Logistics Dashboard.
+	// Reference: https://developers.cloudflare.com/workers/wrangler/configuration/
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "logistics-dashboard",
+	"main": "src/index.js",
+	"compatibility_date": "2026-04-28",
+	// Account: No Pong (kept here for `wrangler deploy` from CLI; the dashboard's
+	//          Git-connected deploy uses the linked account directly so this is
+	//          informational, not a secret.)
+	"account_id": "779c1f48e5e23cb7897fbb5aff600b04",
+	// Static assets. Anything in /public is served by Cloudflare's edge before
+	// the Worker is invoked — so `/` serves public/index.html (the dashboard SPA)
+	// and `/CA_NoPongLogo.png` serves directly. Only unmatched paths (i.e.
+	// `/api/*` and typos) hit the Hono app in src/index.js.
+	"assets": {
+		"directory": "./public"
+	},
+	// Observability — keep request logs visible in the dashboard for smoke tests.
+	"observability": {
+		"enabled": true
+	},
+	// KV: response-cache namespace used by /api/woo/sales (15-min TTL).
+	// `remote: true` means `wrangler dev` reads/writes the real namespace
+	// instead of a local mock — fine for low-stakes cache data that auto-expires.
+	"kv_namespaces": [
+		{
+			"binding": "CACHE",
+			"id": "856f0880e41b4823aee6e1bd94832e28",
+			"remote": true
+		}
+	]
+	// ──────────────────────────────────────────────────────────────────────────
+	// Still pending (NOT in this file):
+	//   • Secrets — set with `wrangler secret put NAME` (Cloudflare-side, never in git):
+	//       WOO_CA_URL, WOO_CA_KEY, WOO_CA_SECRET
+	//       WOO_US_URL, WOO_US_KEY, WOO_US_SECRET
+	//   • D1 binding — lands in Step 5 alongside the historical backfill schema.
+	// ──────────────────────────────────────────────────────────────────────────
 }
