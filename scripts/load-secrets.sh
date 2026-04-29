@@ -101,6 +101,15 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     fi
   fi
 
+  # Trim leading/trailing whitespace from the value. Defensive: caught
+  # 2026-04-29 when a stray leading space on XERO_CLIENT_ID produced a `+`-
+  # encoded space in the Xero OAuth client_id and Xero rejected with
+  # `unauthorized_client`. The line-level trim above strips trailing line
+  # whitespace but leaves whitespace between `=` and the value, and any
+  # whitespace inside a quoted value, untouched.
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+
   if ! is_allowed "$key"; then
     printf "  skip (not in whitelist): %s\n" "$key"
     count_skipped_whitelist=$((count_skipped_whitelist + 1))

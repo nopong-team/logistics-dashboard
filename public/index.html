@@ -990,8 +990,17 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.23</span> &middot; April 2026
+  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.24</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.24 &mdash; 29 April 2026 (Logiwa ported)</h4>
+    <ul>
+      <li>Logiwa connector ported to the Worker. The dashboard's Logiwa upload tile now talks to <code>/api/logiwa/inventory</code> on the Worker instead of the legacy Express server &mdash; same client-side <code>SheetJS</code> parse, same POST shape (<code>{ inventory, uploadedAt, fileName }</code>), no frontend change.</li>
+      <li>Snapshot lives in KV under <code>logiwa:inventory:current</code> &mdash; one key, overwrite-on-upload. Deliberately no R2, no D1, no migration: Logiwa stock is point-in-time, not append-only, and the parsed JSON is small enough to live in a single KV value.</li>
+      <li>New <code>/api/logiwa/test</code> mirrors the connectivity-check pattern from SalesBinder/Amazon/Xero &mdash; returns <code>{ connected, count, fileName, uploadedAt }</code> when a snapshot exists.</li>
+      <li><code>/api/status.logiwa.connected</code> now flips automatically based on whether a snapshot is in KV. The dashboard's <code>loadAllData</code> dispatches <code>loadLogiwaInventory()</code> after an upload without a manual refresh.</li>
+      <li>No new secrets, no new bindings, no new migrations &mdash; this connector reuses the existing <code>CACHE</code> KV namespace. Auth is Cloudflare Access at the edge; if curl-upload becomes a real workflow later we can add a parallel <code>/api/admin/logiwa/upload</code> route.</li>
+      <li>Defensive whitespace strip in <code>scripts/load-secrets.sh</code>: leading/trailing spaces on values are now trimmed after the existing quote-strip step. Caught last session when a stray leading space on <code>XERO_CLIENT_ID</code> produced a <code>+</code>-encoded space in the OAuth URL and Xero rejected with <code>unauthorized_client</code>.</li>
+    </ul>
     <h4>v2.23 &mdash; 29 April 2026 (Xero ported)</h4>
     <ul>
       <li>Xero connector ported to the Worker &mdash; OAuth2 auth-code flow with lazy refresh, plus the three legacy API endpoints. Replaces the local <code>xero-node</code> SDK (Node-only) with direct REST against <code>identity.xero.com</code> and <code>api.xero.com</code>.</li>

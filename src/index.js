@@ -17,6 +17,7 @@ import { salesBinderRoutes } from './salesbinder.js';
 import { amazonRoutes, runAmazonOrdersChunk, runAmazonReportsTick, invalidateAmazonSalesCache } from './amazon.js';
 import { diagnosticsRoutes } from './diagnostics.js';
 import { xeroRoutes, xeroAuthRoutes, readXeroStatus } from './xero.js';
+import { logiwaRoutes, readLogiwaStatus } from './logiwa.js';
 import buyingToolHistory from './buying-tool-history.js';
 import { redactSecrets } from './redact.js';
 
@@ -45,12 +46,18 @@ app.get('/api/status', async (c) => {
   let xero = { connected: false, live: false, cached: false, org: null };
   try { xero = await readXeroStatus(env); }
   catch (e) { console.warn('readXeroStatus failed:', redactSecrets(e?.message || e)); }
+  // Logiwa flips to connected:true once a snapshot exists in KV. Wrapped in a
+  // defensive try (same pattern as Xero) so a KV hiccup can't take /api/status
+  // down — frontend gates every loader on this endpoint.
+  let logiwa = { connected: false, source: 'csv-upload' };
+  try { logiwa = await readLogiwaStatus(env); }
+  catch (e) { console.warn('readLogiwaStatus failed:', redactSecrets(e?.message || e)); }
   return c.json({
     xero,
     amazon:      { connected: amazon },
     wooCA:       { connected: wooCA },
     wooUS:       { connected: wooUS },
-    logiwa:      { connected: false, source: 'csv-upload' },
+    logiwa,
     salesBinder: { connected: salesBinder, cached: false },
   });
 });
@@ -81,6 +88,12 @@ app.route('/api', diagnosticsRoutes);
 // path matching what's registered in the Xero app's allowed redirect URIs.
 app.route('/api/xero', xeroRoutes);
 app.route('/auth/xero', xeroAuthRoutes);
+
+// Logiwa connector (Step 5c.4) — no upstream API; the dashboard uploads a
+// pre-parsed JSON snapshot to POST /api/logiwa/inventory and we store it in
+// KV. GET returns the snapshot. See src/logiwa.js for the full rationale and
+// the reason there is deliberately no R2, no D1, and no ADMIN_KEY here.
+app.route('/api/logiwa', logiwaRoutes);
 
 // Buying-tool history — 18+ months of per-SKU monthly sales plus manually
 // curated allocation buffers from the buying-tool spreadsheet. Powers the
