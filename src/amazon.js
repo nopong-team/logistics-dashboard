@@ -912,7 +912,7 @@ function aggregateAmazonFromD1(monthRows, itemRows) {
   return { monthlyRevenue, monthlyOrders, skuTotals };
 }
 
-amazonRoutes.get('/sales', async (c) => {
+async function handleAmazonSalesRequest(c) {
   const market = (c.req.query('market') || 'CA').toUpperCase();
   if (!AMAZON_MARKETPLACES[market]) {
     return c.json({ error: `unsupported Amazon market: ${market}` }, 400);
@@ -1000,7 +1000,22 @@ amazonRoutes.get('/sales', async (c) => {
     await c.env.CACHE.put(cacheKey, JSON.stringify(payload), { expirationTtl: SALES_TTL_SECONDS });
   }
   return c.json({ ...payload, cached: false });
-});
+}
+
+// /api/amazon/sales — Orders-driven monthly revenue + Reports-driven per-SKU
+// breakdown, bundled into one D1-backed response.
+amazonRoutes.get('/sales', handleAmazonSalesRequest);
+
+// /api/amazon/sku-sales — alias for /sales. The legacy backend/server.js had
+// two separate Amazon endpoints (sales for the Orders-API monthly revenue,
+// sku-sales for the Reports-API per-SKU breakdown). The Worker bundles both
+// into one D1-backed response, but the frontend's Monthly SKU view still
+// calls /sku-sales as a separate fetch (loadAmazonSkuSales in
+// public/index.html). Without this alias, that fetch 404s, the catch
+// silently logs "not available", and the per-SKU Amazon columns stay empty
+// even when the data is in D1. The same KV cache key (amazon-sales-{market})
+// serves both routes; refresh on either invalidates for both.
+amazonRoutes.get('/sku-sales', handleAmazonSalesRequest);
 
 // ─── FBA Inventory snapshot (KV-cached, stale-while-revalidate) ────────────
 //
