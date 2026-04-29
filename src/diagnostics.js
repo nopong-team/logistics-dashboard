@@ -8,10 +8,16 @@
  *                            panel's checks (revenue reconciliation, duplicate
  *                            order IDs, marketplace filter, SKU mapping
  *                            coverage, daily order flow).
+ *   GET /api/import-log    — unified activity log of every cron tick / manual
+ *                            backfill / report state change / KV-snapshot
+ *                            upload across the past `?hours=N` (default 24,
+ *                            cap 168). Powers the dashboard's Activity dropdown
+ *                            — the "is the data fresh?" answer that sits beside
+ *                            "Last updated".
  *
- * Both endpoints are public-within-Access (no ADMIN_KEY) — same posture as
- * the legacy Express routes, since they expose nothing the dashboard SPA
- * doesn't already consume.
+ * All three are public-within-Access (no ADMIN_KEY) — same posture as the
+ * legacy Express routes, since they expose nothing the dashboard SPA doesn't
+ * already consume.
  *
  * Per-source schema means the legacy "CA vs US byte-identical" check can never
  * fire structurally (separate amazon_orders + amazon_items tables), so we
@@ -23,6 +29,33 @@ import { Hono } from 'hono';
 import { buildMonthWindow, getWeekKey } from './timezone.js';
 
 export const diagnosticsRoutes = new Hono();
+
+// ─── Timestamp normalisation ───────────────────────────────────────────────
+//
+// New writes use strftime('%Y-%m-%dT%H:%M:%SZ', 'now') so D1 columns end up
+// as ISO-8601 UTC with explicit Z. But until a row is overwritten, older
+// values written with the legacy datetime('now') call still come back as
+// naive 'YYYY-MM-DD HH:MM:SS' strings — which JavaScript's `new Date()`
+// parses as LOCAL time, producing a timezone-shifted display on any non-UTC
+// machine. (We hit this on Chris's UTC+9 machine: chip showed "13h ago" for
+// a 4h-old timestamp.)
+//
+// toIsoUtc normalises both formats to ISO Z so frontend timestamp parsing
+// works regardless of which write-era a row came from. Applied to every
+// timestamp this module surfaces.
+
+export function toIsoUtc(s) {
+  if (!s) return null;
+  if (typeof s !== 'string') s = String(s);
+  // Already ISO-with-offset (Z or +/-HH:MM) — pass through.
+  if (/[Zz]$/.test(s) || /[+-]\d{2}:?\d{2}$/.test(s)) return s;
+  // SQLite naive 'YYYY-MM-DD HH:MM:SS[.fff]' (UTC by SQLite convention).
+  // Replace the space with T and append Z so JS treats it as UTC.
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(s)) {
+    return s.replace(' ', 'T') + 'Z';
+  }
+  return s; // Some other shape — leave alone, let the caller handle.
+}
 
 // FBA Inventory KV key shape — kept in sync with src/amazon.js. We read from
 // here without going through the Amazon module to avoid a paginated SP-API
@@ -75,34 +108,34 @@ diagnosticsRoutes.get('/sync-status', async (c) => {
 
   return c.json({
     wooCA: {
-      lastSync:   stateBy['woo:CA']?.last_synced_at || null,
+      lastSync:   toIsoUtc(stateBy['woo:CA']?.last_synced_at) || null,
       orderCount: wooCa?.n || 0,
       syncing:    false,
     },
     wooUS: {
-      lastSync:   stateBy['woo:US']?.last_synced_at || null,
+      lastSync:   toIsoUtc(stateBy['woo:US']?.last_synced_at) || null,
       orderCount: wooUs?.n || 0,
       syncing:    false,
     },
     amzCA: {
-      lastSync:     stateBy['amazon:CA']?.last_synced_at || null,
+      lastSync:     toIsoUtc(stateBy['amazon:CA']?.last_synced_at) || null,
       orderCount:   amzCa?.n || 0,
       syncComplete: true,
       syncing:      false,
     },
     amzUS: {
-      lastSync:     stateBy['amazon:US']?.last_synced_at || null,
+      lastSync:     toIsoUtc(stateBy['amazon:US']?.last_synced_at) || null,
       orderCount:   amzUs?.n || 0,
       syncComplete: true,
       syncing:      false,
     },
     amzInvCA: {
-      lastSync: amzInvCa?.lastSync || null,
+      lastSync: amzInvCa?.lastSync || null, // already ISO-Z (KV writes from JS)
       count:    amzInvCa?.count || 0,
       syncing:  false,
     },
     amzInvUS: {
-      lastSync: amzInvUs?.lastSync || null,
+      lastSync: amzInvUs?.lastSync || null, // already ISO-Z (KV writes from JS)
       count:    amzInvUs?.count || 0,
       syncing:  false,
     },
@@ -230,7 +263,7 @@ async function buildWooAuditForMarket(env, market, startDate) {
     orderIdCount:    idRes?.n || 0,
     uniqueOrderIds:  idRes?.n || 0, // structurally equal — see note above
     dailyOrderCounts,
-    lastSync:         stateRes?.last_synced_at || null,
+    lastSync:         toIsoUtc(stateRes?.last_synced_at) || null,
     monthWindowStart: startDate,
   };
 }
@@ -279,8 +312,8 @@ async function buildAmazonAudit(env) {
     caUsIdentical:      false,
     caSkuCount:         caSku?.n || 0,
     usSkuCount:         usSku?.n || 0,
-    caLastSync:         caState?.last_synced_at || null,
-    usLastSync:         usState?.last_synced_at || null,
+    caLastSync:         toIsoUtc(caState?.last_synced_at) || null,
+    usLastSync:         toIsoUtc(usState?.last_synced_at) || null,
     monthWindowStart:   startDate,
     // Per-row unmatched-SKU strings aren't persisted (only the count), so the
     // sample arrays stay empty. The count is the load-bearing signal.
@@ -308,11 +341,260 @@ diagnosticsRoutes.get('/audit', async (c) => {
   return c.json({
     woo:    { CA: wooCA, US: wooUS },
     amazon,
+    // wooCA.lastSync etc. are already ISO-normalised inside buildWooAuditForMarket
+    // / buildAmazonAudit; this convenience block just re-projects them.
     lastSync: {
       wooCA: wooCA.lastSync,
       wooUS: wooUS.lastSync,
       amzCA: amazon.caLastSync,
       amzUS: amazon.usLastSync,
     },
+  });
+});
+
+// ─── /api/import-log ───────────────────────────────────────────────────────
+//
+// Unified activity feed for the dashboard's "Activity" dropdown. Returns a
+// single sorted-by-timestamp-desc array of rows describing every recent piece
+// of system activity:
+//
+//   • sync_logs                    → cron-tick / manual-backfill / reconcile
+//                                    rows for Woo and Amazon Orders.
+//   • report_jobs                  → Amazon Reports state-machine snapshot
+//                                    (one row per job, latest state surfaced).
+//   • KV markers (FBA, SalesBinder,
+//     Logiwa)                      → "current snapshot" rows — these sources
+//                                    don't have a per-tick history by design.
+//   • xero_tokens.updated_at       → "current snapshot" of the OAuth tokens.
+//
+// Row shape (stable wire contract — frontend renders fields verbatim):
+//   { when, source, market, action, status, summary, durationMs, scope }
+// where `scope` is 'tick' for sync_logs, 'snapshot' for KV/single-row reads,
+// and 'job' for report_jobs entries.
+//
+// Query params:
+//   hours  — lookback window for sync_logs (default 24, max 168 = 7 days)
+//   limit  — total rows cap after merge (default 200, max 1000)
+//
+// KV/snapshot rows always render regardless of the `hours` filter — they're
+// the source-of-truth for "is this connector even alive". sync_logs and
+// report_jobs entries respect the lookback so we don't render last week's
+// ~600 cron ticks every time the dropdown opens.
+
+const FBA_INVENTORY_KV_KEY = (m) => `amazon:inventory:${m.toUpperCase()}`;
+const SALESBINDER_INVENTORY_KV_KEY = 'salesbinder:inventory';
+const SALESBINDER_PACKAGING_KV_KEY = 'salesbinder:packaging';
+const LOGIWA_KV_KEY = 'logiwa:inventory:current';
+
+function summariseSyncLog(row) {
+  // status is 'ok' | 'error' | 'rate_limited' | 'partial'.
+  if (row.status === 'rate_limited') return row.error || 'rate-limited by upstream';
+  if (row.status === 'error')        return row.error?.substring(0, 200) || 'error';
+  const ord = row.orders_added || 0;
+  const itm = row.items_added  || 0;
+  if (ord === 0 && itm === 0) return '0 new orders, system healthy';
+  if (itm === 0)              return `+${ord} order${ord === 1 ? '' : 's'}`;
+  return `+${ord} order${ord === 1 ? '' : 's'}, +${itm} item${itm === 1 ? '' : 's'}`;
+}
+
+function summariseReportJob(row) {
+  // report_jobs.status: pending | ready | ingested | failed.
+  if (row.status === 'ingested') {
+    const matched   = row.rows_matched   || 0;
+    const unmatched = row.rows_unmatched || 0;
+    const wrong     = row.rows_wrong_market || 0;
+    const tail = unmatched || wrong
+      ? ` (${unmatched} unmatched, ${wrong} wrong-market)`
+      : '';
+    return `${row.range_label || '?'} ingested · ${matched} rows matched${tail}`;
+  }
+  if (row.status === 'failed') {
+    return `${row.range_label || '?'} failed: ${(row.error || 'unknown').substring(0, 160)}`;
+  }
+  if (row.status === 'ready') {
+    return `${row.range_label || '?'} ready to ingest`;
+  }
+  // pending — surface poll attempts so a stuck job is visible.
+  const attempts = row.attempts || 0;
+  return `${row.range_label || '?'} pending (${attempts} poll${attempts === 1 ? '' : 's'})`;
+}
+
+diagnosticsRoutes.get('/import-log', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'D1 binding DB not configured' }, 500);
+
+  const hours = Math.min(Math.max(parseInt(c.req.query('hours') || '24', 10) || 24, 1), 168);
+  const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '200', 10) || 200, 10), 1000);
+  const sinceMs = Date.now() - hours * 3600 * 1000;
+  const sinceIso = new Date(sinceMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+  // 1. sync_logs (Woo + Amazon Orders cron ticks, manual backfills, reconciles).
+  //    Filter by run_at >= sinceIso. Both string formats (legacy naive +
+  //    ISO-Z) sort lexicographically the same way for the same wall-clock
+  //    instant after ' '↔'T' normalisation, but legacy rows lack the Z and
+  //    sort BEFORE their ISO equivalent — to handle the boundary cleanly we
+  //    just compare using SQL substr(run_at, 1, 19) which strips the trailing
+  //    Z and matches both shapes.
+  const sinceCmp = sinceIso.substring(0, 19); // 'YYYY-MM-DDTHH:MM:SS'
+  const sinceLegacy = sinceCmp.replace('T', ' '); // 'YYYY-MM-DD HH:MM:SS'
+  const syncLogsRes = await c.env.DB.prepare(
+    `SELECT run_at, source, market, action, status, error,
+            orders_added, items_added, duration_ms
+     FROM sync_logs
+     WHERE substr(replace(run_at, 'T', ' '), 1, 19) >= ?
+     ORDER BY run_at DESC
+     LIMIT ?`,
+  ).bind(sinceLegacy, limit).all();
+
+  const rows = [];
+  for (const r of (syncLogsRes.results || [])) {
+    rows.push({
+      when:       toIsoUtc(r.run_at),
+      source:     r.source,
+      market:     r.market || null,
+      action:     r.action || 'sync',
+      status:     r.status || 'ok',
+      summary:    summariseSyncLog(r),
+      durationMs: r.duration_ms || null,
+      scope:      'tick',
+    });
+  }
+
+  // 2. report_jobs (Amazon Reports state machine). One row per job, surfacing
+  //    the most recent updated_at — that's the latest state transition.
+  const reportJobsRes = await c.env.DB.prepare(
+    `SELECT updated_at, market, range_label, status, attempts, error,
+            rows_total, rows_matched, rows_unmatched, rows_wrong_market
+     FROM report_jobs
+     WHERE source = 'amazon'
+       AND substr(replace(updated_at, 'T', ' '), 1, 19) >= ?
+     ORDER BY updated_at DESC
+     LIMIT ?`,
+  ).bind(sinceLegacy, limit).all();
+  for (const r of (reportJobsRes.results || [])) {
+    const status = r.status === 'ingested' ? 'ok'
+                 : r.status === 'failed'   ? 'error'
+                 : r.status === 'ready'    ? 'ok'
+                 : 'pending';
+    rows.push({
+      when:       toIsoUtc(r.updated_at),
+      source:     'amazon-reports',
+      market:     r.market || null,
+      action:     r.status, // pending | ready | ingested | failed — semantic value
+      status,
+      summary:    summariseReportJob(r),
+      durationMs: null,
+      scope:      'job',
+    });
+  }
+
+  // 3. Snapshot rows — KV-backed connectors and Xero. These don't have a
+  //    per-tick history by design, so we surface the "current state" with
+  //    its associated timestamp regardless of the hours window. If the
+  //    timestamp falls outside the window the row is still useful: it's
+  //    proving the connector is alive (or, if missing, that it isn't).
+  const cache = c.env.CACHE;
+  if (cache) {
+    const [fbaCa, fbaUs, sbInv, sbPkg, logiwa] = await Promise.all([
+      cache.get(FBA_INVENTORY_KV_KEY('CA'), 'json'),
+      cache.get(FBA_INVENTORY_KV_KEY('US'), 'json'),
+      cache.get(SALESBINDER_INVENTORY_KV_KEY, 'json'),
+      cache.get(SALESBINDER_PACKAGING_KV_KEY, 'json'),
+      cache.get(LOGIWA_KV_KEY, 'json'),
+    ]);
+    if (fbaCa?.lastSync) {
+      rows.push({
+        when:       toIsoUtc(fbaCa.lastSync),
+        source:     'amazon-fba-inventory',
+        market:     'CA',
+        action:     'snapshot',
+        status:     'ok',
+        summary:    `${fbaCa.count || 0} SKU${(fbaCa.count || 0) === 1 ? '' : 's'} cached`,
+        durationMs: null,
+        scope:      'snapshot',
+      });
+    }
+    if (fbaUs?.lastSync) {
+      rows.push({
+        when:       toIsoUtc(fbaUs.lastSync),
+        source:     'amazon-fba-inventory',
+        market:     'US',
+        action:     'snapshot',
+        status:     'ok',
+        summary:    `${fbaUs.count || 0} SKU${(fbaUs.count || 0) === 1 ? '' : 's'} cached`,
+        durationMs: null,
+        scope:      'snapshot',
+      });
+    }
+    if (sbInv?.lastSync) {
+      rows.push({
+        when:       toIsoUtc(sbInv.lastSync),
+        source:     'salesbinder',
+        market:     null,
+        action:     'snapshot',
+        status:     'ok',
+        summary:    `${sbInv.inventory?.length ?? sbInv.count ?? '?'} inventory rows cached`,
+        durationMs: null,
+        scope:      'snapshot',
+      });
+    }
+    if (sbPkg?.lastSync) {
+      rows.push({
+        when:       toIsoUtc(sbPkg.lastSync),
+        source:     'salesbinder-packaging',
+        market:     null,
+        action:     'snapshot',
+        status:     'ok',
+        summary:    `${sbPkg.items?.length ?? sbPkg.count ?? '?'} packaging rows cached`,
+        durationMs: null,
+        scope:      'snapshot',
+      });
+    }
+    if (logiwa?.uploadedAt || logiwa?.storedAt) {
+      const when = logiwa.uploadedAt || logiwa.storedAt;
+      const fname = logiwa.fileName ? ` (${logiwa.fileName})` : '';
+      rows.push({
+        when:       toIsoUtc(when),
+        source:     'logiwa',
+        market:     null,
+        action:     'upload',
+        status:     'ok',
+        summary:    `${logiwa.count || logiwa.inventory?.length || 0} rows uploaded${fname}`,
+        durationMs: null,
+        scope:      'snapshot',
+      });
+    }
+  }
+
+  // 4. Xero tokens — updated_at on the single-row table is the freshness anchor.
+  try {
+    const xeroRow = await c.env.DB.prepare(
+      `SELECT updated_at, tenant_name FROM xero_tokens WHERE id = 1`,
+    ).first();
+    if (xeroRow?.updated_at) {
+      rows.push({
+        when:       toIsoUtc(xeroRow.updated_at),
+        source:     'xero',
+        market:     null,
+        action:     'token-refresh',
+        status:     'ok',
+        summary:    `tokens stored for ${xeroRow.tenant_name || 'tenant'}`,
+        durationMs: null,
+        scope:      'snapshot',
+      });
+    }
+  } catch { /* xero_tokens table may not exist on a fresh env — skip silently. */ }
+
+  // Sort by timestamp desc, cap to limit. lexicographic sort works because
+  // every `when` field has been normalised to ISO-Z by toIsoUtc above.
+  rows.sort((a, b) => (b.when || '').localeCompare(a.when || ''));
+  const trimmed = rows.slice(0, limit);
+
+  return c.json({
+    generatedAt: new Date().toISOString(),
+    hours,
+    limit,
+    sinceIso,
+    rowCount:    trimmed.length,
+    rows:        trimmed,
   });
 });

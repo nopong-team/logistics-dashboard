@@ -124,6 +124,59 @@
       position: absolute; top: 8px; right: 10px; font-size: 16px; line-height: 1;
       cursor: pointer; color: #9CA3AF; background: none; border: none;
     }
+    /* Activity dropdown — same family as health-badge / health-panel.
+       Shows the import log: every cron tick, manual backfill, KV snapshot
+       upload, Xero token refresh, Amazon Reports state change. The point of
+       the chip is to PROVE the data is fresh — chips above can lie via
+       omission, this one shows the raw activity feed. */
+    .activity-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 10px; border-radius: 16px; cursor: pointer; font-size: 12px;
+      background: #F3F4F6; color: #4B5563; border: 1px solid #E5E7EB;
+      transition: background 0.15s;
+    }
+    .activity-chip:hover { background: #E5E7EB; }
+    .activity-chip-caret { font-size: 9px; opacity: 0.6; }
+    .activity-panel {
+      position: fixed; top: 56px; right: 16px; z-index: 200;
+      background: #fff; border: 1px solid #E5E7EB; border-radius: 8px;
+      padding: 14px 16px; width: 560px; max-width: calc(100vw - 32px);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.12);
+      font-size: 12px; color: var(--text);
+      display: none; max-height: 75vh; overflow: hidden;
+    }
+    .activity-panel.open { display: flex; flex-direction: column; }
+    .activity-panel h3 { margin: 0 0 8px; font-size: 13px; font-weight: 700; }
+    .activity-panel-controls {
+      display: flex; gap: 12px; align-items: center; margin-bottom: 8px;
+      font-size: 11px; color: var(--text-secondary);
+      padding-bottom: 8px; border-bottom: 1px solid #F3F4F6;
+    }
+    .activity-panel-controls label { cursor: pointer; user-select: none; }
+    .activity-panel-controls select {
+      font-size: 11px; padding: 2px 4px; border: 1px solid #E5E7EB;
+      border-radius: 4px; background: #fff;
+    }
+    .activity-panel-list { overflow-y: auto; flex: 1; }
+    .activity-panel-list ul { list-style: none; padding: 0; margin: 0; }
+    .activity-panel-list li {
+      padding: 6px 0; border-bottom: 1px solid #F3F4F6;
+      display: grid; grid-template-columns: 70px 110px 1fr 60px; gap: 8px;
+      align-items: baseline;
+    }
+    .activity-panel-list li:last-child { border-bottom: none; }
+    .activity-panel-list .ev-time   { color: var(--text-secondary); font-size: 10px; white-space: nowrap; }
+    .activity-panel-list .ev-source { font-weight: 600; font-size: 11px; }
+    .activity-panel-list .ev-summary { font-size: 11px; }
+    .activity-panel-list .ev-status { text-align: right; font-size: 10px; }
+    .activity-panel-list .ev-status.ok      { color: #22C55E; }
+    .activity-panel-list .ev-status.error   { color: #DC2626; }
+    .activity-panel-list .ev-status.pending { color: #F59E0B; }
+    .activity-panel-list .ev-status.rate_limited { color: #F59E0B; }
+    .activity-panel-list .ev-status.partial { color: #F59E0B; }
+    .activity-panel-empty {
+      padding: 18px 0; color: var(--text-secondary); font-size: 11px; text-align: center;
+    }
     .prototype-badge {
       background: #EAF3DE; color: #3B6D11; border: 1px solid #C9E2B0;
       font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 12px;
@@ -426,6 +479,10 @@
       <div class="health-badge-dot"></div>
       <span id="healthBadgeText">Checking…</span>
     </div>
+    <div id="activityChip" class="activity-chip" onclick="toggleActivityPanel()" title="Click for activity log: cron ticks, snapshots, report ingests">
+      <span>Activity</span>
+      <span class="activity-chip-caret">▼</span>
+    </div>
     <div class="last-updated">
       <div class="status-dot"></div>
       <span id="lastUpdatedText">Last updated: —</span>
@@ -443,6 +500,28 @@
   <ul id="healthChecksList"></ul>
   <div style="margin-top:10px; padding-top:8px; border-top:1px solid #F3F4F6; font-size:11px; color:var(--text-secondary);">
     Runs automatically after every data refresh. Checks for sum mismatches, duplicate IDs, identical-cache twins, and month-over-month spikes.
+  </div>
+</div>
+
+<!-- Activity / import log panel (toggled by activity chip) -->
+<div id="activityPanel" class="activity-panel">
+  <button class="close-x" onclick="toggleActivityPanel(false)">×</button>
+  <h3>Activity log</h3>
+  <div class="activity-panel-controls">
+    <label>
+      Window:
+      <select id="activityHours" onchange="loadActivityLog()">
+        <option value="24" selected>Last 24h</option>
+        <option value="168">Last 7 days</option>
+      </select>
+    </label>
+    <label>
+      <input type="checkbox" id="activityHideQuiet" onchange="renderActivityLog()"> Hide quiet ticks (0 orders)
+    </label>
+    <span style="margin-left:auto; color:var(--text-secondary);" id="activityStats"></span>
+  </div>
+  <div class="activity-panel-list" id="activityList">
+    <div class="activity-panel-empty">Loading…</div>
   </div>
 </div>
 <div id="sync-status-bar" style="display:none;gap:10px;padding:2px 24px;background:#F9FAFB;border-bottom:1px solid #E5E7EB;flex-wrap:wrap;align-items:center;"></div>
@@ -990,8 +1069,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.24</span> &middot; April 2026
+  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.25</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.25 &mdash; 29 April 2026 (data freshness &amp; activity log)</h4>
+    <ul>
+      <li><strong>Per-source "Last sync" chips now reflect every cron tick</strong>, not just ticks that found new data. <code>runBackfillChunk</code> (Woo) and <code>runAmazonOrdersChunk</code> (Amazon Orders) now update <code>sync_state.last_synced_at</code> on every successful run, with explicit ISO-8601 UTC formatting (<code>strftime('%Y-%m-%dT%H:%M:%SZ', 'now')</code>) so JS <code>new Date()</code> parses as UTC, not as local time on the viewer's machine. Watermark column still tracks "last NEW data" for the cases that need it.</li>
+      <li><strong>Data Health badge no longer stuck on "Checking…"</strong>. Check 7 (daily-data-flow) was throwing <code>RangeError: Invalid time value</code> on <code>monthWindowStart + '-01'</code> because that field is already <code>YYYY-MM-DD</code>; fixed to use it directly. The thrown error was silently aborting the whole <code>runDataHealthChecks</code> function before <code>renderHealthBadge</code> could run.</li>
+      <li><strong>New <code>/api/import-log</code> endpoint &amp; "Activity" dropdown</strong> in the header. Click the chip to see every cron tick (including the quiet ones that found 0 new orders &mdash; those PROVE the cron ran), every Amazon Reports state-machine transition, every Logiwa/SalesBinder/FBA inventory snapshot, and the latest Xero token refresh. Defaults to last 24h, can switch to last 7 days. "Hide quiet ticks" toggle filters out the 0-orders rows once you've confirmed the system is alive. Re-fetches on every panel-open &mdash; the point is to see what's true RIGHT NOW.</li>
+      <li>Diagnostic timestamps surfaced from D1 are now normalised to ISO-Z at read time (<code>toIsoUtc</code> helper in <code>src/diagnostics.js</code>) &mdash; older rows written before this release still display correctly without waiting for an overwrite.</li>
+    </ul>
     <h4>v2.24 &mdash; 29 April 2026 (Logiwa ported)</h4>
     <ul>
       <li>Logiwa connector ported to the Worker. The dashboard's Logiwa upload tile now talks to <code>/api/logiwa/inventory</code> on the Worker instead of the legacy Express server &mdash; same client-side <code>SheetJS</code> parse, same POST shape (<code>{ inventory, uploadedAt, fileName }</code>), no frontend change.</li>
@@ -5261,9 +5347,13 @@ async function runDataHealthChecks() {
     yesterday.setDate(yesterday.getDate() - 1);
     const yStr = yesterday.toISOString().substring(0, 10);
 
-    // Find the start of the window — use the month window start or earliest date, whichever is later
+    // Find the start of the window — use the month window start or earliest date, whichever is later.
+    // monthWindowStart is already YYYY-MM-DD from /api/audit (e.g. "2025-11-01"), so use it directly.
+    // Earlier this code appended "-01" thinking it was YYYY-MM, building an invalid date string
+    // ("2025-11-01-01"), Invalid Date, and a RangeError on the next toISOString call — silently
+    // aborted runDataHealthChecks and left the badge stuck on "Checking…".
     const windowStart = audit.woo[mkt].monthWindowStart
-      ? audit.woo[mkt].monthWindowStart + '-01'
+      ? audit.woo[mkt].monthWindowStart
       : dates[0];
     const startDate = windowStart > dates[0] ? windowStart : dates[0];
 
@@ -5335,6 +5425,12 @@ function toggleHealthPanel(force) {
   if (!panel) return;
   const shouldOpen = force === undefined ? !panel.classList.contains('open') : force;
   panel.classList.toggle('open', shouldOpen);
+  // Mutually exclusive — only one floating panel open at a time. Otherwise the
+  // overlap is ugly because both anchor to the same top-right corner.
+  if (shouldOpen) {
+    const ap = document.getElementById('activityPanel');
+    if (ap) ap.classList.remove('open');
+  }
 }
 // Close panel on outside click
 document.addEventListener('click', (e) => {
@@ -5342,6 +5438,108 @@ document.addEventListener('click', (e) => {
   const badge = document.getElementById('healthBadge');
   if (!panel || !badge) return;
   if (panel.classList.contains('open') && !panel.contains(e.target) && !badge.contains(e.target)) {
+    panel.classList.remove('open');
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+//  ACTIVITY LOG — surfaces /api/import-log so you can see at a
+//  glance whether the cron is actually running and pulling new
+//  data, or whether stale chips above are lying via omission.
+//  Refresh-on-open (no caching). The cached payload feeds both
+//  the initial render and the "hide quiet ticks" toggle without
+//  re-fetching.
+// ════════════════════════════════════════════════════════════
+let __activityRows = [];
+
+function toggleActivityPanel(force) {
+  const panel = document.getElementById('activityPanel');
+  if (!panel) return;
+  const shouldOpen = force === undefined ? !panel.classList.contains('open') : force;
+  panel.classList.toggle('open', shouldOpen);
+  if (shouldOpen) {
+    // Mutually exclusive with the health panel — see toggleHealthPanel.
+    const hp = document.getElementById('healthPanel');
+    if (hp) hp.classList.remove('open');
+    // Always re-fetch on open. The point of this panel is "what's true RIGHT
+    // now" — caching would defeat it. The endpoint is cheap (one indexed D1
+    // query, a handful of KV reads).
+    loadActivityLog();
+  }
+}
+
+async function loadActivityLog() {
+  const list = document.getElementById('activityList');
+  if (!list) return;
+  list.innerHTML = '<div class="activity-panel-empty">Loading…</div>';
+  const hours = parseInt(document.getElementById('activityHours')?.value || '24', 10);
+  try {
+    const r = await fetch(`/api/import-log?hours=${hours}&limit=300`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    __activityRows = data.rows || [];
+    renderActivityLog();
+  } catch (e) {
+    list.innerHTML = `<div class="activity-panel-empty">Failed to load: ${e.message}</div>`;
+  }
+}
+
+function renderActivityLog() {
+  const list = document.getElementById('activityList');
+  const stats = document.getElementById('activityStats');
+  if (!list) return;
+  const hideQuiet = document.getElementById('activityHideQuiet')?.checked === true;
+  // "Quiet" = a sync_logs cron tick row whose summary starts with "0 new orders".
+  // We never hide errors, snapshots, or report-state-machine entries.
+  const filtered = hideQuiet
+    ? __activityRows.filter(r => !(r.scope === 'tick' && r.status === 'ok' && /^0 new orders/.test(r.summary || '')))
+    : __activityRows;
+
+  if (stats) {
+    const total = __activityRows.length;
+    const shown = filtered.length;
+    const errs  = __activityRows.filter(r => r.status === 'error').length;
+    stats.textContent = errs > 0
+      ? `${shown} of ${total} shown · ${errs} error${errs === 1 ? '' : 's'}`
+      : `${shown} of ${total} shown`;
+  }
+
+  if (filtered.length === 0) {
+    list.innerHTML = '<div class="activity-panel-empty">No activity in this window.</div>';
+    return;
+  }
+
+  // Render as a flat list (sorted desc by timestamp from the server). Each row:
+  // [ time-ago | source · market | summary | status ].
+  const ul = document.createElement('ul');
+  for (const row of filtered) {
+    const li = document.createElement('li');
+    const sourceLabel = row.market ? `${row.source} ${row.market}` : row.source;
+    const statusCls = row.status || 'ok';
+    li.innerHTML = `
+      <span class="ev-time" title="${escapeHtml(row.when || '')}">${escapeHtml(timeAgo(row.when))}</span>
+      <span class="ev-source">${escapeHtml(sourceLabel)}</span>
+      <span class="ev-summary">${escapeHtml(row.summary || row.action || '')}</span>
+      <span class="ev-status ${escapeHtml(statusCls)}">${escapeHtml(statusCls)}</span>
+    `;
+    ul.appendChild(li);
+  }
+  list.innerHTML = '';
+  list.appendChild(ul);
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Close activity panel on outside click — same pattern as health panel.
+document.addEventListener('click', (e) => {
+  const panel = document.getElementById('activityPanel');
+  const chip  = document.getElementById('activityChip');
+  if (!panel || !chip) return;
+  if (panel.classList.contains('open') && !panel.contains(e.target) && !chip.contains(e.target)) {
     panel.classList.remove('open');
   }
 });

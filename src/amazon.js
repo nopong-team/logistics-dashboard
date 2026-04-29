@@ -38,6 +38,7 @@ import {
   buildMonthWindow, getWeekKey, toBusinessLocalDate, easternIsoMidnight, getBusinessToday,
 } from './timezone.js';
 import { redactSecrets } from './redact.js';
+import { toIsoUtc } from './diagnostics.js';
 
 export const amazonRoutes = new Hono();
 
@@ -358,9 +359,9 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
       const retryAfter = e.retryAfter || 30;
       await env.DB.prepare(
         `INSERT INTO sync_logs
-           (source, market, action, pages_fetched, orders_added, items_added,
+           (run_at, source, market, action, pages_fetched, orders_added, items_added,
             watermark_before, watermark_after, status, error, duration_ms)
-         VALUES ('amazon', ?, ?, 0, 0, 0, ?, ?, 'rate_limited', ?, ?)`,
+         VALUES (strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'amazon', ?, ?, 0, 0, 0, ?, ?, 'rate_limited', ?, ?)`,
       ).bind(
         market, action, watermarkBefore, watermarkBefore,
         `Amazon rate limited; retry after ${retryAfter}s`, Date.now() - startMs,
@@ -409,7 +410,7 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
         env.DB.prepare(
           `INSERT OR REPLACE INTO amazon_orders
              (id, market, status, purchase_date, local_date, total, currency, marketplace_id, raw_json, synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, strftime('%Y-%m-%dT%H:%M:%SZ','now'))`,
         ).bind(
           o.AmazonOrderId,
           market,
@@ -429,19 +430,29 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
     for (let i = 0; i < stmts.length; i += CHUNK) {
       await env.DB.batch(stmts.slice(i, i + CHUNK));
     }
-    if (watermarkAfter > watermarkBefore) {
-      await env.DB.prepare(
-        `UPDATE sync_state SET watermark = ?, last_synced_at = datetime('now')
-         WHERE source = 'amazon' AND market = ?`,
-      ).bind(watermarkAfter, market).run();
-    }
   }
+
+  // Heartbeat: always update last_synced_at on a successful run, even if no
+  // new orders came back. Same rationale as runBackfillChunk in src/admin.js
+  // — the chip on the dashboard reads this field to answer "when did we
+  // last hear from this source", which is a different question from "when
+  // did we last persist a NEW order" (the watermark column answers that).
+  // Previously this UPDATE was gated on usable.length>0 AND watermarkAfter>
+  // watermarkBefore, so a tick with zero new orders left the timestamp stale
+  // and the chip showed e.g. "9h ago" while the cron was actually firing
+  // every 15 min. ISO-8601 with explicit Z so JS new Date() parses as UTC,
+  // not as local time on the viewer's machine.
+  await env.DB.prepare(
+    `UPDATE sync_state
+     SET watermark = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+     WHERE source = 'amazon' AND market = ?`,
+  ).bind(watermarkAfter, market).run();
 
   await env.DB.prepare(
     `INSERT INTO sync_logs
-       (source, market, action, pages_fetched, orders_added, items_added,
+       (run_at, source, market, action, pages_fetched, orders_added, items_added,
         watermark_before, watermark_after, status, duration_ms)
-     VALUES ('amazon', ?, ?, 1, ?, 0, ?, ?, 'ok', ?)`,
+     VALUES (strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'amazon', ?, ?, 1, ?, 0, ?, ?, 'ok', ?)`,
   ).bind(
     market, action, ordersAdded, watermarkBefore, watermarkAfter, Date.now() - startMs,
   ).run();
@@ -508,7 +519,7 @@ async function seedReportJobsIfNeeded(env, market) {
   let seeded = 0;
   for (const r of ranges) {
     // Most recent job for this (market, range_label). Age computed in SQL —
-    // SQLite's datetime('now') format ('YYYY-MM-DD HH:MM:SS' UTC) doesn't
+    // SQLite's strftime('%Y-%m-%dT%H:%M:%SZ','now') format ('YYYY-MM-DD HH:MM:SS' UTC) doesn't
     // round-trip cleanly through JS Date, but julianday() handles it natively.
     const last = await env.DB.prepare(
       `SELECT status, (julianday('now') - julianday(updated_at)) * 24.0 AS age_hours
@@ -560,7 +571,7 @@ async function postNewReportJobs(env, market, deadlineMs) {
       await env.DB.prepare(
         `UPDATE report_jobs
            SET amazon_report_id = ?, attempts = 1,
-               last_polled_at = datetime('now'), updated_at = datetime('now')
+               last_polled_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
          WHERE id = ?`,
       ).bind(create.reportId || null, job.id).run();
       posted++;
@@ -575,7 +586,7 @@ async function postNewReportJobs(env, market, deadlineMs) {
       await env.DB.prepare(
         `UPDATE report_jobs
            SET error = ?, attempts = attempts + 1,
-               last_polled_at = datetime('now'), updated_at = datetime('now')
+               last_polled_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
          WHERE id = ?`,
       ).bind(msg, job.id).run();
       if (e?.rateLimited) break; // bail this phase, retry next tick
@@ -613,7 +624,7 @@ async function pollExistingReportJobs(env, market, maxJobs, deadlineMs) {
         await env.DB.prepare(
           `UPDATE report_jobs
              SET status = 'ready', document_id = ?, attempts = attempts + 1,
-                 last_polled_at = datetime('now'), updated_at = datetime('now')
+                 last_polled_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
            WHERE id = ?`,
         ).bind(status.reportDocumentId || null, job.id).run();
         advanced++;
@@ -623,14 +634,14 @@ async function pollExistingReportJobs(env, market, maxJobs, deadlineMs) {
           await env.DB.prepare(
             `UPDATE report_jobs
                SET report_type = ?, amazon_report_id = NULL, attempts = 0,
-                   last_polled_at = datetime('now'), updated_at = datetime('now')
+                   last_polled_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
              WHERE id = ?`,
           ).bind(REPORT_TYPE_FALLBACK, job.id).run();
         } else {
           await env.DB.prepare(
             `UPDATE report_jobs
                SET status = 'failed', error = ?, attempts = attempts + 1,
-                   last_polled_at = datetime('now'), updated_at = datetime('now')
+                   last_polled_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
              WHERE id = ?`,
           ).bind(`Amazon returned ${ps} on both report types`, job.id).run();
         }
@@ -642,13 +653,13 @@ async function pollExistingReportJobs(env, market, maxJobs, deadlineMs) {
           await env.DB.prepare(
             `UPDATE report_jobs
                SET status = 'failed', error = ?, attempts = ?,
-                   last_polled_at = datetime('now'), updated_at = datetime('now')
+                   last_polled_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
              WHERE id = ?`,
           ).bind(`Stuck in ${ps} after ${newAttempts} polls`, newAttempts, job.id).run();
         } else {
           await env.DB.prepare(
             `UPDATE report_jobs
-               SET attempts = ?, last_polled_at = datetime('now'), updated_at = datetime('now')
+               SET attempts = ?, last_polled_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
              WHERE id = ?`,
           ).bind(newAttempts, job.id).run();
         }
@@ -658,7 +669,7 @@ async function pollExistingReportJobs(env, market, maxJobs, deadlineMs) {
       // Record the error on the job but leave pending so the next tick retries.
       await env.DB.prepare(
         `UPDATE report_jobs
-           SET error = ?, attempts = attempts + 1, last_polled_at = datetime('now'), updated_at = datetime('now')
+           SET error = ?, attempts = attempts + 1, last_polled_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
          WHERE id = ?`,
       ).bind(redactSecrets(e?.message || String(e)).substring(0, 500), job.id).run();
     }
@@ -705,7 +716,7 @@ async function ingestReadyJobs(env, market, maxJobs, deadlineMs) {
         `UPDATE report_jobs
            SET status = 'ingested', rows_total = ?, rows_matched = ?, rows_unmatched = ?,
                rows_wrong_market = ?, filter_signal = ?, error = NULL,
-               updated_at = datetime('now')
+               updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
          WHERE id = ?`,
       ).bind(
         parsed.totalRows, parsed.matchedCount, parsed.unmatchedCount,
@@ -718,7 +729,7 @@ async function ingestReadyJobs(env, market, maxJobs, deadlineMs) {
       if (e?.rateLimited) break;
       await env.DB.prepare(
         `UPDATE report_jobs
-           SET status = 'failed', error = ?, updated_at = datetime('now')
+           SET status = 'failed', error = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
          WHERE id = ?`,
       ).bind(redactSecrets(e?.message || String(e)).substring(0, 500), job.id).run();
     }
@@ -990,7 +1001,7 @@ async function handleAmazonSalesRequest(c) {
     windowStart:        startDate,
     ordersInWindow,
     watermark:          syncStateRes?.watermark || null,
-    lastSync:           syncStateRes?.last_synced_at || new Date().toISOString(),
+    lastSync:           toIsoUtc(syncStateRes?.last_synced_at) || new Date().toISOString(),
     reportJobsByStatus,
     rowsMatched:        unmatchedRes?.matched || 0,
     rowsUnmatched:      unmatchedRes?.unmatched || 0,

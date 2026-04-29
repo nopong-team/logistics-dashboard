@@ -94,7 +94,7 @@ async function saveTokenRow(env, { accessToken, refreshToken, expiresAt, tenantI
   await env.DB.prepare(
     `INSERT OR REPLACE INTO xero_tokens
        (id, access_token, refresh_token, expires_at, tenant_id, tenant_name, scope, updated_at)
-     VALUES (1, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+     VALUES (1, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))`,
   ).bind(accessToken, refreshToken, expiresAt, tenantId, tenantName, scope).run();
 }
 

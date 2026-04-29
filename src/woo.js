@@ -17,6 +17,7 @@
 
 import { Hono } from 'hono';
 import { buildMonthWindow, getWeekKey } from './timezone.js';
+import { toIsoUtc } from './diagnostics.js';
 
 export const wooRoutes = new Hono();
 
@@ -169,7 +170,7 @@ wooRoutes.get('/sales', async (c) => {
     windowStart: startDate,
     ordersInWindow,
     watermark: syncStateRes?.watermark || null,
-    lastSync:  syncStateRes?.last_synced_at || new Date().toISOString(),
+    lastSync:  toIsoUtc(syncStateRes?.last_synced_at) || new Date().toISOString(),
   };
 
   if (c.env.CACHE) {

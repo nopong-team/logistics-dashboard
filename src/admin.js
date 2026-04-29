@@ -185,7 +185,7 @@ export async function runBackfillChunk(env, market, pages, action = 'backfill') 
         env.DB.prepare(
           `INSERT OR REPLACE INTO orders
              (id, market, number, status, date_created, local_date, total, currency, raw_json, synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, strftime('%Y-%m-%dT%H:%M:%SZ','now'))`,
         ).bind(
           o.id,
           market,
@@ -232,23 +232,37 @@ export async function runBackfillChunk(env, market, pages, action = 'backfill') 
       const d = o.date_created || '';
       return d > max ? d : max;
     }, watermarkBefore);
-
-    await env.DB.prepare(
-      `UPDATE sync_state SET watermark = ?, last_synced_at = datetime('now')
-       WHERE source = 'woo' AND market = ?`,
-    ).bind(watermarkAfter, market).run();
   }
+
+  // Heartbeat: always update last_synced_at on a successful run, even if no
+  // new orders came back. The chip on the dashboard reads this field to answer
+  // "when did we last hear from this source", which is a different question
+  // from "when did we last persist a NEW order" (the `watermark` column
+  // answers that). Previously this UPDATE was inside the `if (orders.length > 0)`
+  // block, so a cron tick with zero new orders left the timestamp stale and
+  // the chip showed e.g. "13h ago" while the cron was actually firing every
+  // 15 min. ISO-8601 with explicit Z is critical — a naive 'YYYY-MM-DD HH:MM:SS'
+  // string is parsed as LOCAL time by JS `new Date()`, which produced a
+  // ~9-hour false stale on Chris's UTC+9 machine.
+  await env.DB.prepare(
+    `UPDATE sync_state
+     SET watermark = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+     WHERE source = 'woo' AND market = ?`,
+  ).bind(watermarkAfter, market).run();
 
   // Are there more orders past where we just got? Use the last page's
   // totalPages header — if pagesFetched < totalPages, more data exists.
   const more = (woo && pagesFetched < woo.totalPages) || (orders.length === pages * PER_PAGE);
 
-  // Log the run.
+  // Log the run. run_at is written explicitly as ISO-8601 with Z so the import
+  // log endpoint (and any other read) can parse it directly without timezone
+  // tricks — schema default for run_at is `datetime('now')` which produces a
+  // naive 'YYYY-MM-DD HH:MM:SS' string that JS new Date() parses as LOCAL time.
   await env.DB.prepare(
     `INSERT INTO sync_logs
-       (source, market, action, pages_fetched, orders_added, items_added,
+       (run_at, source, market, action, pages_fetched, orders_added, items_added,
         watermark_before, watermark_after, status, duration_ms)
-     VALUES ('woo', ?, ?, ?, ?, ?, ?, ?, 'ok', ?)`,
+     VALUES (strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'woo', ?, ?, ?, ?, ?, ?, ?, 'ok', ?)`,
   ).bind(
     market, action, pagesFetched, orders.length, itemsAdded,
     watermarkBefore, watermarkAfter, Date.now() - startMs,
