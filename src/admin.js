@@ -31,7 +31,7 @@
 
 import { Hono } from 'hono';
 import { redactSecrets } from './redact.js';
-import { runAmazonOrdersChunk, runAmazonReportsTick } from './amazon.js';
+import { runAmazonOrdersChunk, runAmazonReportsTick, spApiRequest } from './amazon.js';
 
 export const adminRoutes = new Hono();
 
@@ -301,6 +301,60 @@ adminRoutes.post('/backfill', async (c) => {
   }
   const result = await runBackfillChunk(c.env, market, pages, 'backfill');
   return c.json(result);
+});
+
+// ─── Debug: dump Amazon report TSV headers + sample rows ───────────────────
+//
+// GET /api/admin/amazon/debug-report?id=N  — fetches the document for the
+// given report_jobs row, downloads it (gunzip if needed), and returns the
+// raw + normalized header names plus the first 3 data rows. Used to diagnose
+// parser/column-name mismatches when an ingest produces unexpected nulls.
+//
+// Document URLs from /reports/2021-06-30/documents/{id} are presigned for ~5
+// minutes — we fetch a fresh one on every call, so the underlying document
+// remains fetchable for the full 14-day Amazon retention window.
+adminRoutes.get('/amazon/debug-report', async (c) => {
+  const jobId = parseInt(c.req.query('id') || '0', 10);
+  if (!jobId) return c.json({ error: 'missing ?id=<report_job_id>' }, 400);
+  const job = await c.env.DB.prepare(
+    `SELECT id, market, report_type, range_label, status, document_id FROM report_jobs WHERE id = ?`,
+  ).bind(jobId).first();
+  if (!job) return c.json({ error: `job ${jobId} not found` }, 404);
+  if (!job.document_id) return c.json({ error: 'job has no document_id', job }, 400);
+
+  try {
+    const doc = await spApiRequest(c.env, job.market, `/reports/2021-06-30/documents/${job.document_id}`);
+    const r = await fetch(doc.url);
+    if (!r.ok) return c.json({ error: `document download HTTP ${r.status}` }, 500);
+    let stream = r.body;
+    if (doc.compressionAlgorithm === 'GZIP') {
+      stream = stream.pipeThrough(new DecompressionStream('gzip'));
+    }
+    const text = await new Response(stream).text();
+    const lines = text.split('\n').filter((l) => l.trim()).slice(0, 4);
+    if (lines.length === 0) return c.json({ error: 'empty document' });
+    const rawHeaders = lines[0].split('\t');
+    const normalizedHeaders = rawHeaders.map((h) => h.trim().toLowerCase().replace(/[- ]/g, '_'));
+    const sampleRows = lines.slice(1).map((l) => {
+      const cols = l.split('\t');
+      return Object.fromEntries(normalizedHeaders.map((h, i) => [h, cols[i] || '']));
+    });
+    return c.json({
+      jobId,
+      reportType: job.report_type,
+      rangeLabel: job.range_label,
+      status:     job.status,
+      market:     job.market,
+      compressionAlgorithm: doc.compressionAlgorithm || 'none',
+      headerCount: rawHeaders.length,
+      rawHeaders,
+      normalizedHeaders,
+      firstByteHex: text.length > 0 ? text.charCodeAt(0).toString(16) : 'empty',  // catches BOM (0xfeff) issues
+      sampleRows,
+    });
+  } catch (e) {
+    return c.json({ error: redactSecrets(e?.message || String(e)) }, 500);
+  }
 });
 
 // ─── Reconcile ──────────────────────────────────────────────────────────────
