@@ -523,6 +523,7 @@ async function postNewReportJobs(env, market, deadlineMs) {
      ORDER BY id ASC`,
   ).bind(market).all();
   let posted = 0;
+  let lastError = null;
   for (const job of (jobs.results || [])) {
     if (Date.now() > deadlineMs) break;
     try {
@@ -540,16 +541,23 @@ async function postNewReportJobs(env, market, deadlineMs) {
       ).bind(create.reportId || null, job.id).run();
       posted++;
     } catch (e) {
-      if (e?.rateLimited) break; // bail this phase, retry next tick
+      // ALWAYS log the error to the DB before deciding whether to break, so
+      // diagnostics can see what Amazon actually returned (was previously
+      // invisible: rate-limited break exited without recording the message).
+      const msg = e?.rateLimited
+        ? `RATE_LIMITED retryAfter=${e.retryAfter || '?'}`
+        : redactSecrets(e?.message || String(e)).substring(0, 500);
+      lastError = msg;
       await env.DB.prepare(
         `UPDATE report_jobs
            SET error = ?, attempts = attempts + 1,
                last_polled_at = datetime('now'), updated_at = datetime('now')
          WHERE id = ?`,
-      ).bind(redactSecrets(e?.message || String(e)).substring(0, 500), job.id).run();
+      ).bind(msg, job.id).run();
+      if (e?.rateLimited) break; // bail this phase, retry next tick
     }
   }
-  return posted;
+  return { posted, lastError };
 }
 
 // Phase B1 — poll up to maxJobs already-POSTed pending jobs for status.
@@ -805,10 +813,13 @@ export async function runAmazonReportsTick(env, market, options = {}) {
   const maxJobs    = options.maxJobsPerPhase || 3;
 
   let seeded = 0, posted = 0, polled = 0, ingested = 0;
+  let postError = null;
   try {
     seeded = await seedReportJobsIfNeeded(env, market);
     if (Date.now() < deadlineMs) {
-      posted = await postNewReportJobs(env, market, deadlineMs);
+      const r = await postNewReportJobs(env, market, deadlineMs);
+      posted = r.posted;
+      postError = r.lastError;
     }
     if (Date.now() < deadlineMs) {
       polled = await pollExistingReportJobs(env, market, maxJobs, deadlineMs);
@@ -820,7 +831,7 @@ export async function runAmazonReportsTick(env, market, options = {}) {
     // Don't blow the whole cron — log and return a partial result.
     console.error(`Amazon reports tick ${market} error:`, redactSecrets(e?.message || e));
   }
-  return { market, seeded, posted, polled, ingested, durationMs: Date.now() - startMs };
+  return { market, seeded, posted, polled, ingested, postError, durationMs: Date.now() - startMs };
 }
 
 // ─── Sales read endpoint (D1-backed, KV-cached) ────────────────────────────
