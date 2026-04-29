@@ -81,30 +81,32 @@ async function wooFetch(store, endpoint, params) {
 // ─── Backfill ───────────────────────────────────────────────────────────────
 
 const PER_PAGE = 100;
-const DEFAULT_PAGES_PER_CALL = 10;
+// pages=1 is the safe ceiling on Workers Free — see memory
+// `woo_backfill_chunk_size.md` and STATUS.md "Free vs Paid Workers". Higher
+// chunk sizes hit CPU limits and silently truncate the response.
+const DEFAULT_PAGES_PER_CALL = 1;
 const MAX_PAGES_PER_CALL = 20; // protective cap so one call can't run forever
 
-adminRoutes.post('/backfill', async (c) => {
+/**
+ * Run one Woo→D1 backfill chunk.
+ *
+ * Shared by the admin route handler and the cron scheduled handler. Caller is
+ * responsible for upstream validation (market is CA/US, store has secrets,
+ * env.DB is bound, action label) — this function assumes those checks have
+ * already passed and just does the work.
+ *
+ * Action label: 'backfill' (manual curl-loop) | 'incremental' (cron tick).
+ * The label is stamped into sync_logs so we can tell them apart in audit.
+ */
+export async function runBackfillChunk(env, market, pages, action = 'backfill') {
   const startMs = Date.now();
-  const market = (c.req.query('market') || '').toUpperCase();
-  const pages = Math.min(parseInt(c.req.query('pages') || String(DEFAULT_PAGES_PER_CALL), 10) || DEFAULT_PAGES_PER_CALL, MAX_PAGES_PER_CALL);
-
-  if (!market || !['CA', 'US'].includes(market)) {
-    return c.json({ error: 'market must be CA or US' }, 400);
-  }
-  const store = storeFromEnv(c.env, market);
-  if (!store?.url || !store?.key || !store?.secret) {
-    return c.json({ error: `WooCommerce ${market} not configured` }, 401);
-  }
-  if (!c.env.DB) {
-    return c.json({ error: 'D1 binding DB not configured' }, 500);
-  }
+  const store = storeFromEnv(env, market);
 
   // Get current watermark, ensuring a sync_state row exists.
-  await c.env.DB.prepare(
+  await env.DB.prepare(
     `INSERT OR IGNORE INTO sync_state (source, market) VALUES ('woo', ?)`,
   ).bind(market).run();
-  const stateRow = await c.env.DB.prepare(
+  const stateRow = await env.DB.prepare(
     `SELECT watermark FROM sync_state WHERE source = 'woo' AND market = ?`,
   ).bind(market).first();
   const watermarkBefore = stateRow?.watermark || '1970-01-01T00:00:00';
@@ -148,7 +150,7 @@ adminRoutes.post('/backfill', async (c) => {
       // for ~500 orders/chunk eats 1.5–3s of pure CPU and we don't read
       // raw_json anywhere yet. Add back later if ever needed.
       stmts.push(
-        c.env.DB.prepare(
+        env.DB.prepare(
           `INSERT OR REPLACE INTO orders
              (id, market, number, status, date_created, total, currency, raw_json, synced_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))`,
@@ -163,12 +165,12 @@ adminRoutes.post('/backfill', async (c) => {
         ),
       );
       stmts.push(
-        c.env.DB.prepare(`DELETE FROM order_items WHERE order_id = ?`).bind(o.id),
+        env.DB.prepare(`DELETE FROM order_items WHERE order_id = ?`).bind(o.id),
       );
       for (const item of (o.line_items || [])) {
         itemsAdded++;
         stmts.push(
-          c.env.DB.prepare(
+          env.DB.prepare(
             `INSERT INTO order_items
                (order_id, market, sku, name, quantity, total, date_created)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -188,7 +190,7 @@ adminRoutes.post('/backfill', async (c) => {
     // Chunk if we get above ~500 statements to stay polite under the limit.
     const CHUNK = 500;
     for (let i = 0; i < stmts.length; i += CHUNK) {
-      await c.env.DB.batch(stmts.slice(i, i + CHUNK));
+      await env.DB.batch(stmts.slice(i, i + CHUNK));
     }
 
     // Advance watermark to the LATEST date_created we just wrote.
@@ -197,7 +199,7 @@ adminRoutes.post('/backfill', async (c) => {
       return d > max ? d : max;
     }, watermarkBefore);
 
-    await c.env.DB.prepare(
+    await env.DB.prepare(
       `UPDATE sync_state SET watermark = ?, last_synced_at = datetime('now')
        WHERE source = 'woo' AND market = ?`,
     ).bind(watermarkAfter, market).run();
@@ -208,19 +210,20 @@ adminRoutes.post('/backfill', async (c) => {
   const more = (woo && pagesFetched < woo.totalPages) || (orders.length === pages * PER_PAGE);
 
   // Log the run.
-  await c.env.DB.prepare(
+  await env.DB.prepare(
     `INSERT INTO sync_logs
        (source, market, action, pages_fetched, orders_added, items_added,
         watermark_before, watermark_after, status, duration_ms)
-     VALUES ('woo', ?, 'backfill', ?, ?, ?, ?, ?, 'ok', ?)`,
+     VALUES ('woo', ?, ?, ?, ?, ?, ?, ?, 'ok', ?)`,
   ).bind(
-    market, pagesFetched, orders.length, itemsAdded,
+    market, action, pagesFetched, orders.length, itemsAdded,
     watermarkBefore, watermarkAfter, Date.now() - startMs,
   ).run();
 
-  return c.json({
+  return {
     ok: true,
     market,
+    action,
     pagesFetched,
     ordersAdded: orders.length,
     itemsAdded,
@@ -228,7 +231,26 @@ adminRoutes.post('/backfill', async (c) => {
     watermarkAfter,
     more,
     durationMs: Date.now() - startMs,
-  });
+  };
+}
+
+adminRoutes.post('/backfill', async (c) => {
+  const market = (c.req.query('market') || '').toUpperCase();
+  const pages = Math.min(parseInt(c.req.query('pages') || String(DEFAULT_PAGES_PER_CALL), 10) || DEFAULT_PAGES_PER_CALL, MAX_PAGES_PER_CALL);
+
+  if (!market || !['CA', 'US'].includes(market)) {
+    return c.json({ error: 'market must be CA or US' }, 400);
+  }
+  const store = storeFromEnv(c.env, market);
+  if (!store?.url || !store?.key || !store?.secret) {
+    return c.json({ error: `WooCommerce ${market} not configured` }, 401);
+  }
+  if (!c.env.DB) {
+    return c.json({ error: 'D1 binding DB not configured' }, 500);
+  }
+
+  const result = await runBackfillChunk(c.env, market, pages, 'backfill');
+  return c.json(result);
 });
 
 // ─── Reconcile ──────────────────────────────────────────────────────────────

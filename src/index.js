@@ -11,8 +11,8 @@
  */
 
 import { Hono } from 'hono';
-import { wooRoutes } from './woo.js';
-import { adminRoutes } from './admin.js';
+import { wooRoutes, invalidateWooSalesCache } from './woo.js';
+import { adminRoutes, runBackfillChunk } from './admin.js';
 
 const app = new Hono();
 
@@ -55,4 +55,58 @@ app.onError((err, c) => {
   return c.json({ error: 'internal error', detail: err.message }, 500);
 });
 
-export default app;
+// ─── Cron incremental sync ─────────────────────────────────────────────────
+//
+// `triggers.crons` in wrangler.jsonc fires this every 15 minutes. For each
+// configured Woo market we pull one chunk (pages=1, ≤100 orders) since the
+// watermark, write any new orders, advance the watermark, and invalidate the
+// /api/woo/sales KV cache key for that market so the next dashboard load
+// re-aggregates from D1 with the fresh rows.
+//
+// Markets without configured secrets are silently skipped — once US secrets
+// are set with `wrangler secret put WOO_US_*` the cron picks it up on the
+// next tick. No code change needed at that boundary.
+//
+// One chunk per tick is intentional: pages=1 every 15 min is 400 orders/hour
+// of headroom, comfortably above CA's ~70 orders/day. If the cron is offline
+// for a stretch and a backlog forms, it self-heals over a few subsequent ticks.
+async function runCronSync(env) {
+  if (!env.DB) {
+    console.log('cron sync skipped: DB binding not configured');
+    return;
+  }
+  const markets = [];
+  if (env.WOO_CA_URL && env.WOO_CA_KEY && env.WOO_CA_SECRET) markets.push('CA');
+  if (env.WOO_US_URL && env.WOO_US_KEY && env.WOO_US_SECRET) markets.push('US');
+  if (markets.length === 0) {
+    console.log('cron sync skipped: no Woo markets configured');
+    return;
+  }
+
+  for (const market of markets) {
+    try {
+      const result = await runBackfillChunk(env, market, 1, 'incremental');
+      if (result.ordersAdded > 0) {
+        await invalidateWooSalesCache(env, market);
+        console.log(
+          `cron sync ${market}: +${result.ordersAdded} orders, +${result.itemsAdded} items, ` +
+          `watermark ${result.watermarkBefore} → ${result.watermarkAfter} (${result.durationMs}ms)`,
+        );
+      } else {
+        console.log(`cron sync ${market}: caught up (${result.durationMs}ms)`);
+      }
+    } catch (e) {
+      // Keep going for the next market — one bad store shouldn't kill the whole run.
+      console.error(`cron sync ${market} failed:`, e?.message || e);
+    }
+  }
+}
+
+export default {
+  fetch: app.fetch,
+  async scheduled(event, env, ctx) {
+    // ctx.waitUntil keeps the work alive past the synchronous return so the
+    // platform can manage handler lifetime cleanly.
+    ctx.waitUntil(runCronSync(env));
+  },
+};

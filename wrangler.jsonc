@@ -43,7 +43,15 @@
 			"database_id": "34e869b7-670f-49bb-aadc-9356d2856f55",
 			"remote": true
 		}
-	]
+	],
+	// Cron triggers. Every 15 minutes the scheduled handler in src/index.js
+	// runs one Woo→D1 incremental sync chunk per configured market and
+	// invalidates the corresponding /api/woo/sales KV cache key.
+	// Cloudflare cron is supported on Workers Free; pages=1 chunks stay well
+	// inside the platform CPU budget for scheduled handlers.
+	"triggers": {
+		"crons": ["*/15 * * * *"]
+	}
 	// ──────────────────────────────────────────────────────────────────────────
 	// Still pending (NOT in this file):
 	//   • Secrets — set with `wrangler secret put NAME` (Cloudflare-side, never in git):
