@@ -13,6 +13,7 @@
 import { Hono } from 'hono';
 import { wooRoutes, invalidateWooSalesCache } from './woo.js';
 import { adminRoutes, runBackfillChunk } from './admin.js';
+import { salesBinderRoutes } from './salesbinder.js';
 
 const app = new Hono();
 
@@ -29,22 +30,26 @@ app.get('/api/status', (c) => {
   const env = c.env;
   const wooCA = !!(env.WOO_CA_URL && env.WOO_CA_KEY && env.WOO_CA_SECRET);
   const wooUS = !!(env.WOO_US_URL && env.WOO_US_KEY && env.WOO_US_SECRET);
+  const salesBinder = !!(env.SALESBINDER_SUBDOMAIN && env.SALESBINDER_API_KEY);
   return c.json({
     xero:        { connected: false, live: false, cached: false, org: null },
     amazon:      { connected: false },
     wooCA:       { connected: wooCA },
     wooUS:       { connected: wooUS },
     logiwa:      { connected: false, source: 'csv-upload' },
-    salesBinder: { connected: false, cached: false },
+    salesBinder: { connected: salesBinder, cached: false },
   });
 });
 
-// WooCommerce routes (Step 4: /api/woo/sales as a 30-day live fetch with KV cache).
+// WooCommerce routes (Step 5b: /api/woo/sales reads from D1, cron-refreshed).
 app.route('/api/woo', wooRoutes);
 
 // Admin routes (Step 5: historical backfill into D1, reconciliation against Woo).
 // All routes here require an X-Admin-Key header matching env.ADMIN_KEY.
 app.route('/api/admin', adminRoutes);
+
+// SalesBinder routes (Step 5c.2: inventory + packaging snapshots, KV-cached).
+app.route('/api/salesbinder', salesBinderRoutes);
 
 // Catch-all 404 for unknown /api/* paths and any non-asset path.
 app.notFound((c) => c.json({ error: 'not found', path: c.req.path }, 404));

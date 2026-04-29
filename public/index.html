@@ -990,8 +990,14 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.13</span> &middot; April 2026
+  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.14</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.14 &mdash; 29 April 2026</h4>
+    <ul>
+      <li>SalesBinder ported to the Worker — <code>/api/salesbinder/inventory</code> (finished-goods SOH for the discrepancy check) and <code>/api/salesbinder/packaging</code> (tin runway + blank-pool flags) now serve from KV-cached snapshots, with <code>?refresh=true</code> to force a re-fetch. Fall-through to cached data when SalesBinder is unreachable.</li>
+      <li>Packaging overrides (excluded SKUs, leBlank flags, retired-SKU re-purposing) baked into the Worker code — edit <code>src/salesbinder.js</code> + redeploy when they change. Frontend still derives <code>committedToPetra</code> from in-transit Petra POs.</li>
+      <li><code>/api/status</code> auto-flips <code>salesBinder.connected: true</code> when both <code>SALESBINDER_SUBDOMAIN</code> and <code>SALESBINDER_API_KEY</code> secrets are set.</li>
+    </ul>
     <h4>v2.13 &mdash; 29 April 2026 (security fix)</h4>
     <ul>
       <li>Sanitize error responses &mdash; <code>wooFetch</code> now catches malformed-URL and unreachable-host fetch failures and emits redacted error messages (no <code>consumer_key</code>/<code>consumer_secret</code> in the response body). Global <code>onError</code> handler also scrubs credential-shaped query params from any <code>err.message</code> before returning. Caught when a paste typo on <code>WOO_US_URL</code> dropped the leading <code>h</code> in <code>https</code> and the ensuing fetch error leaked the Woo US API key &amp; secret into a 500 response (rotated).</li>
