@@ -1,19 +1,14 @@
 /**
  * WooCommerce routes for the Logistics Dashboard.
  *
- * Step 5b (current): /api/woo/sales reads from D1. Two queries (per-month and
- * per-SKU per-day) run in parallel; the per-day rows are folded in JS to
- * compute weeklyQty using the existing month-boundary-aware getWeekKey()
- * helper. Payload shape is identical to Step 4's live-fetch version.
+ * /api/woo/sales reads from D1, KV-cached for SALES_TTL_SECONDS. Two queries
+ * (per-month and per-SKU per-day) run in parallel; the per-day rows are
+ * folded in JS to compute weeklyQty using the timezone helper's getWeekKey()
+ * (Mon–Sun with month-boundary splits, against WEEKLY_START_DATE).
  *
- * The aggregated response is cached in KV for SALES_TTL_SECONDS so a busy
- * dashboard doesn't re-aggregate from D1 on every page load. The cron sync
- * (src/index.js scheduled handler) invalidates this key after writing new
- * orders.
- *
- * Secrets used by other routes (kept here for grep-discoverability):
- *   WOO_CA_URL, WOO_CA_KEY, WOO_CA_SECRET
- *   WOO_US_URL, WOO_US_KEY, WOO_US_SECRET
+ * All bucketing happens on the precomputed `local_date` column (Eastern,
+ * canonical, populated at insert time). See src/timezone.js for the rationale
+ * and per-source ingestion semantics.
  *
  * Bindings (in wrangler.jsonc):
  *   CACHE — KV namespace used as a read-through response cache.
@@ -21,70 +16,21 @@
  */
 
 import { Hono } from 'hono';
+import { buildMonthWindow, getWeekKey } from './timezone.js';
 
 export const wooRoutes = new Hono();
 
 // Cache TTL for the aggregated /sales response blob (seconds).
 const SALES_TTL_SECONDS = 15 * 60;
 
-// Existing dashboard convention — the start of the per-week aggregation window.
-// Mirrored from backend/server.js so the shape lines up byte-for-byte.
-const WEEKLY_START_DATE = '2026-03-01';
-
 // Currency for each market. The dashboard displays this on the per-market tile.
 const MARKET_CURRENCY = { CA: 'CAD', US: 'USD', AU: 'AUD' };
-
-// Build the rolling 6-month window the dashboard expects: index 0 is the
-// oldest of the 6 months, index 5 is the current month.
-function buildMonthWindow() {
-  const now = new Date();
-  const map = {};
-  const labels = [];
-  for (let i = 5; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    map[ym] = 5 - i;
-    labels.push(d.toLocaleString('en-US', { month: 'short', year: 'numeric' }));
-  }
-  // First-of-month for the oldest of the six — this is the SQL filter floor.
-  const startMonth = new Date(now.getFullYear(), now.getMonth() - 5, 1);
-  const startIso = `${startMonth.getFullYear()}-${String(startMonth.getMonth() + 1).padStart(2, '0')}-01T00:00:00`;
-  return { monthMap: map, labels, startYm: Object.keys(map)[0], startIso };
-}
-
-function _parseLocalDate(s) {
-  if (!s) return null;
-  const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!m) return null;
-  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-}
-
-function _fmtDate(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-// Mirror of backend/server.js getWeekKey: weeks run Monday–Sunday but split
-// at month boundaries (so the last few days of a month and the first few of
-// the next are reported as separate weekly buckets).
-function getWeekKey(dateStr) {
-  const d = _parseLocalDate(dateStr);
-  if (!d) return null;
-  const day = d.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  const monday = new Date(d);
-  monday.setDate(d.getDate() + diff);
-  if (monday.getMonth() !== d.getMonth() || monday.getFullYear() !== d.getFullYear()) {
-    const firstOfMonth = new Date(d.getFullYear(), d.getMonth(), 1);
-    const key = _fmtDate(firstOfMonth);
-    return key >= WEEKLY_START_DATE ? key : null;
-  }
-  const key = _fmtDate(monday);
-  return key >= WEEKLY_START_DATE ? key : null;
-}
 
 // Aggregate D1 result rows into the dashboard payload shape.
 //   monthRows: [{ ym, n_orders, revenue }, ...]   from the per-month query
 //   itemRows:  [{ sku, name, day, qty, revenue }, ...]   from the per-SKU per-day query
+// Both inputs already in Eastern (rows use the local_date column), so we just
+// drop them into the buckets.
 function aggregateFromD1(monthRows, itemRows, currency) {
   const { monthMap } = buildMonthWindow();
   const monthlyRevenue = [0, 0, 0, 0, 0, 0];
@@ -162,9 +108,11 @@ wooRoutes.get('/sales', async (c) => {
     }
   }
 
-  const { startIso } = buildMonthWindow();
+  const { startDate } = buildMonthWindow();
 
-  // Two queries in parallel:
+  // Two queries in parallel, both bucketing on the precomputed local_date
+  // column (Eastern, populated at ingest from the Eastern-naive Woo
+  // date_created — see src/admin.js runBackfillChunk and src/timezone.js).
   //   A) per-month order counts + revenue → drives monthlyRevenue / monthlyOrders
   //   B) per-SKU per-day qty + revenue + name → folded in JS to compute the
   //      sku-level monthly[], monthlyQty[], and weeklyQty{} maps. Per-day
@@ -174,29 +122,29 @@ wooRoutes.get('/sales', async (c) => {
   // /api/admin/reconcile validated against during the backfill.
   const [monthRes, itemRes, syncStateRes] = await Promise.all([
     c.env.DB.prepare(
-      `SELECT substr(date_created, 1, 7) AS ym,
-              COUNT(*)                  AS n_orders,
-              SUM(total)                AS revenue
+      `SELECT substr(local_date, 1, 7) AS ym,
+              COUNT(*)                 AS n_orders,
+              SUM(total)               AS revenue
        FROM orders
        WHERE market = ?
          AND status IN ('completed','processing')
-         AND date_created >= ?
+         AND local_date >= ?
        GROUP BY ym`,
-    ).bind(market, startIso).all(),
+    ).bind(market, startDate).all(),
     c.env.DB.prepare(
-      `SELECT oi.sku                          AS sku,
-              MAX(oi.name)                    AS name,
-              substr(oi.date_created, 1, 10)  AS day,
-              SUM(oi.quantity)                AS qty,
-              SUM(oi.total)                   AS revenue
+      `SELECT oi.sku            AS sku,
+              MAX(oi.name)      AS name,
+              oi.local_date     AS day,
+              SUM(oi.quantity)  AS qty,
+              SUM(oi.total)     AS revenue
        FROM order_items oi
        JOIN orders o ON o.id = oi.order_id
        WHERE oi.market = ?
          AND o.status IN ('completed','processing')
-         AND oi.date_created >= ?
-       GROUP BY oi.sku, day
-       ORDER BY oi.sku, day ASC`,
-    ).bind(market, startIso).all(),
+         AND oi.local_date >= ?
+       GROUP BY oi.sku, oi.local_date
+       ORDER BY oi.sku, oi.local_date ASC`,
+    ).bind(market, startDate).all(),
     c.env.DB.prepare(
       `SELECT watermark, last_synced_at
        FROM sync_state WHERE source = 'woo' AND market = ?`,
@@ -218,7 +166,7 @@ wooRoutes.get('/sales', async (c) => {
     skuTotals,
     source: 'woocommerce',
     dataSource: 'd1',
-    windowStart: startIso,
+    windowStart: startDate,
     ordersInWindow,
     watermark: syncStateRes?.watermark || null,
     lastSync:  syncStateRes?.last_synced_at || new Date().toISOString(),

@@ -181,17 +181,25 @@ export async function runBackfillChunk(env, market, pages, action = 'backfill') 
       // raw_json deliberately set to NULL for backfill — JSON.stringify(o)
       // for ~500 orders/chunk eats 1.5–3s of pure CPU and we don't read
       // raw_json anywhere yet. Add back later if ever needed.
+      //
+      // local_date is the canonical Eastern bucket key. Woo's date_created is
+      // already Eastern-naive (both stores configured to America/Toronto and
+      // America/New_York), so substring(0, 10) extracts the Eastern YYYY-MM-DD
+      // directly — no timezone conversion required at write time. See
+      // src/timezone.js for the full rationale and the Amazon counterpart.
+      const localDate = (o.date_created || '').substring(0, 10) || null;
       stmts.push(
         env.DB.prepare(
           `INSERT OR REPLACE INTO orders
-             (id, market, number, status, date_created, total, currency, raw_json, synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))`,
+             (id, market, number, status, date_created, local_date, total, currency, raw_json, synced_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))`,
         ).bind(
           o.id,
           market,
           o.number || String(o.id),
           o.status || 'unknown',
           o.date_created || '',
+          localDate,
           parseFloat(o.total || 0),
           o.currency || store.currency,
         ),
@@ -204,8 +212,8 @@ export async function runBackfillChunk(env, market, pages, action = 'backfill') 
         stmts.push(
           env.DB.prepare(
             `INSERT INTO order_items
-               (order_id, market, sku, name, quantity, total, date_created)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+               (order_id, market, sku, name, quantity, total, date_created, local_date)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             o.id,
             market,
@@ -214,6 +222,7 @@ export async function runBackfillChunk(env, market, pages, action = 'backfill') 
             parseInt(item.quantity || 0, 10),
             parseFloat(item.total || 0),
             o.date_created || '',
+            localDate,
           ),
         );
       }

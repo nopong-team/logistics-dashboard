@@ -990,8 +990,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.14</span> &middot; April 2026
+  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.15</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.15 &mdash; 29 April 2026</h4>
+    <ul>
+      <li>Canonical timezone for all order bucketing &mdash; America/Toronto (Eastern). New <code>local_date TEXT</code> column on every order/items table, populated at insert time and used for every monthly/weekly bucket query. Both Woo stores are configured to Eastern in wp-admin (Toronto for CA, New York for US &mdash; same DST), so existing 22k+1.9k rows backfill cleanly via <code>substr(date_created, 1, 10)</code> in migration 0003.</li>
+      <li>Rolling 6-month window now flips at midnight Toronto, not midnight UTC &mdash; fixes a 4-hour daily drift at month boundaries.</li>
+      <li>Amazon SP-API schema staged: <code>amazon_orders</code>, <code>amazon_items</code>, <code>report_jobs</code> tables (migration 0002), plus pre-seeded <code>sync_state</code> watermarks for CA/US at 2025-10-29 (6-month initial window). Amazon ingestion code lands next session.</li>
+      <li>New <code>src/timezone.js</code> module is the single source of truth for <code>BUSINESS_TZ</code>, <code>toBusinessLocalDate()</code>, <code>buildMonthWindow()</code>, and <code>getWeekKey()</code>. <code>src/woo.js</code> imports from it instead of carrying local copies.</li>
+    </ul>
     <h4>v2.14 &mdash; 29 April 2026</h4>
     <ul>
       <li>SalesBinder ported to the Worker — <code>/api/salesbinder/inventory</code> (finished-goods SOH for the discrepancy check) and <code>/api/salesbinder/packaging</code> (tin runway + blank-pool flags) now serve from KV-cached snapshots, with <code>?refresh=true</code> to force a re-fetch. Fall-through to cached data when SalesBinder is unreachable.</li>
