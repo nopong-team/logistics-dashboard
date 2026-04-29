@@ -74,7 +74,16 @@
     .region-btn:hover { background: #FFF5F7; }
     .region-btn.active { background: #FF578A; color: #fff; }
     .region-btn .region-flag { font-size: 15px; }
-    .header-right { display: flex; align-items: center; gap: 12px; }
+    /* The right side of the header has two groups:
+         • status-group  — Live badge, Xero reconnect (when shown), Data Health
+         • controls-group — Activity chip, Last updated, Refresh
+       flex:1 + margin-left:auto on the controls-group pushes it to the
+       absolute right edge regardless of viewport width, so the gap between
+       the two groups grows or shrinks with the window. The visual gap
+       reinforces "left cluster = status, right cluster = controls". */
+    .header-right { display: flex; align-items: center; gap: 12px; flex: 1; }
+    .header-status-group   { display: flex; align-items: center; gap: 12px; }
+    .header-controls-group { display: flex; align-items: center; gap: 12px; margin-left: auto; }
     .last-updated { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
     .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #22C55E; flex-shrink: 0; }
 
@@ -473,23 +482,33 @@
     </div>
   </div>
   <div class="header-right" id="header-right-ca">
-    <span class="prototype-badge">Live</span>
-    <a id="xero-reconnect-btn" href="/auth/xero" style="display:none; font-size:11px; padding:4px 10px; border-radius:6px; text-decoration:none; font-weight:600;"></a>
-    <div id="healthBadge" class="health-badge gray" onclick="toggleHealthPanel()" title="Click for data health details">
-      <div class="health-badge-dot"></div>
-      <span id="healthBadgeText">Checking…</span>
+    <!-- Left cluster: live-data status + Data Health badge. Things that
+         describe what state the data is in. -->
+    <div class="header-status-group">
+      <span class="prototype-badge">Live</span>
+      <a id="xero-reconnect-btn" href="/auth/xero" style="display:none; font-size:11px; padding:4px 10px; border-radius:6px; text-decoration:none; font-weight:600;"></a>
+      <div id="healthBadge" class="health-badge gray" onclick="toggleHealthPanel()" title="Click for data health details">
+        <div class="health-badge-dot"></div>
+        <span id="healthBadgeText">Checking…</span>
+      </div>
     </div>
-    <div id="activityChip" class="activity-chip" onclick="toggleActivityPanel()" title="Click for activity log: cron ticks, snapshots, report ingests">
-      <span>Activity</span>
-      <span class="activity-chip-caret">▼</span>
+    <!-- Right cluster: controls. Activity log + when-was-this-fresh + the
+         action that re-fetches it. margin-left:auto pushes them to the absolute
+         right edge regardless of viewport width, leaving a clear gap from the
+         status-group on the left. -->
+    <div class="header-controls-group">
+      <div id="activityChip" class="activity-chip" onclick="toggleActivityPanel()" title="Click for activity log: cron ticks, snapshots, report ingests">
+        <span>Activity</span>
+        <span class="activity-chip-caret">▼</span>
+      </div>
+      <div class="last-updated">
+        <div class="status-dot"></div>
+        <span id="lastUpdatedText">Last updated: —</span>
+      </div>
+      <button class="btn-refresh" onclick="handleRefresh()" title="Re-renders the dashboard from cached data. Upstream sources are pulled by the cron every 15 min — see Activity log for the latest pulls per source. Logiwa is a manual CSV upload, not a pull.">
+        <span class="refresh-icon" id="refreshIcon">↻</span> Refresh
+      </button>
     </div>
-    <div class="last-updated">
-      <div class="status-dot"></div>
-      <span id="lastUpdatedText">Last updated: —</span>
-    </div>
-    <button class="btn-refresh" onclick="handleRefresh()">
-      <span class="refresh-icon" id="refreshIcon">↻</span> Refresh
-    </button>
   </div>
 </header>
 
@@ -1069,8 +1088,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.25</span> &middot; April 2026
+  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.26</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.26 &mdash; 29 April 2026 (chip + refresh fixes, header layout, all 7 sources)</h4>
+    <ul>
+      <li><strong>Per-source chips finally show real timing.</strong> <code>loadWooSales</code>, <code>loadAmazonSales</code>, and <code>loadXeroInvoices</code> no longer overwrite <code>sourceSyncTimes</code> from their own <code>data.lastSync</code> field &mdash; those endpoints are KV-cached, so a fresh deploy left the chips clobbered with stale timestamps from the cached payload. <code>/api/sync-status</code> (uncached, reads <code>sync_state</code> + KV markers + <code>xero_tokens.updated_at</code> directly) is now the only writer.</li>
+      <li><strong>All 7 sources in the chip row.</strong> Added Logiwa, SalesBinder, and Xero alongside the existing Woo CA / Woo US / Amz CA / Amz US chips. Logiwa's chip shows the last CSV upload time and surfaces the filename in the chip tooltip &mdash; "Manual CSV upload &mdash; last upload 29 Apr 2026, 6:35 pm (ConsolidatedInventoryReport_&hellip;xlsx)". A stale Logiwa chip means "re-upload the CSV", not "the cron failed".</li>
+      <li><strong>"Last updated" now shows the newest upstream sync</strong> instead of the browser's clock. Reads <code>MAX(sourceSyncTimes)</code> &mdash; "Newest sync: 29 Apr 2026, 10:30 pm" means the dashboard data is at most as fresh as the most-recently-synced source. Falls back to "Loaded: &lt;time&gt;" if no source has reported yet.</li>
+      <li><strong>Refresh button actually refreshes &mdash; what it CAN refresh.</strong> Clicking it now sets a <code>__forceRefresh</code> flag that causes <code>loadWooSales</code>/<code>loadAmazonSales</code> to pass <code>?refresh=1</code>, busting the 15-min KV cache and re-aggregating from D1. <strong>Refresh re-renders from cached data; it does not pull from upstream</strong> &mdash; the cron is what does that, every 15 min. Tooltip on the button explains this.</li>
+      <li><strong>Header layout split.</strong> Left cluster (Live badge, Data Health) describes data state; right cluster (Activity, Newest sync, Refresh) is grouped controls and is pinned to the absolute right edge with <code>margin-left: auto</code>. Visual gap between them grows with the viewport.</li>
+    </ul>
     <h4>v2.25 &mdash; 29 April 2026 (data freshness &amp; activity log)</h4>
     <ul>
       <li><strong>Per-source "Last sync" chips now reflect every cron tick</strong>, not just ticks that found new data. <code>runBackfillChunk</code> (Woo) and <code>runAmazonOrdersChunk</code> (Amazon Orders) now update <code>sync_state.last_synced_at</code> on every successful run, with explicit ISO-8601 UTC formatting (<code>strftime('%Y-%m-%dT%H:%M:%SZ', 'now')</code>) so JS <code>new Date()</code> parses as UTC, not as local time on the viewer's machine. Watermark column still tracks "last NEW data" for the cases that need it.</li>
@@ -1505,7 +1532,15 @@ function updateSyncStatusBar() {
   for (const [name, syncTime] of entries.sort((a,b) => a[0].localeCompare(b[0]))) {
     const isStale = syncTime && (Date.now() - new Date(syncTime).getTime() > STALE_MS);
     const color = !syncTime ? '#9CA3AF' : isStale ? '#F59E0B' : '#10B981';
-    html += `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:#6B7280;"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${color};"></span>${name}: ${timeAgo(syncTime)}</span>`;
+    // Tooltip = the full ISO timestamp + (if available) extra context. Logiwa
+    // gets a "manual CSV upload" hint plus the filename so it's clear that a
+    // stale Logiwa chip means "re-upload the CSV", not "the cron failed".
+    let tip = syncTime ? new Date(syncTime).toLocaleString('en-AU') : 'never synced';
+    if (name === 'Logiwa') {
+      const fname = (window.__logiwaFileName || '');
+      tip = `Manual CSV upload — last upload ${tip}${fname ? ` (${fname})` : ''}`;
+    }
+    html += `<span title="${escapeHtml(tip)}" style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:#6B7280;cursor:help;"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${color};"></span>${escapeHtml(name)}: ${escapeHtml(timeAgo(syncTime))}</span>`;
   }
   bar.innerHTML = html;
 }
@@ -1622,7 +1657,9 @@ async function loadXeroInvoices() {
     // Replace sample Xero data with live totals
     S.xero = monthRevenue.map(v => Math.round(v));
     OC.xero = monthOrders;
-    sourceSyncTimes['Xero'] = data.lastSync || new Date().toISOString();
+    // sourceSyncTimes['Xero'] is populated from /api/sync-status (xero_tokens.updated_at).
+    // Same reason as Woo/Amazon: /api/xero/invoices is KV-cached 6h, so its
+    // data.lastSync would routinely be stale relative to the actual token-refresh time.
     console.log(`Xero ad-hoc revenue by month${data.cached ? ' (cached)' : ''}:`, S.xero, 'orders:', OC.xero);
     liveSourcesConnected.add(data.cached ? 'Xero (cached)' : 'Xero');
     liveSourcesConnected.delete(data.cached ? 'Xero' : 'Xero (cached)');
@@ -1700,7 +1737,8 @@ function recalcRunRates() {
 // Fetch WooCommerce sales data for a marketplace and update the S.wooCA / S.wooUS arrays
 async function loadWooSales(marketplace) {
   try {
-    const resp = await fetch(`/api/woo/sales?market=${marketplace}`);
+    const refreshArg = __forceRefresh ? '&refresh=1' : '';
+    const resp = await fetch(`/api/woo/sales?market=${marketplace}${refreshArg}`);
     if (resp.status === 202) {
       // Still syncing — retry in 15 seconds
       console.log(`WooCommerce ${marketplace}: syncing in background, will retry in 15s...`);
@@ -1712,7 +1750,11 @@ async function loadWooSales(marketplace) {
     const key = marketplace === 'CA' ? 'wooCA' : 'wooUS';
     S[key] = data.monthlyRevenue || S[key];
     OC[key] = data.monthlyOrders || OC[key];
-    if (data.lastSync) sourceSyncTimes[`Woo ${marketplace}`] = data.lastSync;
+    // sourceSyncTimes is populated centrally from /api/sync-status — that endpoint
+    // reads sync_state directly, no caching. We deliberately do NOT update from
+    // data.lastSync here because /api/woo/sales is KV-cached for 15 min, so a
+    // recently-deployed code change leaves stale naive timestamps in the cached
+    // payload that would clobber the fresh ISO-Z values from sync-status.
     console.log(`WooCommerce ${marketplace} revenue by month:`, S[key], 'orders:', OC[key]);
 
     // Merge SKU quantities into TINS data using normalisation rules.
@@ -1804,13 +1846,15 @@ async function loadWooSales(marketplace) {
 // Fetch Amazon sales data for a marketplace and update the S.amazonCA / S.amazonUS arrays
 async function loadAmazonSales(marketplace) {
   try {
-    const resp = await fetch(`/api/amazon/sales?market=${marketplace}`);
+    const refreshArg = __forceRefresh ? '&refresh=1' : '';
+    const resp = await fetch(`/api/amazon/sales?market=${marketplace}${refreshArg}`);
     if (!resp.ok) throw new Error('Not connected');
     const data = await resp.json();
     const key = marketplace === 'CA' ? 'amazonCA' : 'amazonUS';
     S[key] = data.monthlyRevenue || S[key];
     OC[key] = data.monthlyOrders || OC[key];
-    if (data.lastSync) sourceSyncTimes[`Amz ${marketplace}`] = data.lastSync;
+    // See loadWooSales — sourceSyncTimes is populated centrally from
+    // /api/sync-status, never from a cached sales endpoint payload.
     const src = data.cached ? 'cached' : 'live';
     console.log(`Amazon ${marketplace} revenue (${src}):`, S[key], 'orders:', OC[key]);
     liveSourcesConnected.add(`Amz ${marketplace}`);
@@ -5187,11 +5231,23 @@ function renderAll() {
   }, 30);
 }
 
+// Show the most-recent upstream sync, not the browser's clock — "Last updated"
+// previously displayed Date.now() which is just "when this tab loaded the
+// dashboard", not when any of the underlying data actually arrived. Now uses
+// MAX(sourceSyncTimes), which is the newest of Woo CA/US, Amazon CA/US, Xero —
+// i.e. the dashboard's data is at most as fresh as the latest of these.
+// Falls back to browser-now if no source has reported a sync yet.
 function updateLastSyncTime() {
-  const now = new Date();
-  const d = now.toLocaleDateString('en-AU', { day:'2-digit', month:'short', year:'numeric' });
-  const t = now.toLocaleTimeString('en-AU', { hour:'2-digit', minute:'2-digit' });
-  document.getElementById('lastUpdatedText').textContent = 'Last updated: ' + d + ', ' + t;
+  let newestMs = 0;
+  for (const v of Object.values(sourceSyncTimes || {})) {
+    const ms = v ? new Date(v).getTime() : 0;
+    if (Number.isFinite(ms) && ms > newestMs) newestMs = ms;
+  }
+  const dt = newestMs > 0 ? new Date(newestMs) : new Date();
+  const d = dt.toLocaleDateString('en-AU', { day:'2-digit', month:'short', year:'numeric' });
+  const t = dt.toLocaleTimeString('en-AU', { hour:'2-digit', minute:'2-digit' });
+  const label = newestMs > 0 ? 'Newest sync: ' : 'Loaded: ';
+  document.getElementById('lastUpdatedText').textContent = label + d + ', ' + t;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -5544,11 +5600,20 @@ document.addEventListener('click', (e) => {
   }
 });
 
+// __forceRefresh: when true, sales loaders pass `?refresh=1` to the sales
+// endpoints to bypass the 15-min KV cache and re-aggregate from D1. The flag
+// is set by handleRefresh, read by loadWooSales/loadAmazonSales, then cleared
+// at the end of loadAllData. Without this, the Refresh button hits the cached
+// payload and returns the same numbers the page already had — i.e. nothing
+// visibly changes.
+let __forceRefresh = false;
+
 async function handleRefresh() {
   const icon = document.getElementById('refreshIcon');
   icon.classList.add('spinning');
+  __forceRefresh = true;
   try { await loadAllData(); } catch (e) { console.error('Refresh error:', e); }
-  icon.classList.remove('spinning');
+  finally { __forceRefresh = false; icon.classList.remove('spinning'); }
 }
 
 async function loadAllData() {
@@ -5561,10 +5626,15 @@ async function loadAllData() {
     const syncResp = await fetch('/api/sync-status');
     if (syncResp.ok) {
       const syncData = await syncResp.json();
-      if (syncData.wooCA?.lastSync) sourceSyncTimes['Woo CA'] = syncData.wooCA.lastSync;
-      if (syncData.wooUS?.lastSync) sourceSyncTimes['Woo US'] = syncData.wooUS.lastSync;
-      if (syncData.amzCA?.lastSync) sourceSyncTimes['Amz CA'] = syncData.amzCA.lastSync;
-      if (syncData.amzUS?.lastSync) sourceSyncTimes['Amz US'] = syncData.amzUS.lastSync;
+      if (syncData.wooCA?.lastSync)       sourceSyncTimes['Woo CA']      = syncData.wooCA.lastSync;
+      if (syncData.wooUS?.lastSync)       sourceSyncTimes['Woo US']      = syncData.wooUS.lastSync;
+      if (syncData.amzCA?.lastSync)       sourceSyncTimes['Amz CA']      = syncData.amzCA.lastSync;
+      if (syncData.amzUS?.lastSync)       sourceSyncTimes['Amz US']      = syncData.amzUS.lastSync;
+      if (syncData.logiwa?.lastSync)      sourceSyncTimes['Logiwa']      = syncData.logiwa.lastSync;
+      // Stash the filename so updateSyncStatusBar can put it in the chip tooltip.
+      window.__logiwaFileName = syncData.logiwa?.fileName || null;
+      if (syncData.salesBinder?.lastSync) sourceSyncTimes['SalesBinder'] = syncData.salesBinder.lastSync;
+      if (syncData.xero?.lastSync)        sourceSyncTimes['Xero']        = syncData.xero.lastSync;
       updateSyncStatusBar();
     }
   } catch (e) { /* sync-status is informational only */ }

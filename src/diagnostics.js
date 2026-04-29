@@ -97,14 +97,30 @@ diagnosticsRoutes.get('/sync-status', async (c) => {
     c.env.DB.prepare(`SELECT COUNT(*) AS n FROM amazon_orders WHERE market = 'US'`).first(),
   ]);
 
-  // FBA inventory cached snapshots — best-effort, KV may not have anything yet.
-  let amzInvCa = null, amzInvUs = null;
+  // FBA inventory cached snapshots + the three KV-only connectors. Best-effort
+  // — any of these may not be in KV yet on a fresh env, in which case the chip
+  // just renders "never" until the first ingest/upload.
+  let amzInvCa = null, amzInvUs = null, logiwa = null, sbInv = null;
   if (cache) {
-    [amzInvCa, amzInvUs] = await Promise.all([
-      cache.get(FBA_INVENTORY_KV_KEY('CA'), 'json'),
-      cache.get(FBA_INVENTORY_KV_KEY('US'), 'json'),
+    [amzInvCa, amzInvUs, logiwa, sbInv] = await Promise.all([
+      cache.get(FBA_INVENTORY_KV_KEY('CA'),    'json'),
+      cache.get(FBA_INVENTORY_KV_KEY('US'),    'json'),
+      cache.get('logiwa:inventory:current',    'json'),
+      cache.get('salesbinder:inventory',       'json'),
     ]);
   }
+
+  // Xero freshness = the xero_tokens.updated_at row (last successful token
+  // refresh / re-auth). If the row isn't there or D1 is unreachable, leave the
+  // chip null — "never" reads cleanly. Wrapped in try/catch so an absent table
+  // on a fresh env doesn't take the rest of /api/sync-status with it.
+  let xeroLastSync = null;
+  try {
+    const xeroRow = await c.env.DB.prepare(
+      `SELECT updated_at FROM xero_tokens WHERE id = 1`,
+    ).first();
+    xeroLastSync = toIsoUtc(xeroRow?.updated_at) || null;
+  } catch { /* table missing on a fresh env — silent */ }
 
   return c.json({
     wooCA: {
@@ -139,7 +155,21 @@ diagnosticsRoutes.get('/sync-status', async (c) => {
       count:    amzInvUs?.count || 0,
       syncing:  false,
     },
-    xero: { connected: false },
+    // Logiwa is a CSV upload, not a pull — lastSync = uploadedAt of the most
+    // recent snapshot. fileName surfaced for tooltip use on the chip.
+    logiwa: {
+      lastSync: logiwa?.uploadedAt || logiwa?.storedAt || null,
+      count:    logiwa?.count      || logiwa?.inventory?.length || 0,
+      fileName: logiwa?.fileName   || null,
+    },
+    salesBinder: {
+      lastSync: sbInv?.lastSync || null,
+      count:    sbInv?.inventory?.length ?? sbInv?.count ?? 0,
+    },
+    xero: {
+      lastSync:  xeroLastSync,
+      connected: !!xeroLastSync,
+    },
   });
 });
 
