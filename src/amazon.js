@@ -510,15 +510,54 @@ async function seedReportJobsIfNeeded(env, market) {
   return seeded;
 }
 
-// Phase B: take up to maxJobs pending jobs and try to advance them. For each
-// job: POST /reports if amazon_report_id is null (first touch); otherwise
-// poll its status. Transitions:
-//   - report_id missing → POST /reports → store amazon_report_id, attempts++
+// Phase B0 — POST every un-POSTed pending job to Amazon (no LIMIT, only the
+// wall-clock deadline). Cheap (~500ms per request). Lets all 12 ranges per
+// market enter Amazon's processing queue in parallel rather than serially in
+// batches of 3-per-tick, which previously meant higher-id jobs starved
+// behind lower-id ones still in IN_PROGRESS.
+async function postNewReportJobs(env, market, deadlineMs) {
+  const jobs = await env.DB.prepare(
+    `SELECT id, report_type, data_start_time, data_end_time
+     FROM report_jobs
+     WHERE source = 'amazon' AND market = ? AND status = 'pending' AND amazon_report_id IS NULL
+     ORDER BY id ASC`,
+  ).bind(market).all();
+  let posted = 0;
+  for (const job of (jobs.results || [])) {
+    if (Date.now() > deadlineMs) break;
+    try {
+      const create = await spApiPost(env, market, '/reports/2021-06-30/reports', {
+        reportType:     job.report_type,
+        dataStartTime:  job.data_start_time,
+        dataEndTime:    job.data_end_time,
+        marketplaceIds: [AMAZON_MARKETPLACES[market].id],
+      });
+      await env.DB.prepare(
+        `UPDATE report_jobs
+           SET amazon_report_id = ?, attempts = 1,
+               last_polled_at = datetime('now'), updated_at = datetime('now')
+         WHERE id = ?`,
+      ).bind(create.reportId || null, job.id).run();
+      posted++;
+    } catch (e) {
+      if (e?.rateLimited) break; // bail this phase, retry next tick
+      await env.DB.prepare(
+        `UPDATE report_jobs
+           SET error = ?, attempts = attempts + 1,
+               last_polled_at = datetime('now'), updated_at = datetime('now')
+         WHERE id = ?`,
+      ).bind(redactSecrets(e?.message || String(e)).substring(0, 500), job.id).run();
+    }
+  }
+  return posted;
+}
+
+// Phase B1 — poll up to maxJobs already-POSTed pending jobs for status.
+// Transitions:
 //   - DONE              → ready (capture document_id)
 //   - CANCELLED|FATAL   → try fallback report type (re-POST) OR mark failed
-//   - IN_PROGRESS|other → leave pending, attempts++
-//   - attempts > MAX    → failed
-async function pollPendingJobs(env, market, maxJobs, deadlineMs) {
+//   - IN_PROGRESS|other → leave pending, attempts++ (capped at MAX_ATTEMPTS)
+async function pollExistingReportJobs(env, market, maxJobs, deadlineMs) {
   // Filter out jobs polled in the last MIN_POLL_INTERVAL_S seconds — Amazon
   // takes 5–15 min to generate a report, so polling every cron tick (15 min)
   // is plenty. Without this guard, manual admin loops + cron racing each
@@ -527,6 +566,7 @@ async function pollPendingJobs(env, market, maxJobs, deadlineMs) {
   const jobs = await env.DB.prepare(
     `SELECT * FROM report_jobs
      WHERE source = 'amazon' AND market = ? AND status = 'pending'
+       AND amazon_report_id IS NOT NULL
        AND (last_polled_at IS NULL
             OR (julianday('now') - julianday(last_polled_at)) * 86400.0 > ?)
      ORDER BY id ASC LIMIT ?`,
@@ -535,23 +575,6 @@ async function pollPendingJobs(env, market, maxJobs, deadlineMs) {
   for (const job of (jobs.results || [])) {
     if (Date.now() > deadlineMs) break;
     try {
-      if (!job.amazon_report_id) {
-        // First touch — POST the report request.
-        const create = await spApiPost(env, market, '/reports/2021-06-30/reports', {
-          reportType:     job.report_type,
-          dataStartTime:  job.data_start_time,
-          dataEndTime:    job.data_end_time,
-          marketplaceIds: [AMAZON_MARKETPLACES[market].id],
-        });
-        await env.DB.prepare(
-          `UPDATE report_jobs
-             SET amazon_report_id = ?, attempts = attempts + 1, last_polled_at = datetime('now'), updated_at = datetime('now')
-           WHERE id = ?`,
-        ).bind(create.reportId || null, job.id).run();
-        advanced++;
-        continue;
-      }
-      // Subsequent touches — poll status.
       const status = await spApiRequest(env, market, `/reports/2021-06-30/reports/${job.amazon_report_id}`);
       const ps = status.processingStatus || '';
       if (ps === 'DONE') {
@@ -766,18 +789,29 @@ function parseAmazonReportTsv(text, market) {
   };
 }
 
-// One cron tick of Reports work for a market. Phase A (seed) → B (poll N) →
-// C (ingest N). Wall-clock guard at CRON_TICK_BUDGET_MS.
+// One cron tick of Reports work for a market.
+//   Phase A  — seed any missing range jobs (cheap)
+//   Phase B0 — POST every un-POSTed pending job (cheap, ~500ms each)
+//   Phase B1 — poll up to maxJobs already-POSTed pending jobs for status
+//   Phase C  — ingest up to maxJobs ready jobs (download + parse + INSERT)
+// All phases share a single wall-clock budget (CRON_TICK_BUDGET_MS).
+//
+// Splitting POST from POLL means all 12 ranges enter Amazon's queue in
+// parallel within the first 1-2 ticks rather than starving behind lower-id
+// in-flight jobs.
 export async function runAmazonReportsTick(env, market, options = {}) {
   const startMs    = Date.now();
   const deadlineMs = startMs + (options.budgetMs || CRON_TICK_BUDGET_MS);
   const maxJobs    = options.maxJobsPerPhase || 3;
 
-  let seeded = 0, polled = 0, ingested = 0;
+  let seeded = 0, posted = 0, polled = 0, ingested = 0;
   try {
     seeded = await seedReportJobsIfNeeded(env, market);
     if (Date.now() < deadlineMs) {
-      polled = await pollPendingJobs(env, market, maxJobs, deadlineMs);
+      posted = await postNewReportJobs(env, market, deadlineMs);
+    }
+    if (Date.now() < deadlineMs) {
+      polled = await pollExistingReportJobs(env, market, maxJobs, deadlineMs);
     }
     if (Date.now() < deadlineMs) {
       ingested = await ingestReadyJobs(env, market, maxJobs, deadlineMs);
@@ -786,7 +820,7 @@ export async function runAmazonReportsTick(env, market, options = {}) {
     // Don't blow the whole cron — log and return a partial result.
     console.error(`Amazon reports tick ${market} error:`, redactSecrets(e?.message || e));
   }
-  return { market, seeded, polled, ingested, durationMs: Date.now() - startMs };
+  return { market, seeded, posted, polled, ingested, durationMs: Date.now() - startMs };
 }
 
 // ─── Sales read endpoint (D1-backed, KV-cached) ────────────────────────────
