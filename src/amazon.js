@@ -112,23 +112,30 @@ const ACTIVE_RANGE_STALE_HOURS = 24;
 // Product SKU Registry (Apr 2026).
 const AMZ_SKU_MAP = {
   // CA SKUs — canonical names (self-map)
-  'CA-OG-NPO-85':  'CA-OG-NPO-85',   // Original 85g
-  'CA-CL-VLB-85':  'CA-CL-VLB-85',   // Cool Lavender 85g
-  'CA-CL-VLB-35':  'CA-CL-VLB-35',   // Cool Lavender 35g
-  'CA-FF-VLB-35':  'CA-FF-VLB-35',   // Fragrance Free 35g
-  'CA-FP-VLB-35':  'CA-FP-VLB-35',   // Flower Power 35g
-  'CA-OG-NPO-35':  'CA-OG-NPO-35',   // Original 35g
-  'CA-SC-BCF-35':  'CA-SC-BCF-35',   // Spicy Chai BCF 35g
-  'CA-SC-NPO-35':  'CA-SC-NPO-35',   // Spicy Chai Original 35g
+  'CA-OG-NPO-85':     'CA-OG-NPO-85',   // Original 85g
+  'CA-CL-VLB-85':     'CA-CL-VLB-85',   // Cool Lavender 85g
+  'CA-CL-VLB-35':     'CA-CL-VLB-35',   // Cool Lavender 35g
+  'CA-FF-VLB-35':     'CA-FF-VLB-35',   // Fragrance Free 35g
+  'CA-FP-VLB-35':     'CA-FP-VLB-35',   // Flower Power 35g
+  'CA-OG-NPO-35':     'CA-OG-NPO-35',   // Original 35g
+  'CA-OG-BCF-35':     'CA-OG-BCF-35',   // Original Bicarb-Free 35g
+  'CA-SC-BCF-35':     'CA-SC-BCF-35',   // Spicy Chai BCF 35g
+  'CA-SC-NPO-35':     'CA-SC-NPO-35',   // Spicy Chai Original 35g
   // CA SKUs — Amazon FNSKU-style aliases (normalised to canonical CA- code)
-  'V9-2U5C-RGSU':  'CA-CL-VLB-35',   // Cool Lavender 35g alias
-  'HP-G88K-NR69':  'CA-FF-VLB-35',   // Fragrance Free 35g alias
-  '0T-GA0Y-L3HG':  'CA-OG-NPO-35',   // Original 35g alias
-  'IC-OLUM-TQLF':  'CA-SC-NPO-35',   // Spicy Chai Original 35g alias
+  'V9-2U5C-RGSU':     'CA-CL-VLB-35',   // Cool Lavender 35g alias
+  'HP-G88K-NR69':     'CA-FF-VLB-35',   // Fragrance Free 35g alias
+  '0T-GA0Y-L3HG':     'CA-OG-NPO-35',   // Original 35g alias
+  'IC-OLUM-TQLF':     'CA-SC-NPO-35',   // Spicy Chai Original 35g alias
+  'EX-DHDC-UJK7':     'CA-FP-VLB-35',   // Flower Power 35g alias (added v2.22, FBA gap)
+  'SC-NPO-35-GS1':    'CA-SC-NPO-35',   // Spicy Chai Original 35g GS1-barcode variant
   // US-only SKUs (normalised to CA- dashboard SKU for combined reporting)
-  'US-FP-VLB-35':  'CA-FP-VLB-35',   // Flower Power 35g (US)
-  'US-SC-BCF-35':  'CA-SC-BCF-35',   // Spicy Chai BCF 35g (US)
-  'US-FF-VLB-35':  'CA-FF-VLB-35',   // Fragrance Free 35g (US)
+  'US-FP-VLB-35':     'CA-FP-VLB-35',   // Flower Power 35g (US)
+  'US-SC-BCF-35':     'CA-SC-BCF-35',   // Spicy Chai BCF 35g (US)
+  'US-FF-VLB-35':     'CA-FF-VLB-35',   // Fragrance Free 35g (US)
+  'US-OG-NPO-35':     'CA-OG-NPO-35',   // Original 35g (US)
+  'US-OG-NPO-35-AM':  'CA-OG-NPO-35',   // Original 35g Amazon-specific variant (US)
+  'US-OG-BCF-35':     'CA-OG-BCF-35',   // Original Bicarb-Free 35g (US)
+  'US-SC-NPO-35':     'CA-SC-NPO-35',   // Spicy Chai Original 35g (US)
 };
 
 export function matchAmzItemToSku(_itemName, sellerSku) {

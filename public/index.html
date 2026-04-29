@@ -990,8 +990,24 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.21</span> &middot; April 2026
+  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.23</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.23 &mdash; 29 April 2026 (Xero ported)</h4>
+    <ul>
+      <li>Xero connector ported to the Worker &mdash; OAuth2 auth-code flow with lazy refresh, plus the three legacy API endpoints. Replaces the local <code>xero-node</code> SDK (Node-only) with direct REST against <code>identity.xero.com</code> and <code>api.xero.com</code>.</li>
+      <li>Migration 0004 adds <code>xero_tokens</code> &mdash; single-row table (CHECK <code>id = 1</code>) holding <code>access_token</code>, <code>refresh_token</code>, <code>expires_at</code>, <code>tenant_id</code>, <code>tenant_name</code>, <code>scope</code>. Single-tenant by design (No Pong has one Xero org).</li>
+      <li>Auth routes at <code>/auth/xero</code> (consent), <code>/auth/xero/callback</code> (token exchange + tenant capture), and <code>/auth/xero/disconnect</code> (delete tokens). CSRF state in KV (10-min TTL, single-use). Refresh tokens rotate on every refresh &mdash; the new one is persisted, defensively falling back to the prior one if Xero ever omits it.</li>
+      <li><code>/api/xero/purchase-orders</code> &mdash; paginated, filtered to <code>deliveryDate &ge; start of current month</code>, excludes <code>BILLED</code>/<code>DELETED</code>, strips tin packaging line items (<code>T-</code> prefix). KV-cached 6h with offline fallback.</li>
+      <li><code>/api/xero/invoices</code> &mdash; last 6 months ACCREC, ordered <code>Date DESC</code>, excludes Metorik + Amazon weekly-summary contacts (those come from the Woo + Amazon connectors directly). KV-cached 6h with offline fallback.</li>
+      <li><code>/api/xero/org</code> &mdash; first organisation info. KV-cached 24h.</li>
+      <li><code>/api/status</code> auto-flips <code>xero.connected</code> from the <code>xero_tokens</code> row, with a <code>cached</code> sub-flag so the dashboard can show "connected (cached)" when the token is gone but a snapshot is still serving.</li>
+      <li><code>redactSecrets</code> grew Xero-aware patterns &mdash; bearer JWTs (<code>eyJ&hellip;.&hellip;.&hellip;</code>) plus query-param forms <code>oauth_token=</code>, <code>code=</code>, <code>id_token=</code>. One edit, applied at every layer per v2.16 convention.</li>
+    </ul>
+    <h4>v2.22 &mdash; 29 April 2026 (FBA SKU map gap fill)</h4>
+    <ul>
+      <li>Seven seller SKUs that FBA Inventory was returning unmatched are now in <code>AMZ_SKU_MAP</code>: <code>CA-OG-BCF-35</code>, <code>EX-DHDC-UJK7</code> (Flower Power FNSKU alias), <code>SC-NPO-35-GS1</code> (Spicy Chai Original GS1-barcode variant), <code>US-OG-NPO-35</code>, <code>US-OG-NPO-35-AM</code>, <code>US-OG-BCF-35</code>, <code>US-SC-NPO-35</code>. US-only codes follow the existing convention of normalising to the CA dashboard SKU for combined reporting.</li>
+      <li>Effect: cross-channel SKU rollups will pick up these rows next time the Amazon Reports state machine ingests a range that includes them. The legacy frontend's own <code>AMZ_INV_MAP_CA</code>/<code>AMZ_INV_MAP_US</code> already covered most of these for the FBA tile, so this closes the silent-drop gap on the Worker side.</li>
+    </ul>
     <h4>v2.21 &mdash; 29 April 2026 (D1-read sweep)</h4>
     <ul>
       <li>Four legacy endpoints ported from the Express backend in one pass &mdash; the dashboard's recent-orders rail, sync-status bar, Data Health panel, and buying-tool sparklines now all serve from the Worker.</li>

@@ -16,6 +16,7 @@ import { adminRoutes, runBackfillChunk } from './admin.js';
 import { salesBinderRoutes } from './salesbinder.js';
 import { amazonRoutes, runAmazonOrdersChunk, runAmazonReportsTick, invalidateAmazonSalesCache } from './amazon.js';
 import { diagnosticsRoutes } from './diagnostics.js';
+import { xeroRoutes, xeroAuthRoutes, readXeroStatus } from './xero.js';
 import buyingToolHistory from './buying-tool-history.js';
 import { redactSecrets } from './redact.js';
 
@@ -30,14 +31,22 @@ app.get('/api/ping', (c) => c.json({ hello: 'world' }));
 // shape so loadAllData runs through and dispatches the per-source loaders for
 // any source we've actually got configured. Sources that aren't ported yet
 // just report `connected: false` and the dashboard skips them.
-app.get('/api/status', (c) => {
+app.get('/api/status', async (c) => {
   const env = c.env;
   const wooCA = !!(env.WOO_CA_URL && env.WOO_CA_KEY && env.WOO_CA_SECRET);
   const wooUS = !!(env.WOO_US_URL && env.WOO_US_KEY && env.WOO_US_SECRET);
   const salesBinder = !!(env.SALESBINDER_SUBDOMAIN && env.SALESBINDER_API_KEY);
   const amazon = !!(env.AMAZON_REFRESH_TOKEN && env.AMAZON_LWA_CLIENT_ID && env.AMAZON_LWA_CLIENT_SECRET);
+  // Xero status reads from D1 (xero_tokens row presence) + KV (cached PO/invoice
+  // snapshots), so the dashboard can show "connected (cached)" when the token
+  // is gone but a snapshot is still serving. Wrapped in a defensive try so a
+  // D1 hiccup doesn't take the rest of /api/status with it — frontend gates
+  // every loader on this endpoint and a 500 here means total static-mode.
+  let xero = { connected: false, live: false, cached: false, org: null };
+  try { xero = await readXeroStatus(env); }
+  catch (e) { console.warn('readXeroStatus failed:', redactSecrets(e?.message || e)); }
   return c.json({
-    xero:        { connected: false, live: false, cached: false, org: null },
+    xero,
     amazon:      { connected: amazon },
     wooCA:       { connected: wooCA },
     wooUS:       { connected: wooUS },
@@ -65,6 +74,13 @@ app.route('/api/amazon', amazonRoutes);
 // dashboard's status bar) and /api/audit (read-only data audit powering the
 // Data Health panel). Both read directly from D1 + KV and don't take params.
 app.route('/api', diagnosticsRoutes);
+
+// Xero connector (Step 5c.3) — OAuth2 auth-code flow + lazy refresh + three
+// API endpoints (purchase-orders, invoices, org). Auth flow lives at
+// /auth/xero/* (NOT /api/xero/*) because Xero's OAuth callback needs a stable
+// path matching what's registered in the Xero app's allowed redirect URIs.
+app.route('/api/xero', xeroRoutes);
+app.route('/auth/xero', xeroAuthRoutes);
 
 // Buying-tool history — 18+ months of per-SKU monthly sales plus manually
 // curated allocation buffers from the buying-tool spreadsheet. Powers the
