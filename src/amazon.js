@@ -754,7 +754,9 @@ function parseAmazonReportTsv(text, market) {
   const skuCol         = headers.findIndex((h) => h === 'sku' || h === 'seller_sku');
   const nameCol        = headers.findIndex((h) => h === 'product_name' || h === 'product_title' || h === 'item_name');
   const qtyCol         = headers.findIndex((h) => h === 'quantity' || h === 'quantity_ordered' || h === 'quantity_shipped');
-  const priceCol       = headers.findIndex((h) => h === 'item_price' || h === 'price' || h === 'item_total');
+  // GET_AMAZON_FULFILLED_SHIPMENTS_DATA_GENERAL uses 'item-price'.
+  // GET_FBA_FULFILLMENT_CUSTOMER_SHIPMENT_SALES_DATA (fallback) uses 'item-price-per-unit'.
+  const priceCol       = headers.findIndex((h) => h === 'item_price' || h === 'item_price_per_unit' || h === 'price' || h === 'item_total');
   const dateCol        = headers.findIndex((h) => h === 'purchase_date' || h === 'last_updated_date' || h === 'shipment_date' || h === 'payments_date');
   const channelCol     = headers.findIndex((h) => h === 'sales_channel');
   const currencyCol    = headers.findIndex((h) => h === 'currency');
