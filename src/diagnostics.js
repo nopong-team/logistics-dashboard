@@ -381,7 +381,8 @@ diagnosticsRoutes.get('/audit', async (c) => {
 // report_jobs entries respect the lookback so we don't render last week's
 // ~600 cron ticks every time the dropdown opens.
 
-const FBA_INVENTORY_KV_KEY = (m) => `amazon:inventory:${m.toUpperCase()}`;
+// FBA_INVENTORY_KV_KEY is already declared at the top of this file (used by
+// /api/sync-status). Only add the new ones the import log needs.
 const SALESBINDER_INVENTORY_KV_KEY = 'salesbinder:inventory';
 const SALESBINDER_PACKAGING_KV_KEY = 'salesbinder:packaging';
 const LOGIWA_KV_KEY = 'logiwa:inventory:current';
