@@ -1138,6 +1138,57 @@ async function refreshFbaInventory(env, market, { background = false } = {}) {
   }
 }
 
+// ─── FBA Inventory cron sync ───────────────────────────────────────────────
+//
+// Runs from the scheduled handler (src/index.js) every 15 min. For each
+// market, refresh the KV snapshot if it's older than FBA_INVENTORY_FRESH_S
+// (1h) — so worst-case staleness is ~1h regardless of whether anyone has the
+// dashboard open. Cheaper than refreshing on every tick, and stays within the
+// 30s scheduled-handler budget when paired with Orders + Reports work.
+//
+// Markets run in parallel via Promise.allSettled — a SP-API rate-limit on one
+// shouldn't starve the other. Failures are logged and swallowed so a bad tick
+// doesn't poison the next.
+export async function runAmazonInventoryCronSync(env) {
+  if (!(env.AMAZON_REFRESH_TOKEN && env.AMAZON_LWA_CLIENT_ID && env.AMAZON_LWA_CLIENT_SECRET)) {
+    return; // not configured — silent skip, matches Orders cron behaviour
+  }
+  if (!env.CACHE) return;
+
+  const FRESH_MS = FBA_INVENTORY_FRESH_S * 1000;
+  const now = Date.now();
+
+  async function maybeRefresh(market) {
+    try {
+      const cached = await env.CACHE.get(FBA_INVENTORY_KV_KEY(market), 'json');
+      const ageMs = cached?.lastSync ? now - new Date(cached.lastSync).getTime() : Infinity;
+      if (ageMs < FRESH_MS) {
+        // Still fresh — skip the upstream call. This is what keeps us under
+        // SP-API rate limits on the typical "no one's using it" tick.
+        return { market, action: 'skip', reason: `fresh (${Math.round(ageMs / 60000)}m old)` };
+      }
+      const fresh = await refreshFbaInventory(env, market, { background: true });
+      if (fresh === null) return { market, action: 'rate_limited' };
+      return { market, action: 'refreshed', count: fresh.count, ageMs };
+    } catch (e) {
+      console.error(
+        `Amazon FBA inventory cron ${market} failed:`,
+        redactSecrets(e?.message || String(e)),
+      );
+      return { market, action: 'error', error: e?.message };
+    }
+  }
+
+  const results = await Promise.allSettled([maybeRefresh('CA'), maybeRefresh('US')]);
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value?.action === 'refreshed') {
+      console.log(
+        `Amazon FBA inventory cron ${r.value.market}: refreshed (${r.value.count} SKUs)`,
+      );
+    }
+  }
+}
+
 amazonRoutes.get('/inventory', async (c) => {
   const market = (c.req.query('market') || 'CA').toUpperCase();
   if (!AMAZON_MARKETPLACES[market]) {

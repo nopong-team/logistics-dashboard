@@ -153,6 +153,134 @@ async function fetchAllItems(env) {
   return { items: all, pagesFetched: page };
 }
 
+// Inventory + packaging refresh helpers. Extracted so the cron can call them
+// without going through the route handler. Returns the result object that gets
+// cached (and surfaced via the route).
+async function fetchAndCacheInventory(env) {
+  const { items, pagesFetched } = await fetchAllItems(env);
+
+  const inventory = [];
+  for (const item of items) {
+    const category = (item.category?.name || item.category || '').toLowerCase();
+    const sku = (item.sku || '').trim();
+    if (SKIP_CATEGORIES.some((cat) => category.includes(cat))) continue;
+    if (sku.startsWith('Label-') || sku.startsWith('MF-')) continue;
+
+    const total = parseFloat(item.quantity || 0);
+    const reserved = parseFloat(item.quantity_reserved || 0);
+    inventory.push({
+      sku,
+      name: item.name || '',
+      quantity: total - reserved,
+      category: item.category?.name || item.category || '',
+    });
+  }
+
+  const result = {
+    inventory,
+    count: inventory.length,
+    source: 'salesbinder',
+    pagesFetched,
+    lastSync: new Date().toISOString(),
+  };
+  if (env.CACHE) {
+    await env.CACHE.put(KV_INVENTORY_KEY, JSON.stringify(result));
+  }
+  return result;
+}
+
+async function fetchAndCachePackaging(env) {
+  const { items, pagesFetched } = await fetchAllItems(env);
+
+  const tins = [];
+  for (const item of items) {
+    const sku = (item.sku || '').trim();
+    if (!sku.startsWith('T-')) continue;
+
+    const qty = parseFloat(item.quantity || 0);
+    const reserved = parseFloat(item.quantity_reserved || 0);
+    const incoming = parseFloat(item.quantity_incoming || 0);
+    const threshold = parseFloat(item.low_threshold || 0);
+    const cost = parseFloat(item.cost || 0);
+
+    const linkedSku = sku.startsWith('T-') ? sku.substring(2) : sku;
+    let size = '';
+    const m = sku.match(/-(\d+)$/);
+    if (m) size = `${m[1]}g`;
+
+    tins.push({
+      sku, linkedSku, size,
+      name: item.name || '',
+      description: item.description || '',
+      onHand: qty,
+      reserved,
+      available: qty - reserved,
+      incoming,
+      lowThreshold: threshold,
+      unitCost: cost,
+      category: item.category?.name || item.category || '',
+    });
+  }
+
+  const result = {
+    tins,
+    count: tins.length,
+    source: 'salesbinder',
+    supplier: 'Guanqiao Tinbox Co., Limited',
+    leadTimeDays: 120,
+    pagesFetched,
+    lastSync: new Date().toISOString(),
+  };
+  if (env.CACHE) {
+    await env.CACHE.put(KV_PACKAGING_KEY, JSON.stringify(result));
+  }
+  return result;
+}
+
+// ─── SalesBinder cron sync ──────────────────────────────────────────────────
+//
+// Runs from the scheduled handler (src/index.js) every 15 min. SalesBinder
+// inventory doesn't change second-to-second, so we gate on a 4h staleness
+// threshold — so worst-case staleness is ~4h, which is plenty fresh for "what's
+// in the warehouse" while keeping the SalesBinder API call rate negligible.
+// Inventory + packaging are pulled together (one SalesBinder paginated
+// /items.json call covers both, but the legacy route shape keeps them
+// separately cached, so we make two pulls — both still cheap, ~1-3s total).
+const SALESBINDER_FRESH_MS = 4 * 60 * 60 * 1000; // 4h
+
+export async function runSalesBinderCronSync(env) {
+  if (!(env.SALESBINDER_SUBDOMAIN && env.SALESBINDER_API_KEY)) {
+    return; // not configured — silent skip
+  }
+  if (!env.CACHE) return;
+
+  const now = Date.now();
+  const [invCached, pkgCached] = await Promise.all([
+    env.CACHE.get(KV_INVENTORY_KEY, 'json'),
+    env.CACHE.get(KV_PACKAGING_KEY, 'json'),
+  ]);
+  const invAgeMs = invCached?.lastSync ? now - new Date(invCached.lastSync).getTime() : Infinity;
+  const pkgAgeMs = pkgCached?.lastSync ? now - new Date(pkgCached.lastSync).getTime() : Infinity;
+
+  const tasks = [];
+  if (invAgeMs >= SALESBINDER_FRESH_MS) {
+    tasks.push(
+      fetchAndCacheInventory(env)
+        .then((r) => console.log(`SalesBinder cron: inventory refreshed (${r.count} rows)`))
+        .catch((e) => console.error('SalesBinder cron inventory failed:', e?.message)),
+    );
+  }
+  if (pkgAgeMs >= SALESBINDER_FRESH_MS) {
+    tasks.push(
+      fetchAndCachePackaging(env)
+        .then((r) => console.log(`SalesBinder cron: packaging refreshed (${r.count} tin SKUs)`))
+        .catch((e) => console.error('SalesBinder cron packaging failed:', e?.message)),
+    );
+  }
+  if (tasks.length === 0) return;
+  await Promise.allSettled(tasks);
+}
+
 // ─── /api/salesbinder/inventory ─────────────────────────────────────────────
 
 salesBinderRoutes.get('/inventory', async (c) => {
@@ -166,39 +294,8 @@ salesBinderRoutes.get('/inventory', async (c) => {
     }
   }
 
-  let pagesFetched = 0;
   try {
-    const { items, pagesFetched: pf } = await fetchAllItems(c.env);
-    pagesFetched = pf;
-
-    const inventory = [];
-    for (const item of items) {
-      const category = (item.category?.name || item.category || '').toLowerCase();
-      const sku = (item.sku || '').trim();
-      if (SKIP_CATEGORIES.some((cat) => category.includes(cat))) continue;
-      if (sku.startsWith('Label-') || sku.startsWith('MF-')) continue;
-
-      const total = parseFloat(item.quantity || 0);
-      const reserved = parseFloat(item.quantity_reserved || 0);
-      inventory.push({
-        sku,
-        name: item.name || '',
-        quantity: total - reserved,
-        category: item.category?.name || item.category || '',
-      });
-    }
-
-    const result = {
-      inventory,
-      count: inventory.length,
-      source: 'salesbinder',
-      pagesFetched,
-      lastSync: new Date().toISOString(),
-    };
-
-    if (cache) {
-      await cache.put(KV_INVENTORY_KEY, JSON.stringify(result));
-    }
+    const result = await fetchAndCacheInventory(c.env);
     return c.json({ ...result, cached: false });
   } catch (e) {
     // Fall back to cache on upstream error so the dashboard keeps a usable view.
@@ -235,58 +332,9 @@ salesBinderRoutes.get('/packaging', async (c) => {
   }
 
   try {
-    const { items, pagesFetched } = await fetchAllItems(c.env);
-
-    const tins = [];
-    for (const item of items) {
-      const sku = (item.sku || '').trim();
-      if (!sku.startsWith('T-')) continue;
-
-      const qty = parseFloat(item.quantity || 0);
-      const reserved = parseFloat(item.quantity_reserved || 0);
-      const incoming = parseFloat(item.quantity_incoming || 0);
-      const threshold = parseFloat(item.low_threshold || 0);
-      const cost = parseFloat(item.cost || 0);
-
-      // Linked finished-goods SKU is the tin SKU stripped of its T- prefix.
-      const linkedSku = sku.startsWith('T-') ? sku.substring(2) : sku;
-
-      // Size from the trailing numeric segment (-35, -85).
-      let size = '';
-      const m = sku.match(/-(\d+)$/);
-      if (m) size = `${m[1]}g`;
-
-      tins.push({
-        sku,
-        linkedSku,
-        size,
-        name: item.name || '',
-        description: item.description || '',
-        onHand: qty,
-        reserved,
-        available: qty - reserved,
-        incoming,
-        lowThreshold: threshold,
-        unitCost: cost,
-        category: item.category?.name || item.category || '',
-      });
-    }
-
-    const result = {
-      tins,
-      count: tins.length,
-      source: 'salesbinder',
-      supplier: 'Guanqiao Tinbox Co., Limited',
-      leadTimeDays: 120,
-      pagesFetched,
-      lastSync: new Date().toISOString(),
-    };
-
     // Cache the RAW SalesBinder response (so future reads see real upstream
     // data), but apply overrides on the response we actually send out.
-    if (cache) {
-      await cache.put(KV_PACKAGING_KEY, JSON.stringify(result));
-    }
+    const result = await fetchAndCachePackaging(c.env);
     return c.json({
       ...result,
       cached: false,

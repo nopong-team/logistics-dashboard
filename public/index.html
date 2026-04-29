@@ -1103,8 +1103,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.26</span> &middot; April 2026
+  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.27</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.27 &mdash; 29 April 2026 (FBA inventory + SalesBinder crons)</h4>
+    <ul>
+      <li><strong>FBA inventory now cron-driven.</strong> Previously the only refresh path was stale-while-revalidate &mdash; a user request to <code>/api/amazon/inventory</code> served the stale snapshot and spawned a background refresh via <code>ctx.waitUntil</code>. That works fine when someone has the dashboard open daily; it doesn't work if nobody opens it for 48h. <code>runAmazonInventoryCronSync</code> now runs from the scheduled handler every 15 min and refreshes either market when its snapshot is &gt; 1h old. Worst-case staleness is now ~1h regardless of dashboard usage. Self-gates on the freshness threshold so 14 of every 16 ticks are free no-ops.</li>
+      <li><strong>SalesBinder now has a cron.</strong> Previously it had no automatic refresh path at all &mdash; the cache only updated when someone hit <code>/api/salesbinder/inventory?refresh=true</code>, which meant the chip just told you when one of us last clicked refresh by hand. <code>runSalesBinderCronSync</code> runs every 15 min and refreshes either inventory or packaging when their snapshot is &gt; 4h old. Worst-case staleness ~4h, which is plenty fresh for "what's in the warehouse" and keeps the SalesBinder API call rate negligible.</li>
+      <li><strong>FBA Inv CA / FBA Inv US chips</strong> added to the per-source row. They were already in <code>/api/sync-status</code> output but the frontend wasn't reading them.</li>
+      <li><strong>Tooltip schedules updated</strong> to match the new behaviour: SalesBinder no longer says "on-demand only", FBA Inv now says "refreshed when snapshot is older than 1 hour. Checked every 15 min by the cron &mdash; upstream pull only fires when stale."</li>
+    </ul>
     <h4>v2.26 &mdash; 29 April 2026 (chip + refresh fixes, sub-header layout, all 7 sources, schedule tooltips)</h4>
     <ul>
       <li><strong>Sub-header row.</strong> The brand row (logo + region switch) now stands alone; the data status &amp; controls live on a thin sticky sub-header below it (Live / Data Health / &middot;&middot;&middot; / Activity / Newest sync / Refresh). Less crowded, controls still pinned to the absolute right.</li>
@@ -1578,11 +1585,14 @@ function sourceScheduleHint(name) {
     const next = nextDue.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
     return `Cron: every 15 min (:00, :15, :30, :45). Next pull due ~${next} (${minsToNext}m).`;
   }
-  if (name === 'Xero') {
-    return 'OAuth token auto-refreshes on use when expired (~30 min lifespan, rotated).';
+  if (name === 'FBA Inv CA' || name === 'FBA Inv US') {
+    return 'Cron: refreshed when snapshot is older than 1 hour. Checked every 15 min by the cron tick — upstream pull only fires when stale.';
   }
   if (name === 'SalesBinder') {
-    return 'On-demand pull only — no cron. Refresh by hitting /api/salesbinder/inventory?refresh=true.';
+    return 'Cron: refreshed when snapshot is older than 4 hours. Checked every 15 min by the cron tick — upstream pull only fires when stale.';
+  }
+  if (name === 'Xero') {
+    return 'OAuth token auto-refreshes on use when expired (~30 min lifespan, rotated).';
   }
   if (name === 'Logiwa') {
     return 'Manual CSV upload — no cron. Re-upload the export to refresh.';
@@ -5675,6 +5685,8 @@ async function loadAllData() {
       if (syncData.wooUS?.lastSync)       sourceSyncTimes['Woo US']      = syncData.wooUS.lastSync;
       if (syncData.amzCA?.lastSync)       sourceSyncTimes['Amz CA']      = syncData.amzCA.lastSync;
       if (syncData.amzUS?.lastSync)       sourceSyncTimes['Amz US']      = syncData.amzUS.lastSync;
+      if (syncData.amzInvCA?.lastSync)    sourceSyncTimes['FBA Inv CA']  = syncData.amzInvCA.lastSync;
+      if (syncData.amzInvUS?.lastSync)    sourceSyncTimes['FBA Inv US']  = syncData.amzInvUS.lastSync;
       if (syncData.logiwa?.lastSync)      sourceSyncTimes['Logiwa']      = syncData.logiwa.lastSync;
       // Stash the filename so updateSyncStatusBar can put it in the chip tooltip.
       window.__logiwaFileName = syncData.logiwa?.fileName || null;

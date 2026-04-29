@@ -13,8 +13,8 @@
 import { Hono } from 'hono';
 import { wooRoutes, invalidateWooSalesCache } from './woo.js';
 import { adminRoutes, runBackfillChunk } from './admin.js';
-import { salesBinderRoutes } from './salesbinder.js';
-import { amazonRoutes, runAmazonOrdersChunk, runAmazonReportsTick, invalidateAmazonSalesCache } from './amazon.js';
+import { salesBinderRoutes, runSalesBinderCronSync } from './salesbinder.js';
+import { amazonRoutes, runAmazonOrdersChunk, runAmazonReportsTick, runAmazonInventoryCronSync, invalidateAmazonSalesCache } from './amazon.js';
 import { diagnosticsRoutes } from './diagnostics.js';
 import { xeroRoutes, xeroAuthRoutes, readXeroStatus } from './xero.js';
 import { logiwaRoutes, readLogiwaStatus } from './logiwa.js';
@@ -215,8 +215,21 @@ async function runCronSync(env) {
     console.log('cron sync skipped: DB binding not configured');
     return;
   }
-  // Woo and Amazon are independent — run in parallel so neither blocks the other.
-  await Promise.allSettled([runWooCronSync(env), runAmazonCronSync(env)]);
+  // All four jobs are independent — run in parallel so neither blocks the
+  // others. The two new ones (FBA inventory, SalesBinder) self-gate on
+  // staleness inside their respective sync functions, so on most ticks
+  // they're free no-ops; only when the cached snapshot has aged past the
+  // freshness threshold do they actually hit upstream.
+  //   • Woo Orders         — every 15 min (cron cadence)
+  //   • Amazon Orders+Reports — every 15 min (cron cadence)
+  //   • Amazon FBA Inventory — refresh if >1h old
+  //   • SalesBinder         — refresh if >4h old
+  await Promise.allSettled([
+    runWooCronSync(env),
+    runAmazonCronSync(env),
+    runAmazonInventoryCronSync(env),
+    runSalesBinderCronSync(env),
+  ]);
 }
 
 export default {
