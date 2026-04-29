@@ -65,8 +65,18 @@ const REPORT_TYPES = [REPORT_TYPE_PRIMARY, REPORT_TYPE_FALLBACK];
 // time so a slow tick doesn't blow Workers Free CPU budget on a fat report.
 const CRON_TICK_BUDGET_MS = 25_000;
 
-// Max attempts before marking a pending job 'failed' (status poll retries).
-const REPORT_POLL_MAX_ATTEMPTS = 15;
+// Max attempts before marking a pending job 'failed'. Each attempt is a real
+// poll of /reports/{id} — bumped to 30 with the per-job MIN_POLL_INTERVAL_S
+// guard below so a job that takes the full Amazon processing window
+// (typically 5–15 min, sometimes longer for big ranges) doesn't get
+// prematurely marked failed.
+const REPORT_POLL_MAX_ATTEMPTS = 30;
+
+// Minimum seconds between polls of the same job. Without this guard, a
+// caller (cron + manual admin loop racing each other) can poll one job many
+// times in seconds and burn through MAX_ATTEMPTS before Amazon has even had
+// a chance to generate the report.
+const MIN_POLL_INTERVAL_S = 90;
 
 // /api/amazon/sales KV cache TTL (seconds).
 const SALES_TTL_SECONDS = 15 * 60;
@@ -206,54 +216,64 @@ function spApiUrl(path, queryParams) {
   return url.toString();
 }
 
-export async function spApiRequest(env, _market, path, queryParams = {}) {
+// Single in-handler retry on 429. Amazon's SP-API rate limit recovery is
+// usually 5–15s. Cap the wait so one stuck request doesn't blow the
+// scheduled-handler 30s wall-clock budget; if the second attempt also 429s,
+// throw RateLimitedError and let the caller decide (Orders chunk converts to
+// a graceful "rate_limited" response; Reports tick treats as "stop this
+// phase, retry next tick").
+const RATE_LIMIT_RETRY_CAP_S = 10;
+
+async function spApiFetchOnce(env, path, init) {
   const token = await getAmazonAccessToken(env);
-  const url   = spApiUrl(path, queryParams);
-  let resp;
+  const headers = {
+    'x-amz-access-token': token,
+    'Content-Type': 'application/json',
+    ...(init.headers || {}),
+  };
   try {
-    resp = await fetch(url, {
-      method:  'GET',
-      headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },
-    });
+    return await fetch(init.url, { ...init, headers });
   } catch (e) {
     throw new Error('SP-API fetch failed: ' + redactSecrets(e?.message || e));
   }
+}
+
+async function spApiHandleResponse(resp, path, mode) {
   if (resp.status === 429) {
     throw new RateLimitedError(parseInt(resp.headers.get('retry-after') || '5', 10));
   }
   const text = await resp.text();
   if (!resp.ok) {
-    throw new Error(`SP-API ${resp.status} on ${path}: ${redactSecrets(text).substring(0, 400)}`);
+    throw new Error(`SP-API ${mode} ${resp.status} on ${path}: ${redactSecrets(text).substring(0, 400)}`);
   }
   try { return JSON.parse(text); } catch (e) {
-    throw new Error(`SP-API parse error (${resp.status}) on ${path}: ${redactSecrets(text).substring(0, 200)}`);
+    throw new Error(`SP-API ${mode} parse error (${resp.status}) on ${path}: ${redactSecrets(text).substring(0, 200)}`);
   }
 }
 
+export async function spApiRequest(env, _market, path, queryParams = {}) {
+  const url = spApiUrl(path, queryParams);
+  let resp = await spApiFetchOnce(env, path, { url, method: 'GET' });
+  if (resp.status === 429) {
+    const retryAfter = parseInt(resp.headers.get('retry-after') || '5', 10);
+    const waitMs = Math.min(retryAfter, RATE_LIMIT_RETRY_CAP_S) * 1000;
+    await new Promise((r) => setTimeout(r, waitMs));
+    resp = await spApiFetchOnce(env, path, { url, method: 'GET' });
+  }
+  return spApiHandleResponse(resp, path, 'GET');
+}
+
 export async function spApiPost(env, _market, path, body = {}) {
-  const token   = await getAmazonAccessToken(env);
   const url     = `https://${SP_API_HOST}${path}`;
   const payload = JSON.stringify(body);
-  let resp;
-  try {
-    resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },
-      body: payload,
-    });
-  } catch (e) {
-    throw new Error('SP-API POST fetch failed: ' + redactSecrets(e?.message || e));
-  }
+  let resp = await spApiFetchOnce(env, path, { url, method: 'POST', body: payload });
   if (resp.status === 429) {
-    throw new RateLimitedError(parseInt(resp.headers.get('retry-after') || '5', 10));
+    const retryAfter = parseInt(resp.headers.get('retry-after') || '5', 10);
+    const waitMs = Math.min(retryAfter, RATE_LIMIT_RETRY_CAP_S) * 1000;
+    await new Promise((r) => setTimeout(r, waitMs));
+    resp = await spApiFetchOnce(env, path, { url, method: 'POST', body: payload });
   }
-  const text = await resp.text();
-  if (!resp.ok) {
-    throw new Error(`SP-API POST ${resp.status} on ${path}: ${redactSecrets(text).substring(0, 400)}`);
-  }
-  try { return JSON.parse(text); } catch (e) {
-    throw new Error(`SP-API POST parse error (${resp.status}) on ${path}: ${redactSecrets(text).substring(0, 200)}`);
-  }
+  return spApiHandleResponse(resp, path, 'POST');
 }
 
 // ─── Orders flow ───────────────────────────────────────────────────────────
@@ -303,7 +323,43 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
     if (statusFilter) params.OrderStatuses = statusFilter;
   }
 
-  const data    = await spApiRequest(env, market, '/orders/v0/orders', params);
+  let data;
+  try {
+    data = await spApiRequest(env, market, '/orders/v0/orders', params);
+  } catch (e) {
+    if (e?.rateLimited) {
+      // Graceful rate-limited response — caller should back off and retry,
+      // not abort the loop. more=true tells the curl loop to keep going
+      // (after sleeping). watermark unchanged. Logged for audit.
+      const retryAfter = e.retryAfter || 30;
+      await env.DB.prepare(
+        `INSERT INTO sync_logs
+           (source, market, action, pages_fetched, orders_added, items_added,
+            watermark_before, watermark_after, status, error, duration_ms)
+         VALUES ('amazon', ?, ?, 0, 0, 0, ?, ?, 'rate_limited', ?, ?)`,
+      ).bind(
+        market, action, watermarkBefore, watermarkBefore,
+        `Amazon rate limited; retry after ${retryAfter}s`, Date.now() - startMs,
+      ).run();
+      return {
+        ok:              false,
+        source:          'amazon',
+        market,
+        action,
+        error:           'rate_limited',
+        retryAfter,
+        pagesFetched:    0,
+        rowsFetched:     0,
+        ordersAdded:     0,
+        watermarkBefore,
+        watermarkAfter:  watermarkBefore,
+        nextToken:       nextToken || null,  // preserve incoming token so caller can resume
+        more:            true,
+        durationMs:      Date.now() - startMs,
+      };
+    }
+    throw e;
+  }
   const orders  = data?.payload?.Orders || [];
   const newNext = data?.payload?.NextToken || null;
 
@@ -463,11 +519,18 @@ async function seedReportJobsIfNeeded(env, market) {
 //   - IN_PROGRESS|other → leave pending, attempts++
 //   - attempts > MAX    → failed
 async function pollPendingJobs(env, market, maxJobs, deadlineMs) {
+  // Filter out jobs polled in the last MIN_POLL_INTERVAL_S seconds — Amazon
+  // takes 5–15 min to generate a report, so polling every cron tick (15 min)
+  // is plenty. Without this guard, manual admin loops + cron racing each
+  // other can eat through MAX_ATTEMPTS in a few minutes and prematurely mark
+  // a still-processing report as failed.
   const jobs = await env.DB.prepare(
     `SELECT * FROM report_jobs
      WHERE source = 'amazon' AND market = ? AND status = 'pending'
+       AND (last_polled_at IS NULL
+            OR (julianday('now') - julianday(last_polled_at)) * 86400.0 > ?)
      ORDER BY id ASC LIMIT ?`,
-  ).bind(market, maxJobs).all();
+  ).bind(market, MIN_POLL_INTERVAL_S, maxJobs).all();
   let advanced = 0;
   for (const job of (jobs.results || [])) {
     if (Date.now() > deadlineMs) break;
