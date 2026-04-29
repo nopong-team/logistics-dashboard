@@ -15,6 +15,8 @@ import { wooRoutes, invalidateWooSalesCache } from './woo.js';
 import { adminRoutes, runBackfillChunk } from './admin.js';
 import { salesBinderRoutes } from './salesbinder.js';
 import { amazonRoutes, runAmazonOrdersChunk, runAmazonReportsTick, invalidateAmazonSalesCache } from './amazon.js';
+import { diagnosticsRoutes } from './diagnostics.js';
+import buyingToolHistory from './buying-tool-history.js';
 import { redactSecrets } from './redact.js';
 
 const app = new Hono();
@@ -58,6 +60,23 @@ app.route('/api/salesbinder', salesBinderRoutes);
 // state machine, LWA token cached in KV). Cron drives Orders + Reports work
 // in parallel with Woo's incremental sync.
 app.route('/api/amazon', amazonRoutes);
+
+// Cross-source diagnostics — /api/sync-status (per-source freshness for the
+// dashboard's status bar) and /api/audit (read-only data audit powering the
+// Data Health panel). Both read directly from D1 + KV and don't take params.
+app.route('/api', diagnosticsRoutes);
+
+// Buying-tool history — 18+ months of per-SKU monthly sales plus manually
+// curated allocation buffers from the buying-tool spreadsheet. Powers the
+// long-history sparklines and forecasting on the buying-tool tile.
+//
+// Baked into the bundle (src/buying-tool-history.js) rather than living in
+// KV: it's small (~16KB), edits are infrequent (when the spreadsheet is
+// refreshed), and shipping with the code keeps it version-controlled and
+// removes the manual KV-upload step. To update: re-copy backend/buying-tool-
+// history.json from the legacy server, regenerate src/buying-tool-history.js,
+// and redeploy.
+app.get('/api/buying-tool-history', (c) => c.json(buyingToolHistory));
 
 // Catch-all 404 for unknown /api/* paths and any non-asset path.
 app.notFound((c) => c.json({ error: 'not found', path: c.req.path }, 404));

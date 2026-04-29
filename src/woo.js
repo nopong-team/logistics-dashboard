@@ -179,6 +179,57 @@ wooRoutes.get('/sales', async (c) => {
   return c.json({ ...payload, cached: false });
 });
 
+// GET /api/woo/recent-orders?market=CA|US
+//   Last-24h orders for the recent-orders rail. Reads from D1 directly (no KV
+//   layer — the data is small, the query is cheap, and the rail is a "live"
+//   surface that shouldn't lag a 15-min cache).
+//
+//   Response shape matches the legacy backend/server.js endpoint exactly so the
+//   frontend's loadRecentOrders() picks it up without modification:
+//     { orders: [{ id, date, amount, currency, market, channel: 'WooCommerce' }],
+//       count, market, source: 'woocommerce' }
+//
+//   - 50-row cap, ordered by date_created DESC (matches legacy `per_page=50` +
+//     `orderby=date,order=desc` from Woo).
+//   - status IN ('completed','processing') — same filter as `/api/woo/sales`,
+//     keeps the rail consistent with the revenue numbers.
+//   - "Last 24h" measured against `date_created` UTC. The frontend formats
+//     dates with `toLocaleDateString('en-AU', ...)` so mild TZ slippage at the
+//     boundary is invisible to the user; precise Eastern-bucketing isn't needed
+//     for a recent-orders rail.
+wooRoutes.get('/recent-orders', async (c) => {
+  const market = (c.req.query('market') || 'US').toUpperCase();
+  if (!['CA', 'US', 'AU'].includes(market)) {
+    return c.json({ error: `unsupported market: ${market}` }, 400);
+  }
+  if (!c.env.DB) {
+    return c.json({ error: 'D1 binding DB not configured' }, 500);
+  }
+
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const res = await c.env.DB.prepare(
+    `SELECT id, date_created, total
+     FROM orders
+     WHERE market = ?
+       AND status IN ('completed','processing')
+       AND date_created >= ?
+     ORDER BY date_created DESC
+     LIMIT 50`,
+  ).bind(market, since).all();
+
+  const currency = MARKET_CURRENCY[market] || 'USD';
+  const orders = (res.results || []).map((r) => ({
+    id:       r.id,
+    date:     r.date_created,
+    amount:   parseFloat(r.total || 0),
+    currency,
+    market,
+    channel:  'WooCommerce',
+  }));
+
+  return c.json({ orders, count: orders.length, market, source: 'woocommerce' });
+});
+
 // Internal helper exported for the cron handler in src/index.js — invalidates
 // the KV cache key for a market so the next /api/woo/sales call re-aggregates
 // from D1 (picking up the rows the cron just wrote).

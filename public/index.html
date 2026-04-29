@@ -990,8 +990,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.20</span> &middot; April 2026
+  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.21</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.21 &mdash; 29 April 2026 (D1-read sweep)</h4>
+    <ul>
+      <li>Four legacy endpoints ported from the Express backend in one pass &mdash; the dashboard's recent-orders rail, sync-status bar, Data Health panel, and buying-tool sparklines now all serve from the Worker.</li>
+      <li><code>/api/woo/recent-orders?market=CA|US</code> &mdash; last 24h of completed/processing orders, top 50, ordered newest first. Reads directly from D1 (no KV layer &mdash; the data's small, the rail's a "live" surface).</li>
+      <li><code>/api/sync-status</code> &mdash; per-source freshness map (<code>wooCA</code>/<code>wooUS</code>/<code>amzCA</code>/<code>amzUS</code> with <code>lastSync</code>+<code>orderCount</code>, plus <code>amzInvCA</code>/<code>amzInvUS</code> from the FBA inventory KV snapshot). Powers the source-time chips in the status bar.</li>
+      <li><code>/api/audit</code> &mdash; read-only data audit. Per-market Woo monthly revenue + per-SKU rollups + daily order counts; per-market Amazon SKU counts + filter-signal coverage + unmatched/wrong-market counts from <code>report_jobs</code>. The legacy "CA vs US byte-identical caches" check is structurally impossible under the per-source D1 schema, so <code>caUsIdentical</code> is hard-false and the frontend's Data Health panel reads divergence from the filter-signal fields instead.</li>
+      <li><code>/api/buying-tool-history</code> &mdash; 18+ months of per-SKU monthly sales plus manually curated allocation buffers, baked into the Worker bundle as <code>src/buying-tool-history.js</code>. Edit + redeploy when the spreadsheet refreshes.</li>
+    </ul>
     <h4>v2.20 &mdash; 29 April 2026 (Amazon FBA Inventory)</h4>
     <ul>
       <li>Amazon FBA Inventory ported to the Worker &mdash; <code>/api/amazon/inventory?market=CA|US</code> serves a KV-cached snapshot of FBA stock per seller SKU (asin, fnSku, fulfillable, inbound, reserved, unfulfillable). The dashboard's FBA CA / FBA US stock tiles now populate again.</li>
