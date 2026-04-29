@@ -30,6 +30,8 @@
  */
 
 import { Hono } from 'hono';
+import { redactSecrets } from './redact.js';
+import { runAmazonOrdersChunk, runAmazonReportsTick } from './amazon.js';
 
 export const adminRoutes = new Hono();
 
@@ -58,15 +60,6 @@ function storeFromEnv(env, market) {
     US: { market: 'US', url: env.WOO_US_URL, key: env.WOO_US_KEY, secret: env.WOO_US_SECRET, currency: 'USD' },
   };
   return lookup[key];
-}
-
-// Scrub anything that looks like a credential out of a string before it hits
-// any user-visible surface (response body, transcript, scrollback). Belt to
-// the global onError handler's braces.
-function redactSecrets(s) {
-  return String(s || '')
-    .replace(/(consumer_key|consumer_secret|access_token|refresh_token|api_key)=[^&\s"']+/gi, '$1=[REDACTED]')
-    .replace(/\b(ck|cs)_[a-f0-9]{20,}\b/gi, '$1_[REDACTED]');
 }
 
 async function wooFetch(store, endpoint, params) {
@@ -277,19 +270,35 @@ export async function runBackfillChunk(env, market, pages, action = 'backfill') 
 
 adminRoutes.post('/backfill', async (c) => {
   const market = (c.req.query('market') || '').toUpperCase();
-  const pages = Math.min(parseInt(c.req.query('pages') || String(DEFAULT_PAGES_PER_CALL), 10) || DEFAULT_PAGES_PER_CALL, MAX_PAGES_PER_CALL);
-
+  const source = (c.req.query('source') || 'woo').toLowerCase();
   if (!market || !['CA', 'US'].includes(market)) {
     return c.json({ error: 'market must be CA or US' }, 400);
-  }
-  const store = storeFromEnv(c.env, market);
-  if (!store?.url || !store?.key || !store?.secret) {
-    return c.json({ error: `WooCommerce ${market} not configured` }, 401);
   }
   if (!c.env.DB) {
     return c.json({ error: 'D1 binding DB not configured' }, 500);
   }
 
+  if (source === 'amazon') {
+    if (!c.env.AMAZON_REFRESH_TOKEN || !c.env.AMAZON_LWA_CLIENT_ID || !c.env.AMAZON_LWA_CLIENT_SECRET) {
+      return c.json({ error: 'Amazon not configured (need AMAZON_REFRESH_TOKEN + AMAZON_LWA_CLIENT_ID + AMAZON_LWA_CLIENT_SECRET)' }, 401);
+    }
+    // Amazon backfill chunk = one page (≤100 orders) + NextToken for the next call.
+    // Caller drives the loop by passing nextToken back in (or omitting for first call).
+    const nextToken = c.req.query('nextToken') || null;
+    // Optional: also advance Reports state machine on the same call so a manual
+    // backfill loop seeds + polls + ingests in lockstep with Orders progress.
+    const includeReports = c.req.query('reports') === '1';
+    const orders  = await runAmazonOrdersChunk(c.env, market, { action: 'amazon-backfill', nextToken });
+    const reports = includeReports ? await runAmazonReportsTick(c.env, market) : null;
+    return c.json({ orders, reports });
+  }
+
+  // Default — WooCommerce backfill (existing behaviour).
+  const pages = Math.min(parseInt(c.req.query('pages') || String(DEFAULT_PAGES_PER_CALL), 10) || DEFAULT_PAGES_PER_CALL, MAX_PAGES_PER_CALL);
+  const store = storeFromEnv(c.env, market);
+  if (!store?.url || !store?.key || !store?.secret) {
+    return c.json({ error: `WooCommerce ${market} not configured` }, 401);
+  }
   const result = await runBackfillChunk(c.env, market, pages, 'backfill');
   return c.json(result);
 });
@@ -309,15 +318,63 @@ adminRoutes.post('/backfill', async (c) => {
 // we backfilled, with the same status filter.
 adminRoutes.get('/reconcile', async (c) => {
   const market = (c.req.query('market') || '').toUpperCase();
+  const source = (c.req.query('source') || 'woo').toLowerCase();
   if (!market || !['CA', 'US'].includes(market)) {
     return c.json({ error: 'market must be CA or US' }, 400);
   }
+  if (!c.env.DB) {
+    return c.json({ error: 'D1 binding DB not configured' }, 500);
+  }
+
+  if (source === 'amazon') {
+    // Amazon reconcile is D1-only for now — SP-API has no cheap "give me a
+    // count for [after, before)" equivalent of Woo's X-WP-Total header. We
+    // surface enough state to spot-check whether the watermark is moving and
+    // the Reports state machine is making progress.
+    const [monthly, syncState, jobs] = await Promise.all([
+      c.env.DB.prepare(
+        `SELECT substr(local_date, 1, 7) AS ym, COUNT(*) AS n_orders, SUM(total) AS revenue
+         FROM amazon_orders WHERE market = ? GROUP BY ym ORDER BY ym`,
+      ).bind(market).all(),
+      c.env.DB.prepare(
+        `SELECT watermark, last_synced_at FROM sync_state WHERE source = 'amazon' AND market = ?`,
+      ).bind(market).first(),
+      c.env.DB.prepare(
+        `SELECT range_label, status, attempts, rows_total, rows_matched, rows_unmatched,
+                rows_wrong_market, filter_signal, error, updated_at
+         FROM report_jobs WHERE source = 'amazon' AND market = ?
+         ORDER BY range_label DESC, id DESC`,
+      ).bind(market).all(),
+    ]);
+    const totals = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n, SUM(total) AS s FROM amazon_orders WHERE market = ?`,
+    ).bind(market).first();
+    return c.json({
+      source: 'amazon',
+      market,
+      orders: {
+        d1Count:   totals?.n || 0,
+        d1Revenue: totals?.s ? +Number(totals.s).toFixed(2) : 0,
+        watermark: syncState?.watermark || null,
+        lastSync:  syncState?.last_synced_at || null,
+        monthly:   (monthly.results || []).map((r) => ({
+          yearMonth: r.ym, d1Count: r.n_orders, d1Revenue: r.revenue ? +r.revenue.toFixed(2) : 0,
+        })),
+      },
+      reportJobs: monthly.results ? (jobs.results || []) : [],
+      notes: [
+        'Amazon reconcile is D1-only — SP-API has no cheap remote count comparator.',
+        'Watermark advances after every Orders chunk; lastSync updates each successful chunk.',
+        'reportJobs surfaces every job (latest first). status=ingested means rows landed; status=failed needs investigation.',
+        'Manual catch-up: POST /api/admin/backfill?source=amazon&market=CA — loop until orders.more=false; pass nextToken back in.',
+      ],
+    });
+  }
+
+  // Default — WooCommerce reconcile (existing behaviour).
   const store = storeFromEnv(c.env, market);
   if (!store?.url || !store?.key || !store?.secret) {
     return c.json({ error: `WooCommerce ${market} not configured` }, 401);
-  }
-  if (!c.env.DB) {
-    return c.json({ error: 'D1 binding DB not configured' }, 500);
   }
 
   // Pull D1's snapshot first so we know the window we're validating.

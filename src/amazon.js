@@ -1,0 +1,879 @@
+/**
+ * Amazon SP-API integration for the Logistics Dashboard.
+ *
+ * Two ingestion flows + one read endpoint:
+ *
+ *   • Orders flow (synchronous, watermark-based) — drives monthly revenue.
+ *     Mirrors the Woo runBackfillChunk pattern. Cron pulls one chunk per tick
+ *     per market via runAmazonOrdersChunk; manual catch-up via
+ *     /api/admin/backfill?source=amazon&market=CA. INSERT OR REPLACE on
+ *     amazon_orders means re-runs are idempotent.
+ *
+ *   • Reports flow (async, range-scheduled) — drives per-SKU breakdown.
+ *     SP-API returns reports asynchronously: POST /reports queues a job,
+ *     poll until DONE, download a presigned URL, parse TSV. Each phase is
+ *     CPU-cheap individually but together blow the Workers Free 50ms budget.
+ *     report_jobs tracks jobs through pending → ready → ingested | failed,
+ *     and runAmazonReportsTick advances up to N=3 jobs per phase per cron
+ *     tick with a hard 25s wall-clock guard.
+ *
+ *   • /api/amazon/sales reads from D1 (amazon_orders + amazon_items), same
+ *     payload shape as /api/woo/sales, KV-cached for 15 min.
+ *
+ * Token caching: Workers are stateless across invocations, so the legacy
+ * in-memory token cache (server.js:1060) becomes a KV entry under
+ * 'amazon:lwa-token' with TTL = expires_in - 60. Each invocation reads from
+ * KV first, exchanges the refresh token only on miss.
+ *
+ * Secrets (Wrangler secrets — names match legacy backend/.env):
+ *   AMAZON_REFRESH_TOKEN     — LWA refresh token (Atzr|...)
+ *   AMAZON_LWA_CLIENT_ID     — LWA OAuth client id
+ *   AMAZON_LWA_CLIENT_SECRET — LWA OAuth client secret
+ *
+ * Marketplace IDs are public constants, hardcoded below.
+ */
+
+import { Hono } from 'hono';
+import {
+  buildMonthWindow, getWeekKey, toBusinessLocalDate, easternIsoMidnight, getBusinessToday,
+} from './timezone.js';
+import { redactSecrets } from './redact.js';
+
+export const amazonRoutes = new Hono();
+
+// ─── Public constants ──────────────────────────────────────────────────────
+
+// Both CA and US marketplaces live behind the same SP-API regional endpoint.
+const SP_API_HOST = 'sellingpartnerapi-na.amazon.com';
+
+// Marketplace IDs are public, immutable, and don't belong in the secret store.
+const AMAZON_MARKETPLACES = {
+  CA: { id: 'A2EUQ1WTGCTBG2', currency: 'CAD', label: 'Canada' },
+  US: { id: 'ATVPDKIKX0DER', currency: 'USD', label: 'United States' },
+};
+
+// LWA token cache key + safety buffer (refresh slightly before actual expiry).
+const LWA_KV_KEY      = 'amazon:lwa-token';
+const LWA_TTL_BUFFER  = 60; // seconds
+
+// Reports API constants.
+const REPORT_TYPE_PRIMARY  = 'GET_AMAZON_FULFILLED_SHIPMENTS_DATA_GENERAL';
+const REPORT_TYPE_FALLBACK = 'GET_FBA_FULFILLMENT_CUSTOMER_SHIPMENT_SALES_DATA';
+const REPORT_TYPES = [REPORT_TYPE_PRIMARY, REPORT_TYPE_FALLBACK];
+
+// Cron tick wall-clock guard (ms). Stop spawning new work past this elapsed
+// time so a slow tick doesn't blow Workers Free CPU budget on a fat report.
+const CRON_TICK_BUDGET_MS = 25_000;
+
+// Max attempts before marking a pending job 'failed' (status poll retries).
+const REPORT_POLL_MAX_ATTEMPTS = 15;
+
+// /api/amazon/sales KV cache TTL (seconds).
+const SALES_TTL_SECONDS = 15 * 60;
+const SALES_KV_KEY = (market) => `amazon-sales-${market.toLowerCase()}`;
+
+// Active vs frozen ranges for the Reports state machine. "Active" ranges
+// (this+last month × 2 halves) get refreshed every 24h; "frozen" historical
+// ranges are seeded once and never re-run.
+const ACTIVE_RANGE_STALE_HOURS = 24;
+
+// ─── SKU map (lifted verbatim from legacy backend/server.js) ───────────────
+//
+// Maps Amazon seller SKUs (canonical CA-/US- codes AND FNSKU-style aliases)
+// to the canonical dashboard SKU. US-only SKUs intentionally map to the
+// CA- dashboard code so combined reporting rolls up cleanly. Source: No Pong
+// Product SKU Registry (Apr 2026).
+const AMZ_SKU_MAP = {
+  // CA SKUs — canonical names (self-map)
+  'CA-OG-NPO-85':  'CA-OG-NPO-85',   // Original 85g
+  'CA-CL-VLB-85':  'CA-CL-VLB-85',   // Cool Lavender 85g
+  'CA-CL-VLB-35':  'CA-CL-VLB-35',   // Cool Lavender 35g
+  'CA-FF-VLB-35':  'CA-FF-VLB-35',   // Fragrance Free 35g
+  'CA-FP-VLB-35':  'CA-FP-VLB-35',   // Flower Power 35g
+  'CA-OG-NPO-35':  'CA-OG-NPO-35',   // Original 35g
+  'CA-SC-BCF-35':  'CA-SC-BCF-35',   // Spicy Chai BCF 35g
+  'CA-SC-NPO-35':  'CA-SC-NPO-35',   // Spicy Chai Original 35g
+  // CA SKUs — Amazon FNSKU-style aliases (normalised to canonical CA- code)
+  'V9-2U5C-RGSU':  'CA-CL-VLB-35',   // Cool Lavender 35g alias
+  'HP-G88K-NR69':  'CA-FF-VLB-35',   // Fragrance Free 35g alias
+  '0T-GA0Y-L3HG':  'CA-OG-NPO-35',   // Original 35g alias
+  'IC-OLUM-TQLF':  'CA-SC-NPO-35',   // Spicy Chai Original 35g alias
+  // US-only SKUs (normalised to CA- dashboard SKU for combined reporting)
+  'US-FP-VLB-35':  'CA-FP-VLB-35',   // Flower Power 35g (US)
+  'US-SC-BCF-35':  'CA-SC-BCF-35',   // Spicy Chai BCF 35g (US)
+  'US-FF-VLB-35':  'CA-FF-VLB-35',   // Fragrance Free 35g (US)
+};
+
+export function matchAmzItemToSku(_itemName, sellerSku) {
+  if (!sellerSku) return null;
+  const trimmed = String(sellerSku).trim();
+  return AMZ_SKU_MAP[trimmed] || null;
+}
+
+// ─── LWA token management (KV-cached) ──────────────────────────────────────
+//
+// Exchanges the long-lived refresh token for a short-lived access token at
+// api.amazon.com/auth/o2/token. Token shape `Atzr|...` (refresh) or
+// `Atza|...` (access). Cached in KV under 'amazon:lwa-token' with the
+// access token + an expiresAt unix-seconds timestamp; we refresh the moment
+// expiresAt - now is within LWA_TTL_BUFFER.
+
+async function fetchFreshLwaToken(env) {
+  if (!env.AMAZON_REFRESH_TOKEN || !env.AMAZON_LWA_CLIENT_ID || !env.AMAZON_LWA_CLIENT_SECRET) {
+    throw new Error(
+      'Amazon not configured. Set AMAZON_REFRESH_TOKEN, AMAZON_LWA_CLIENT_ID, AMAZON_LWA_CLIENT_SECRET ' +
+      'with `npx wrangler secret put` (or via scripts/load-secrets.sh from a local .env).',
+    );
+  }
+  const body = new URLSearchParams({
+    grant_type:    'refresh_token',
+    refresh_token: env.AMAZON_REFRESH_TOKEN,
+    client_id:     env.AMAZON_LWA_CLIENT_ID,
+    client_secret: env.AMAZON_LWA_CLIENT_SECRET,
+  });
+
+  let resp;
+  try {
+    resp = await fetch('https://api.amazon.com/auth/o2/token', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body:    body.toString(),
+    });
+  } catch (e) {
+    // Native fetch errors can carry the request body in the message — which
+    // includes refresh_token / client_secret. Sanitize before propagating.
+    throw new Error('Amazon LWA fetch failed: ' + redactSecrets(e?.message || e));
+  }
+
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`Amazon LWA ${resp.status}: ${redactSecrets(text).substring(0, 300)}`);
+  }
+  let data;
+  try { data = JSON.parse(text); } catch (e) {
+    throw new Error('Amazon LWA parse error: ' + redactSecrets(text).substring(0, 200));
+  }
+  if (!data.access_token) {
+    throw new Error('Amazon LWA missing access_token: ' + redactSecrets(text).substring(0, 200));
+  }
+  return {
+    access_token: data.access_token,
+    expires_in:   parseInt(data.expires_in || 3600, 10),
+  };
+}
+
+export async function getAmazonAccessToken(env) {
+  const now = Math.floor(Date.now() / 1000);
+  if (env.CACHE) {
+    const cached = await env.CACHE.get(LWA_KV_KEY, 'json');
+    if (cached?.access_token && cached.expiresAt && cached.expiresAt - now > LWA_TTL_BUFFER) {
+      return cached.access_token;
+    }
+  }
+  const fresh = await fetchFreshLwaToken(env);
+  if (env.CACHE) {
+    const expiresAt = now + fresh.expires_in;
+    await env.CACHE.put(
+      LWA_KV_KEY,
+      JSON.stringify({ access_token: fresh.access_token, expiresAt }),
+      { expirationTtl: Math.max(60, fresh.expires_in - LWA_TTL_BUFFER) },
+    );
+  }
+  return fresh.access_token;
+}
+
+// ─── SP-API request helpers ────────────────────────────────────────────────
+//
+// Both helpers carry token + redaction discipline. On 429, surface a typed
+// error so callers (especially the Reports state machine) can decide whether
+// to retry now or back off — we don't sleep inside the helper because that
+// burns Workers Free CPU credit.
+
+class RateLimitedError extends Error {
+  constructor(retryAfterSeconds) {
+    super('Amazon rate limited');
+    this.rateLimited = true;
+    this.retryAfter  = retryAfterSeconds;
+  }
+}
+
+function spApiUrl(path, queryParams) {
+  const url = new URL(path, `https://${SP_API_HOST}`);
+  for (const [k, v] of Object.entries(queryParams || {})) {
+    if (v === undefined || v === null) continue;
+    url.searchParams.set(k, String(v));
+  }
+  return url.toString();
+}
+
+export async function spApiRequest(env, _market, path, queryParams = {}) {
+  const token = await getAmazonAccessToken(env);
+  const url   = spApiUrl(path, queryParams);
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method:  'GET',
+      headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },
+    });
+  } catch (e) {
+    throw new Error('SP-API fetch failed: ' + redactSecrets(e?.message || e));
+  }
+  if (resp.status === 429) {
+    throw new RateLimitedError(parseInt(resp.headers.get('retry-after') || '5', 10));
+  }
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`SP-API ${resp.status} on ${path}: ${redactSecrets(text).substring(0, 400)}`);
+  }
+  try { return JSON.parse(text); } catch (e) {
+    throw new Error(`SP-API parse error (${resp.status}) on ${path}: ${redactSecrets(text).substring(0, 200)}`);
+  }
+}
+
+export async function spApiPost(env, _market, path, body = {}) {
+  const token   = await getAmazonAccessToken(env);
+  const url     = `https://${SP_API_HOST}${path}`;
+  const payload = JSON.stringify(body);
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },
+      body: payload,
+    });
+  } catch (e) {
+    throw new Error('SP-API POST fetch failed: ' + redactSecrets(e?.message || e));
+  }
+  if (resp.status === 429) {
+    throw new RateLimitedError(parseInt(resp.headers.get('retry-after') || '5', 10));
+  }
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`SP-API POST ${resp.status} on ${path}: ${redactSecrets(text).substring(0, 400)}`);
+  }
+  try { return JSON.parse(text); } catch (e) {
+    throw new Error(`SP-API POST parse error (${resp.status}) on ${path}: ${redactSecrets(text).substring(0, 200)}`);
+  }
+}
+
+// ─── Orders flow ───────────────────────────────────────────────────────────
+//
+// Mirrors the Woo runBackfillChunk shape: fetch a watermark, pull one chunk
+// of orders, INSERT OR REPLACE into amazon_orders, advance the watermark,
+// log to sync_logs. NextToken pagination drives subsequent chunks (one per
+// call). Status filter:
+//   - incremental: 'Unshipped,Shipped' (faster, current orders only)
+//   - backfill:    no status filter (per legacy: "old delivered orders no
+//                  longer show as Shipped" so a status filter loses history)
+//
+// The defensive marketplace post-filter (`order.MarketplaceId === mp.id`)
+// catches the rare cross-market row Amazon can return; legacy server.js
+// hit this once and the comment is preserved there.
+
+const AMAZON_PAGE_SIZE = 100; // SP-API /orders/v0/orders default
+
+export async function runAmazonOrdersChunk(env, market, options = {}) {
+  const startMs = Date.now();
+  const mp = AMAZON_MARKETPLACES[market];
+  if (!mp) throw new Error(`Unknown Amazon market: ${market}`);
+
+  const action       = options.action || 'amazon-incremental';
+  const isBackfill   = action === 'amazon-backfill';
+  const statusFilter = isBackfill ? null : 'Unshipped,Shipped';
+
+  // Get watermark.
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO sync_state (source, market) VALUES ('amazon', ?)`,
+  ).bind(market).run();
+  const stateRow = await env.DB.prepare(
+    `SELECT watermark FROM sync_state WHERE source = 'amazon' AND market = ?`,
+  ).bind(market).first();
+  const watermarkBefore = stateRow?.watermark || '1970-01-01T00:00:00';
+
+  // Build request params.
+  const nextToken = options.nextToken || null;
+  let params;
+  if (nextToken) {
+    params = { NextToken: nextToken, MarketplaceIds: mp.id };
+  } else {
+    params = {
+      MarketplaceIds: mp.id,
+      CreatedAfter:   watermarkBefore,
+    };
+    if (statusFilter) params.OrderStatuses = statusFilter;
+  }
+
+  const data    = await spApiRequest(env, market, '/orders/v0/orders', params);
+  const orders  = data?.payload?.Orders || [];
+  const newNext = data?.payload?.NextToken || null;
+
+  // Filter: defensive marketplace check + skip canceled/pending.
+  const usable = orders.filter((o) => {
+    if (o.MarketplaceId && o.MarketplaceId !== mp.id) return false;
+    const st = o.OrderStatus || '';
+    if (st === 'Canceled' || st === 'Pending' || st === 'PendingAvailability') return false;
+    return !!o.AmazonOrderId;
+  });
+
+  let watermarkAfter = watermarkBefore;
+  let ordersAdded   = 0;
+
+  if (usable.length > 0) {
+    const stmts = [];
+    for (const o of usable) {
+      const purchase   = o.PurchaseDate || o.LastUpdateDate || '';
+      const localDate  = toBusinessLocalDate(purchase);
+      const total      = parseFloat(o.OrderTotal?.Amount || 0);
+      const currency   = o.OrderTotal?.CurrencyCode || mp.currency;
+      stmts.push(
+        env.DB.prepare(
+          `INSERT OR REPLACE INTO amazon_orders
+             (id, market, status, purchase_date, local_date, total, currency, marketplace_id, raw_json, synced_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))`,
+        ).bind(
+          o.AmazonOrderId,
+          market,
+          o.OrderStatus || 'unknown',
+          purchase,
+          localDate,
+          total,
+          currency,
+          mp.id,
+        ),
+      );
+      if (purchase > watermarkAfter) watermarkAfter = purchase;
+      ordersAdded++;
+    }
+    // Chunk D1 batches at 500 statements (same convention as Woo).
+    const CHUNK = 500;
+    for (let i = 0; i < stmts.length; i += CHUNK) {
+      await env.DB.batch(stmts.slice(i, i + CHUNK));
+    }
+    if (watermarkAfter > watermarkBefore) {
+      await env.DB.prepare(
+        `UPDATE sync_state SET watermark = ?, last_synced_at = datetime('now')
+         WHERE source = 'amazon' AND market = ?`,
+      ).bind(watermarkAfter, market).run();
+    }
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO sync_logs
+       (source, market, action, pages_fetched, orders_added, items_added,
+        watermark_before, watermark_after, status, duration_ms)
+     VALUES ('amazon', ?, ?, 1, ?, 0, ?, ?, 'ok', ?)`,
+  ).bind(
+    market, action, ordersAdded, watermarkBefore, watermarkAfter, Date.now() - startMs,
+  ).run();
+
+  return {
+    ok:               true,
+    source:           'amazon',
+    market,
+    action,
+    pagesFetched:     1,
+    rowsFetched:      orders.length,
+    ordersAdded,
+    watermarkBefore,
+    watermarkAfter,
+    nextToken:        newNext,
+    more:             !!newNext,
+    durationMs:       Date.now() - startMs,
+  };
+}
+
+// ─── Reports state machine ─────────────────────────────────────────────────
+//
+// Each tick: Phase A (seed if needed) → Phase B (poll up to N pending) →
+// Phase C (ingest up to N ready). All three phases share the same wall-clock
+// budget (CRON_TICK_BUDGET_MS) — once we cross it, we return early.
+
+// Build the desired set of date ranges for SKU reports. 6-month rolling
+// window in Eastern, two halves per month. Active ranges (this + last month)
+// are eligible for daily refresh; frozen ranges are seeded once.
+function buildReportRanges() {
+  const today = getBusinessToday(); // YYYY-MM-DD Eastern
+  const [yStr, mStr] = today.split('-');
+  const y = parseInt(yStr, 10);
+  const m = parseInt(mStr, 10);
+  const ranges = [];
+  for (let i = 5; i >= 0; i--) {
+    let mm = m - i;
+    let yy = y;
+    while (mm <= 0) { mm += 12; yy -= 1; }
+    const ym = `${yy}-${String(mm).padStart(2, '0')}`;
+    const isActive = i <= 1; // this month (i=0) or last month (i=1)
+    let nextY = yy, nextM = mm + 1;
+    if (nextM > 12) { nextM = 1; nextY += 1; }
+    ranges.push({
+      range_label:     `${ym}-1h`,
+      data_start_time: easternIsoMidnight(yy, mm, 1),
+      data_end_time:   easternIsoMidnight(yy, mm, 16),
+      isActive,
+    });
+    ranges.push({
+      range_label:     `${ym}-2h`,
+      data_start_time: easternIsoMidnight(yy, mm, 16),
+      data_end_time:   easternIsoMidnight(nextY, nextM, 1),
+      isActive,
+    });
+  }
+  return ranges;
+}
+
+// Seed report_jobs rows for any range that doesn't have a current in-flight
+// or fresh-ingested job. Returns the number of jobs seeded.
+async function seedReportJobsIfNeeded(env, market) {
+  const ranges = buildReportRanges();
+  let seeded = 0;
+  for (const r of ranges) {
+    // Most recent job for this (market, range_label). Age computed in SQL —
+    // SQLite's datetime('now') format ('YYYY-MM-DD HH:MM:SS' UTC) doesn't
+    // round-trip cleanly through JS Date, but julianday() handles it natively.
+    const last = await env.DB.prepare(
+      `SELECT status, (julianday('now') - julianday(updated_at)) * 24.0 AS age_hours
+       FROM report_jobs
+       WHERE source = 'amazon' AND market = ? AND range_label = ?
+       ORDER BY id DESC LIMIT 1`,
+    ).bind(market, r.range_label).first();
+    if (last) {
+      if (last.status === 'pending' || last.status === 'ready') continue; // in-flight
+      if (last.status === 'failed') continue; // manual intervention required
+      if (last.status === 'ingested') {
+        if (!r.isActive) continue; // frozen — historical, never re-seed
+        if ((last.age_hours ?? 0) < ACTIVE_RANGE_STALE_HOURS) continue; // fresh enough
+      }
+    }
+    await env.DB.prepare(
+      `INSERT INTO report_jobs
+         (source, market, report_type, range_label, data_start_time, data_end_time, status, attempts)
+       VALUES ('amazon', ?, ?, ?, ?, ?, 'pending', 0)`,
+    ).bind(market, REPORT_TYPE_PRIMARY, r.range_label, r.data_start_time, r.data_end_time).run();
+    seeded++;
+  }
+  return seeded;
+}
+
+// Phase B: take up to maxJobs pending jobs and try to advance them. For each
+// job: POST /reports if amazon_report_id is null (first touch); otherwise
+// poll its status. Transitions:
+//   - report_id missing → POST /reports → store amazon_report_id, attempts++
+//   - DONE              → ready (capture document_id)
+//   - CANCELLED|FATAL   → try fallback report type (re-POST) OR mark failed
+//   - IN_PROGRESS|other → leave pending, attempts++
+//   - attempts > MAX    → failed
+async function pollPendingJobs(env, market, maxJobs, deadlineMs) {
+  const jobs = await env.DB.prepare(
+    `SELECT * FROM report_jobs
+     WHERE source = 'amazon' AND market = ? AND status = 'pending'
+     ORDER BY id ASC LIMIT ?`,
+  ).bind(market, maxJobs).all();
+  let advanced = 0;
+  for (const job of (jobs.results || [])) {
+    if (Date.now() > deadlineMs) break;
+    try {
+      if (!job.amazon_report_id) {
+        // First touch — POST the report request.
+        const create = await spApiPost(env, market, '/reports/2021-06-30/reports', {
+          reportType:     job.report_type,
+          dataStartTime:  job.data_start_time,
+          dataEndTime:    job.data_end_time,
+          marketplaceIds: [AMAZON_MARKETPLACES[market].id],
+        });
+        await env.DB.prepare(
+          `UPDATE report_jobs
+             SET amazon_report_id = ?, attempts = attempts + 1, last_polled_at = datetime('now'), updated_at = datetime('now')
+           WHERE id = ?`,
+        ).bind(create.reportId || null, job.id).run();
+        advanced++;
+        continue;
+      }
+      // Subsequent touches — poll status.
+      const status = await spApiRequest(env, market, `/reports/2021-06-30/reports/${job.amazon_report_id}`);
+      const ps = status.processingStatus || '';
+      if (ps === 'DONE') {
+        await env.DB.prepare(
+          `UPDATE report_jobs
+             SET status = 'ready', document_id = ?, attempts = attempts + 1,
+                 last_polled_at = datetime('now'), updated_at = datetime('now')
+           WHERE id = ?`,
+        ).bind(status.reportDocumentId || null, job.id).run();
+        advanced++;
+      } else if (ps === 'CANCELLED' || ps === 'FATAL') {
+        // Try fallback report type if we haven't already.
+        if (job.report_type === REPORT_TYPE_PRIMARY) {
+          await env.DB.prepare(
+            `UPDATE report_jobs
+               SET report_type = ?, amazon_report_id = NULL, attempts = 0,
+                   last_polled_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ?`,
+          ).bind(REPORT_TYPE_FALLBACK, job.id).run();
+        } else {
+          await env.DB.prepare(
+            `UPDATE report_jobs
+               SET status = 'failed', error = ?, attempts = attempts + 1,
+                   last_polled_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ?`,
+          ).bind(`Amazon returned ${ps} on both report types`, job.id).run();
+        }
+        advanced++;
+      } else {
+        // IN_QUEUE / IN_PROGRESS — leave pending, increment attempts.
+        const newAttempts = (job.attempts || 0) + 1;
+        if (newAttempts >= REPORT_POLL_MAX_ATTEMPTS) {
+          await env.DB.prepare(
+            `UPDATE report_jobs
+               SET status = 'failed', error = ?, attempts = ?,
+                   last_polled_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ?`,
+          ).bind(`Stuck in ${ps} after ${newAttempts} polls`, newAttempts, job.id).run();
+        } else {
+          await env.DB.prepare(
+            `UPDATE report_jobs
+               SET attempts = ?, last_polled_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ?`,
+          ).bind(newAttempts, job.id).run();
+        }
+      }
+    } catch (e) {
+      if (e?.rateLimited) break; // bail this phase, try next tick
+      // Record the error on the job but leave pending so the next tick retries.
+      await env.DB.prepare(
+        `UPDATE report_jobs
+           SET error = ?, attempts = attempts + 1, last_polled_at = datetime('now'), updated_at = datetime('now')
+         WHERE id = ?`,
+      ).bind(redactSecrets(e?.message || String(e)).substring(0, 500), job.id).run();
+    }
+  }
+  return advanced;
+}
+
+// Phase C: take up to maxJobs ready jobs, download the document, gunzip if
+// needed, parse TSV, INSERT amazon_items rows, mark job ingested.
+async function ingestReadyJobs(env, market, maxJobs, deadlineMs) {
+  const jobs = await env.DB.prepare(
+    `SELECT * FROM report_jobs
+     WHERE source = 'amazon' AND market = ? AND status = 'ready'
+     ORDER BY id ASC LIMIT ?`,
+  ).bind(market, maxJobs).all();
+  let ingested = 0;
+  for (const job of (jobs.results || [])) {
+    if (Date.now() > deadlineMs) break;
+    try {
+      const doc = await spApiRequest(env, market, `/reports/2021-06-30/documents/${job.document_id}`);
+      const text = await downloadReportDocument(doc);
+      const parsed = parseAmazonReportTsv(text, market);
+      // Re-ingestion: clean any prior rows for this job before inserting.
+      await env.DB.prepare(`DELETE FROM amazon_items WHERE report_job_id = ?`).bind(job.id).run();
+      if (parsed.rows.length > 0) {
+        const stmts = [];
+        for (const r of parsed.rows) {
+          stmts.push(
+            env.DB.prepare(
+              `INSERT INTO amazon_items
+                 (market, seller_sku, dashboard_sku, name, quantity, total, date_created, local_date, report_job_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ).bind(
+              market, r.sellerSku, r.dashboardSku, r.name, r.quantity, r.total, r.dateCreated, r.localDate, job.id,
+            ),
+          );
+        }
+        const CHUNK = 500;
+        for (let i = 0; i < stmts.length; i += CHUNK) {
+          await env.DB.batch(stmts.slice(i, i + CHUNK));
+        }
+      }
+      await env.DB.prepare(
+        `UPDATE report_jobs
+           SET status = 'ingested', rows_total = ?, rows_matched = ?, rows_unmatched = ?,
+               rows_wrong_market = ?, filter_signal = ?, error = NULL,
+               updated_at = datetime('now')
+         WHERE id = ?`,
+      ).bind(
+        parsed.totalRows, parsed.matchedCount, parsed.unmatchedCount,
+        parsed.wrongMarketCount, parsed.filterSignal, job.id,
+      ).run();
+      // Invalidate the sales cache so the dashboard picks up the new rows.
+      await invalidateAmazonSalesCache(env, market);
+      ingested++;
+    } catch (e) {
+      if (e?.rateLimited) break;
+      await env.DB.prepare(
+        `UPDATE report_jobs
+           SET status = 'failed', error = ?, updated_at = datetime('now')
+         WHERE id = ?`,
+      ).bind(redactSecrets(e?.message || String(e)).substring(0, 500), job.id).run();
+    }
+  }
+  return ingested;
+}
+
+// Download a presigned report document URL. Workers' fetch() automatically
+// decompresses content-encoding: gzip, but Amazon Reports docs come down with
+// no content-encoding header even when the body is gzipped (signalled by
+// `compressionAlgorithm: 'GZIP'` in the document descriptor instead). Use
+// DecompressionStream for that case.
+async function downloadReportDocument(doc) {
+  const r = await fetch(doc.url);
+  if (!r.ok) throw new Error(`Document download ${r.status}`);
+  let stream = r.body;
+  if (doc.compressionAlgorithm === 'GZIP') {
+    stream = stream.pipeThrough(new DecompressionStream('gzip'));
+  }
+  return await new Response(stream).text();
+}
+
+// Parse a tab-separated Amazon report into normalized item rows. Mirrors
+// legacy server.js fetchAmzSkuItems parsing logic — column probing, three
+// marketplace filter signals (sales_channel / currency / ship_country) in
+// priority order, matchAmzItemToSku for canonical SKU mapping.
+function parseAmazonReportTsv(text, market) {
+  const lines = text.split('\n').filter((l) => l.trim());
+  if (lines.length < 2) {
+    return { rows: [], totalRows: 0, matchedCount: 0, unmatchedCount: 0, wrongMarketCount: 0, filterSignal: 'NONE' };
+  }
+  const headers = lines[0].split('\t').map((h) => h.trim().toLowerCase().replace(/[- ]/g, '_'));
+  const skuCol         = headers.findIndex((h) => h === 'sku' || h === 'seller_sku');
+  const nameCol        = headers.findIndex((h) => h === 'product_name' || h === 'product_title' || h === 'item_name');
+  const qtyCol         = headers.findIndex((h) => h === 'quantity' || h === 'quantity_ordered' || h === 'quantity_shipped');
+  const priceCol       = headers.findIndex((h) => h === 'item_price' || h === 'price' || h === 'item_total');
+  const dateCol        = headers.findIndex((h) => h === 'purchase_date' || h === 'last_updated_date' || h === 'shipment_date' || h === 'payments_date');
+  const channelCol     = headers.findIndex((h) => h === 'sales_channel');
+  const currencyCol    = headers.findIndex((h) => h === 'currency');
+  const shipCountryCol = headers.findIndex((h) => h === 'ship_country' || h === 'ship_to_country' || h === 'ship_country_code');
+  const filterSignal =
+    channelCol     >= 0 ? 'sales_channel'
+    : currencyCol  >= 0 ? 'currency'
+    : shipCountryCol >= 0 ? 'ship_country'
+    : 'NONE';
+
+  const rows = [];
+  let matched = 0, unmatched = 0, wrongMarket = 0;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split('\t');
+    const sellerSku   = skuCol >= 0 ? (cols[skuCol] || '').trim() : '';
+    const productName = nameCol >= 0 ? (cols[nameCol] || '').trim() : '';
+    const qty         = qtyCol >= 0 ? parseInt(cols[qtyCol] || '0', 10) : 1;
+    const price       = priceCol >= 0 ? parseFloat(cols[priceCol] || '0') : 0;
+    const dateStr     = dateCol >= 0 ? (cols[dateCol] || '').trim() : '';
+
+    // Marketplace filter — three signals in priority order. If none of them
+    // apply, accept the row (filterSignal === 'NONE' surfaces this in
+    // report_jobs so we can investigate).
+    let signalled = false, isCA = false, isUS = false;
+    if (channelCol >= 0) {
+      const v = (cols[channelCol] || '').trim().toLowerCase();
+      if (v) {
+        signalled = true;
+        isCA = v === 'amazon.ca';
+        isUS = v === 'amazon.com' || v === 'amazon.com.us' || v === 'amazon';
+      }
+    } else if (currencyCol >= 0) {
+      const v = (cols[currencyCol] || '').trim().toUpperCase();
+      if (v) { signalled = true; isCA = v === 'CAD'; isUS = v === 'USD'; }
+    } else if (shipCountryCol >= 0) {
+      const v = (cols[shipCountryCol] || '').trim().toUpperCase();
+      if (v) { signalled = true; isCA = v === 'CA'; isUS = v === 'US' || v === 'USA'; }
+    }
+    if (signalled) {
+      if (market === 'CA' && !isCA) { wrongMarket++; continue; }
+      if (market === 'US' && !isUS) { wrongMarket++; continue; }
+    }
+
+    const dashSku = matchAmzItemToSku(productName, sellerSku);
+    if (!dashSku) { unmatched++; continue; }
+    matched++;
+    rows.push({
+      sellerSku,
+      dashboardSku: dashSku,
+      name:         productName || null,
+      quantity:     qty,
+      total:        price,
+      dateCreated:  dateStr,
+      localDate:    toBusinessLocalDate(dateStr),
+    });
+  }
+  return {
+    rows,
+    totalRows:        lines.length - 1,
+    matchedCount:     matched,
+    unmatchedCount:   unmatched,
+    wrongMarketCount: wrongMarket,
+    filterSignal,
+  };
+}
+
+// One cron tick of Reports work for a market. Phase A (seed) → B (poll N) →
+// C (ingest N). Wall-clock guard at CRON_TICK_BUDGET_MS.
+export async function runAmazonReportsTick(env, market, options = {}) {
+  const startMs    = Date.now();
+  const deadlineMs = startMs + (options.budgetMs || CRON_TICK_BUDGET_MS);
+  const maxJobs    = options.maxJobsPerPhase || 3;
+
+  let seeded = 0, polled = 0, ingested = 0;
+  try {
+    seeded = await seedReportJobsIfNeeded(env, market);
+    if (Date.now() < deadlineMs) {
+      polled = await pollPendingJobs(env, market, maxJobs, deadlineMs);
+    }
+    if (Date.now() < deadlineMs) {
+      ingested = await ingestReadyJobs(env, market, maxJobs, deadlineMs);
+    }
+  } catch (e) {
+    // Don't blow the whole cron — log and return a partial result.
+    console.error(`Amazon reports tick ${market} error:`, redactSecrets(e?.message || e));
+  }
+  return { market, seeded, polled, ingested, durationMs: Date.now() - startMs };
+}
+
+// ─── Sales read endpoint (D1-backed, KV-cached) ────────────────────────────
+
+export async function invalidateAmazonSalesCache(env, market) {
+  if (!env?.CACHE) return;
+  const m = String(market || '').toLowerCase();
+  if (!m) return;
+  await env.CACHE.delete(SALES_KV_KEY(m));
+}
+
+// Aggregate D1 result rows into the dashboard payload shape — same shape as
+// /api/woo/sales so the frontend can treat both sources interchangeably.
+function aggregateAmazonFromD1(monthRows, itemRows) {
+  const { monthMap } = buildMonthWindow();
+  const monthlyRevenue = [0, 0, 0, 0, 0, 0];
+  const monthlyOrders  = [0, 0, 0, 0, 0, 0];
+  const skuTotals = {};
+
+  for (const row of monthRows) {
+    const idx = monthMap[row.ym];
+    if (idx === undefined) continue;
+    monthlyRevenue[idx] = row.revenue || 0;
+    monthlyOrders[idx]  = row.n_orders || 0;
+  }
+
+  for (const row of itemRows) {
+    const sku = row.sku || 'unknown';
+    if (!skuTotals[sku]) {
+      skuTotals[sku] = {
+        qty: 0, revenue: 0, name: row.name || '',
+        monthly:    [0, 0, 0, 0, 0, 0],
+        monthlyQty: [0, 0, 0, 0, 0, 0],
+        weeklyQty:  {},
+      };
+    } else if (!skuTotals[sku].name && row.name) {
+      skuTotals[sku].name = row.name;
+    }
+    const qty     = row.qty || 0;
+    const revenue = row.revenue || 0;
+    skuTotals[sku].qty     += qty;
+    skuTotals[sku].revenue += revenue;
+    const ym = (row.day || '').substring(0, 7);
+    const idx = monthMap[ym];
+    if (idx !== undefined) {
+      skuTotals[sku].monthly[idx]    += revenue;
+      skuTotals[sku].monthlyQty[idx] += qty;
+    }
+    const wk = getWeekKey(row.day);
+    if (wk) skuTotals[sku].weeklyQty[wk] = (skuTotals[sku].weeklyQty[wk] || 0) + qty;
+  }
+  return { monthlyRevenue, monthlyOrders, skuTotals };
+}
+
+amazonRoutes.get('/sales', async (c) => {
+  const market = (c.req.query('market') || 'CA').toUpperCase();
+  if (!AMAZON_MARKETPLACES[market]) {
+    return c.json({ error: `unsupported Amazon market: ${market}` }, 400);
+  }
+  if (!c.env.DB) return c.json({ error: 'D1 binding DB not configured' }, 500);
+
+  const cacheKey = SALES_KV_KEY(market);
+  const force    = c.req.query('refresh') === '1';
+  if (!force && c.env.CACHE) {
+    const cached = await c.env.CACHE.get(cacheKey, 'json');
+    if (cached) return c.json({ ...cached, cached: true });
+  }
+
+  const { startDate } = buildMonthWindow();
+
+  // Three D1 queries in parallel — per-month order rollup, per-SKU per-day
+  // item rollup, and the sync_state watermark for the lastSync field.
+  // amazon_items doesn't currently filter by status (legacy didn't either —
+  // the report types we use are themselves status-filtered server-side).
+  const [monthRes, itemRes, syncStateRes, jobStatusRes, unmatchedRes] = await Promise.all([
+    c.env.DB.prepare(
+      `SELECT substr(local_date, 1, 7) AS ym,
+              COUNT(*)                 AS n_orders,
+              SUM(total)               AS revenue
+       FROM amazon_orders
+       WHERE market = ?
+         AND local_date >= ?
+       GROUP BY ym`,
+    ).bind(market, startDate).all(),
+    c.env.DB.prepare(
+      `SELECT dashboard_sku            AS sku,
+              MAX(name)                AS name,
+              local_date               AS day,
+              SUM(quantity)            AS qty,
+              SUM(total)               AS revenue
+       FROM amazon_items
+       WHERE market = ?
+         AND dashboard_sku IS NOT NULL
+         AND local_date >= ?
+       GROUP BY dashboard_sku, local_date
+       ORDER BY dashboard_sku, local_date ASC`,
+    ).bind(market, startDate).all(),
+    c.env.DB.prepare(
+      `SELECT watermark, last_synced_at FROM sync_state
+       WHERE source = 'amazon' AND market = ?`,
+    ).bind(market).first(),
+    c.env.DB.prepare(
+      `SELECT status, COUNT(*) AS n
+       FROM report_jobs WHERE source = 'amazon' AND market = ?
+       GROUP BY status`,
+    ).bind(market).all(),
+    // Surface unmatched-row counts so silent SKU drops are visible to the UI.
+    c.env.DB.prepare(
+      `SELECT SUM(rows_unmatched) AS unmatched, SUM(rows_matched) AS matched
+       FROM report_jobs WHERE source = 'amazon' AND market = ? AND status = 'ingested'`,
+    ).bind(market).first(),
+  ]);
+
+  const monthRows = monthRes.results || [];
+  const itemRows  = itemRes.results  || [];
+  const { monthlyRevenue, monthlyOrders, skuTotals } = aggregateAmazonFromD1(monthRows, itemRows);
+  const ordersInWindow = monthlyOrders.reduce((a, b) => a + b, 0);
+
+  const reportJobsByStatus = {};
+  for (const row of (jobStatusRes.results || [])) reportJobsByStatus[row.status] = row.n;
+
+  const payload = {
+    marketplace:        'Amazon',
+    currency:           AMAZON_MARKETPLACES[market].currency,
+    monthlyRevenue,
+    monthlyOrders,
+    skuTotals,
+    source:             'amazon',
+    dataSource:         'd1',
+    windowStart:        startDate,
+    ordersInWindow,
+    watermark:          syncStateRes?.watermark || null,
+    lastSync:           syncStateRes?.last_synced_at || new Date().toISOString(),
+    reportJobsByStatus,
+    rowsMatched:        unmatchedRes?.matched || 0,
+    rowsUnmatched:      unmatchedRes?.unmatched || 0,
+  };
+
+  if (c.env.CACHE) {
+    await c.env.CACHE.put(cacheKey, JSON.stringify(payload), { expirationTtl: SALES_TTL_SECONDS });
+  }
+  return c.json({ ...payload, cached: false });
+});
+
+// Lightweight connection check — fetches the LWA token only. No SP-API call.
+amazonRoutes.get('/test', async (c) => {
+  try {
+    const token = await getAmazonAccessToken(c.env);
+    return c.json({ connected: true, tokenPrefix: (token || '').substring(0, 4) });
+  } catch (e) {
+    return c.json({ connected: false, error: redactSecrets(e?.message || String(e)) });
+  }
+});

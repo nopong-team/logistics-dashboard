@@ -990,8 +990,18 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.15</span> &middot; April 2026
+  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.16</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.16 &mdash; 29 April 2026</h4>
+    <ul>
+      <li>Amazon SP-API ported to the Worker &mdash; <code>/api/amazon/sales</code> serves D1-backed monthly revenue + per-SKU breakdowns, same payload shape as <code>/api/woo/sales</code>. KV-cached for 15 min; cron invalidates after each ingest.</li>
+      <li>LWA token cached in KV under <code>amazon:lwa-token</code> with TTL = <code>expires_in &minus; 60s</code>. Each Worker invocation reads from KV first, refreshes only on miss/expiry. Survives the stateless-Worker boundary the legacy in-memory cache couldn&rsquo;t.</li>
+      <li>Orders flow (monthly revenue): one chunk per cron tick per market, NextToken-paginated, watermark on <code>amazon_orders.purchase_date</code>. Manual catch-up: <code>POST /api/admin/backfill?source=amazon&amp;market=CA</code>.</li>
+      <li>Reports flow (per-SKU): async state machine in <code>report_jobs</code> &mdash; <code>pending &rarr; ready &rarr; ingested | failed</code>. Cron advances up to N=3 jobs per phase per tick with a 25s wall-clock guard. Fallback report type <code>GET_FBA_FULFILLMENT_CUSTOMER_SHIPMENT_SALES_DATA</code> auto-tried when the primary <code>GET_AMAZON_FULFILLED_SHIPMENTS_DATA_GENERAL</code> returns CANCELLED/FATAL.</li>
+      <li>SKU mapping table lifted verbatim from legacy <code>backend/server.js</code> (CA canonical + FNSKU aliases + US-only SKUs that normalise to CA dashboard codes for combined reporting). Unmatched seller SKUs surface in <code>/api/amazon/sales</code> output as <code>rowsUnmatched</code> so silent drops are visible.</li>
+      <li><code>redactSecrets</code> extracted into <code>src/redact.js</code> &mdash; new patterns added for Amazon LWA tokens (<code>Atzr|&hellip;</code>, <code>Atza|&hellip;</code>) and LWA client secrets (<code>amzn1.oa2-cs.v1.&hellip;</code>). One edit, applied at every layer.</li>
+      <li><code>/api/status</code> auto-flips <code>amazon.connected: true</code> when <code>AMAZON_REFRESH_TOKEN</code>, <code>AMAZON_LWA_CLIENT_ID</code>, and <code>AMAZON_LWA_CLIENT_SECRET</code> are all set.</li>
+    </ul>
     <h4>v2.15 &mdash; 29 April 2026</h4>
     <ul>
       <li>Canonical timezone for all order bucketing &mdash; America/Toronto (Eastern). New <code>local_date TEXT</code> column on every order/items table, populated at insert time and used for every monthly/weekly bucket query. Both Woo stores are configured to Eastern in wp-admin (Toronto for CA, New York for US &mdash; same DST), so existing 22k+1.9k rows backfill cleanly via <code>substr(date_created, 1, 10)</code> in migration 0003.</li>

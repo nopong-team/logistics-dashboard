@@ -119,6 +119,36 @@ export function buildMonthWindow(months = 6) {
  * Input is expected to already be in BUSINESS_TZ (i.e. it's a `local_date`
  * column value, not a UTC timestamp). No further timezone conversion.
  */
+/**
+ * Build an ISO 8601 timestamp representing midnight on the given calendar
+ * date in BUSINESS_TZ, with the correct offset suffix (handles EST↔EDT).
+ *
+ * Used by the Amazon Reports flow — `dataStartTime` and `dataEndTime` need
+ * to anchor to "the day in Eastern" so report ranges line up with the same
+ * day boundaries we'll bucket the rows on after ingestion.
+ *
+ * Examples:
+ *   easternIsoMidnight(2026, 4, 1)  → '2026-04-01T00:00:00-04:00'  (EDT)
+ *   easternIsoMidnight(2026, 1, 15) → '2026-01-15T00:00:00-05:00'  (EST)
+ */
+export function easternIsoMidnight(year, month, day) {
+  // Probe the offset by asking what hour Eastern thinks noon UTC on this date
+  // is. If Eastern reports hour 8, we're at -04:00 (EDT); if 7, we're at -05:00 (EST).
+  const noonUtc = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: BUSINESS_TZ,
+    hour: '2-digit', hour12: false,
+  }).formatToParts(noonUtc);
+  const hour = parseInt(parts.find(p => p.type === 'hour').value, 10);
+  const offsetHours = hour - 12; // negative
+  const sign = offsetHours <= 0 ? '-' : '+';
+  const abs  = String(Math.abs(offsetHours)).padStart(2, '0');
+  const yyyy = String(year).padStart(4, '0');
+  const mm   = String(month).padStart(2, '0');
+  const dd   = String(day).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T00:00:00${sign}${abs}:00`;
+}
+
 export function getWeekKey(localDate) {
   if (!localDate) return null;
   const m = String(localDate).match(/^(\d{4})-(\d{2})-(\d{2})/);

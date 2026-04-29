@@ -14,6 +14,8 @@ import { Hono } from 'hono';
 import { wooRoutes, invalidateWooSalesCache } from './woo.js';
 import { adminRoutes, runBackfillChunk } from './admin.js';
 import { salesBinderRoutes } from './salesbinder.js';
+import { amazonRoutes, runAmazonOrdersChunk, runAmazonReportsTick, invalidateAmazonSalesCache } from './amazon.js';
+import { redactSecrets } from './redact.js';
 
 const app = new Hono();
 
@@ -31,9 +33,10 @@ app.get('/api/status', (c) => {
   const wooCA = !!(env.WOO_CA_URL && env.WOO_CA_KEY && env.WOO_CA_SECRET);
   const wooUS = !!(env.WOO_US_URL && env.WOO_US_KEY && env.WOO_US_SECRET);
   const salesBinder = !!(env.SALESBINDER_SUBDOMAIN && env.SALESBINDER_API_KEY);
+  const amazon = !!(env.AMAZON_REFRESH_TOKEN && env.AMAZON_LWA_CLIENT_ID && env.AMAZON_LWA_CLIENT_SECRET);
   return c.json({
     xero:        { connected: false, live: false, cached: false, org: null },
-    amazon:      { connected: false },
+    amazon:      { connected: amazon },
     wooCA:       { connected: wooCA },
     wooUS:       { connected: wooUS },
     logiwa:      { connected: false, source: 'csv-upload' },
@@ -51,6 +54,11 @@ app.route('/api/admin', adminRoutes);
 // SalesBinder routes (Step 5c.2: inventory + packaging snapshots, KV-cached).
 app.route('/api/salesbinder', salesBinderRoutes);
 
+// Amazon SP-API routes (Step 5c.1b: D1-backed sales endpoint, async Reports
+// state machine, LWA token cached in KV). Cron drives Orders + Reports work
+// in parallel with Woo's incremental sync.
+app.route('/api/amazon', amazonRoutes);
+
 // Catch-all 404 for unknown /api/* paths and any non-asset path.
 app.notFound((c) => c.json({ error: 'not found', path: c.req.path }, 404));
 
@@ -64,12 +72,10 @@ app.notFound((c) => c.json({ error: 'not found', path: c.req.path }, 404));
 // `ttps://` URL typo on WOO_US_URL surfaced both Woo US credentials in the
 // 500 response). The wooFetch helper now sanitizes at the source; this is the
 // belt-and-braces backstop for any other code path that throws.
-function redactSecrets(s) {
-  return String(s || '')
-    .replace(/(consumer_key|consumer_secret|access_token|refresh_token|api_key)=[^&\s"']+/gi, '$1=[REDACTED]')
-    .replace(/\b(ck|cs)_[a-f0-9]{20,}\b/gi, '$1_[REDACTED]');
-}
-
+//
+// redactSecrets lives in src/redact.js so adding a new credential prefix
+// (Atzr| for Amazon LWA, oauth_token= for Xero, etc.) is one edit. See that
+// file for the catalogue of patterns currently covered.
 app.onError((err, c) => {
   console.error('Worker error:', err);
   return c.json({ error: 'internal error', detail: redactSecrets(err?.message) }, 500);
@@ -90,16 +96,12 @@ app.onError((err, c) => {
 // One chunk per tick is intentional: pages=1 every 15 min is 400 orders/hour
 // of headroom, comfortably above CA's ~70 orders/day. If the cron is offline
 // for a stretch and a backlog forms, it self-heals over a few subsequent ticks.
-async function runCronSync(env) {
-  if (!env.DB) {
-    console.log('cron sync skipped: DB binding not configured');
-    return;
-  }
+async function runWooCronSync(env) {
   const markets = [];
   if (env.WOO_CA_URL && env.WOO_CA_KEY && env.WOO_CA_SECRET) markets.push('CA');
   if (env.WOO_US_URL && env.WOO_US_KEY && env.WOO_US_SECRET) markets.push('US');
   if (markets.length === 0) {
-    console.log('cron sync skipped: no Woo markets configured');
+    console.log('Woo cron sync skipped: no markets configured');
     return;
   }
 
@@ -109,17 +111,64 @@ async function runCronSync(env) {
       if (result.ordersAdded > 0) {
         await invalidateWooSalesCache(env, market);
         console.log(
-          `cron sync ${market}: +${result.ordersAdded} orders, +${result.itemsAdded} items, ` +
+          `Woo cron ${market}: +${result.ordersAdded} orders, +${result.itemsAdded} items, ` +
           `watermark ${result.watermarkBefore} → ${result.watermarkAfter} (${result.durationMs}ms)`,
         );
       } else {
-        console.log(`cron sync ${market}: caught up (${result.durationMs}ms)`);
+        console.log(`Woo cron ${market}: caught up (${result.durationMs}ms)`);
       }
     } catch (e) {
-      // Keep going for the next market — one bad store shouldn't kill the whole run.
-      console.error(`cron sync ${market} failed:`, e?.message || e);
+      console.error(`Woo cron ${market} failed:`, redactSecrets(e?.message || String(e)));
     }
   }
+}
+
+// Amazon cron: one Orders chunk per market per tick + one Reports state-machine
+// tick per market (Phase A + up to N=3 Phase B + up to N=3 Phase C with a 25s
+// wall-clock guard each). Markets run in parallel — Workers Free scheduled
+// handlers have a 30s wall-clock cap and the sequential path could push past
+// it when both markets have heavy report ingests in the same tick.
+async function runAmazonCronSync(env) {
+  if (!(env.AMAZON_REFRESH_TOKEN && env.AMAZON_LWA_CLIENT_ID && env.AMAZON_LWA_CLIENT_SECRET)) {
+    console.log('Amazon cron sync skipped: secrets not configured');
+    return;
+  }
+  async function syncOne(market) {
+    try {
+      const ord = await runAmazonOrdersChunk(env, market, { action: 'amazon-incremental' });
+      if (ord.ordersAdded > 0) {
+        await invalidateAmazonSalesCache(env, market);
+        console.log(
+          `Amazon cron ${market}: +${ord.ordersAdded} orders, ` +
+          `watermark ${ord.watermarkBefore} → ${ord.watermarkAfter} (${ord.durationMs}ms)`,
+        );
+      } else {
+        console.log(`Amazon cron ${market}: no new orders (${ord.durationMs}ms)`);
+      }
+    } catch (e) {
+      console.error(`Amazon cron Orders ${market} failed:`, redactSecrets(e?.message || String(e)));
+    }
+    try {
+      const rep = await runAmazonReportsTick(env, market);
+      if (rep.seeded || rep.polled || rep.ingested) {
+        console.log(
+          `Amazon cron ${market} reports: seeded=${rep.seeded} polled=${rep.polled} ingested=${rep.ingested} (${rep.durationMs}ms)`,
+        );
+      }
+    } catch (e) {
+      console.error(`Amazon cron Reports ${market} failed:`, redactSecrets(e?.message || String(e)));
+    }
+  }
+  await Promise.allSettled([syncOne('CA'), syncOne('US')]);
+}
+
+async function runCronSync(env) {
+  if (!env.DB) {
+    console.log('cron sync skipped: DB binding not configured');
+    return;
+  }
+  // Woo and Amazon are independent — run in parallel so neither blocks the other.
+  await Promise.allSettled([runWooCronSync(env), runAmazonCronSync(env)]);
 }
 
 export default {
