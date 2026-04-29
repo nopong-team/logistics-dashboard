@@ -82,6 +82,23 @@ const MIN_POLL_INTERVAL_S = 90;
 const SALES_TTL_SECONDS = 15 * 60;
 const SALES_KV_KEY = (market) => `amazon-sales-${market.toLowerCase()}`;
 
+// /api/amazon/inventory cache windows. We use a "stale-while-revalidate" pattern:
+// the KV entry lives for 24h (so a stale snapshot is always there to serve while
+// a refresh runs in the background), but we treat it as FRESH only for the first
+// hour. Past that, we serve the stale snapshot immediately and spawn a background
+// refresh via ctx.waitUntil so the next page load picks up new data without the
+// caller ever waiting for a cold paginated fetch (~10–15s end-to-end).
+const FBA_INVENTORY_FRESH_S   = 60 * 60;        // 1h "fresh" — serve as-is
+const FBA_INVENTORY_KV_TTL_S  = 24 * 60 * 60;   // 24h KV retention for stale-while-revalidate
+const FBA_INVENTORY_KV_KEY    = (market) => `amazon:inventory:${market.toUpperCase()}`;
+// Polite pacing between paginated /fba/inventory/v1/summaries calls. Matches
+// legacy backend/server.js. SP-API has fairly tight rate limits on this endpoint
+// (typical 2 req/sec, 2 burst).
+const FBA_INVENTORY_PAGE_SLEEP_MS = 3000;
+// Hard cap on pages — defensive. No Pong's catalog is small (~12 SKUs/market)
+// so this should never fire, but a misbehaving SP-API loop won't pin a Worker.
+const FBA_INVENTORY_MAX_PAGES = 10;
+
 // Active vs frozen ranges for the Reports state machine. "Active" ranges
 // (this+last month × 2 halves) get refreshed every 24h; "frozen" historical
 // ranges are seeded once and never re-run.
@@ -974,6 +991,178 @@ amazonRoutes.get('/sales', async (c) => {
     await c.env.CACHE.put(cacheKey, JSON.stringify(payload), { expirationTtl: SALES_TTL_SECONDS });
   }
   return c.json({ ...payload, cached: false });
+});
+
+// ─── FBA Inventory snapshot (KV-cached, stale-while-revalidate) ────────────
+//
+// Mirrors the SalesBinder snapshot pattern (REST → flatten → KV) with a few
+// SP-API-specific wrinkles ported from legacy backend/server.js fetchAmzInventory:
+//
+//   • Endpoint: GET /fba/inventory/v1/summaries with granularityType=Marketplace
+//     and details=true. Returns inventorySummaries[] with nested inventoryDetails.
+//   • Pagination via data.pagination.nextToken (note: nested under .pagination,
+//     unlike Orders' top-level NextToken). 3s sleep between paginated calls,
+//     hard cap of 10 pages. No Pong's FBA catalog is small (~12 SKUs/market in
+//     practice) so we never hit the cap, but it's defensive.
+//   • dashboardSku is mapped via matchAmzItemToSku so cross-channel SKU rollups
+//     can join (additive — the existing FBA tile only reads sellerSku +
+//     fulfillable, so this doesn't break the legacy frontend reader).
+//   • RateLimitedError on a fresh fetch falls back to whatever's in KV (with
+//     `staleFallback: true`). Matches SalesBinder's upstream-error pattern.
+//
+// Caching strategy: KV entry lives 24h, but considered FRESH only for 1h. After
+// 1h we serve the stale snapshot immediately and spawn a background refresh via
+// ctx.waitUntil — so users never block on a 10–15s paginated cold fetch unless
+// the cache is genuinely empty. ?refresh=true forces synchronous refresh.
+
+async function fetchFbaInventoryFromSpApi(env, market) {
+  const mp = AMAZON_MARKETPLACES[market];
+  if (!mp) throw new Error(`Unknown Amazon market: ${market}`);
+
+  let allItems  = [];
+  let nextToken = null;
+  let page      = 0;
+
+  do {
+    const params = nextToken
+      ? { nextToken }
+      : {
+          granularityType: 'Marketplace',
+          granularityId:   mp.id,
+          marketplaceIds:  mp.id,
+          details:         'true',
+        };
+    const data = await spApiRequest(env, market, '/fba/inventory/v1/summaries', params);
+    const items = data?.payload?.inventorySummaries || [];
+    allItems = allItems.concat(items);
+    nextToken = data?.pagination?.nextToken || null;
+    page++;
+    if (nextToken && page < FBA_INVENTORY_MAX_PAGES) {
+      await new Promise((r) => setTimeout(r, FBA_INVENTORY_PAGE_SLEEP_MS));
+    }
+  } while (nextToken && page < FBA_INVENTORY_MAX_PAGES);
+
+  let matched = 0, unmatched = 0;
+  const inventory = allItems.map((item) => {
+    const sellerSku   = item.sellerSku || '';
+    const productName = item.productName || '';
+    const dashboardSku = matchAmzItemToSku(productName, sellerSku);
+    if (dashboardSku) matched++; else if (sellerSku) unmatched++;
+    return {
+      asin:          item.asin || '',
+      sellerSku,
+      dashboardSku:  dashboardSku || null,
+      fnSku:         item.fnSku || '',
+      productName,
+      // Legacy field semantics — fall back to totalQuantity when inventoryDetails
+      // is absent (which happens for items with zero stock on certain accounts).
+      fulfillable:   item.inventoryDetails?.fulfillableQuantity
+                       || item.totalQuantity || 0,
+      inbound:       item.inventoryDetails?.inboundWorkingQuantity || 0,
+      reserved:      item.inventoryDetails?.reservedQuantity?.totalReservedQuantity || 0,
+      unfulfillable: item.inventoryDetails?.unfulfillableQuantity?.totalUnfulfillableQuantity || 0,
+    };
+  });
+
+  return {
+    inventory,
+    count:        inventory.length,
+    matched,
+    unmatched,
+    marketplace:  market,
+    source:       'amazon-sp-api',
+    pagesFetched: page,
+    lastSync:     new Date().toISOString(),
+  };
+}
+
+// Refresh helper used both for the foreground cold-fetch path and the
+// background stale-while-revalidate path. Persists to KV on success; logs
+// (but doesn't throw) on RateLimitedError so a background refresh failure
+// doesn't surface as an unhandled rejection.
+async function refreshFbaInventory(env, market, { background = false } = {}) {
+  try {
+    const fresh = await fetchFbaInventoryFromSpApi(env, market);
+    if (env.CACHE) {
+      await env.CACHE.put(
+        FBA_INVENTORY_KV_KEY(market),
+        JSON.stringify(fresh),
+        { expirationTtl: FBA_INVENTORY_KV_TTL_S },
+      );
+    }
+    return fresh;
+  } catch (e) {
+    if (background) {
+      console.error(
+        `Amazon ${market} FBA bg refresh failed:`,
+        redactSecrets(e?.message || String(e)),
+      );
+      return null;
+    }
+    throw e;
+  }
+}
+
+amazonRoutes.get('/inventory', async (c) => {
+  const market = (c.req.query('market') || 'CA').toUpperCase();
+  if (!AMAZON_MARKETPLACES[market]) {
+    return c.json({ error: `unsupported Amazon market: ${market}` }, 400);
+  }
+  const force = c.req.query('refresh') === 'true' || c.req.query('refresh') === '1';
+  const cache = c.env.CACHE;
+  const kvKey = FBA_INVENTORY_KV_KEY(market);
+
+  // Forced refresh — synchronous, falls back to cache on rate-limit.
+  if (force) {
+    try {
+      const fresh = await refreshFbaInventory(c.env, market);
+      return c.json({ ...fresh, cached: false });
+    } catch (e) {
+      if (e?.rateLimited && cache) {
+        const cached = await cache.get(kvKey, 'json');
+        if (cached) {
+          return c.json({
+            ...cached,
+            cached:        true,
+            staleFallback: true,
+            error:         `Amazon rate-limited; serving cached snapshot (retry after ${e.retryAfter || 30}s)`,
+          });
+        }
+      }
+      throw e; // global onError sanitizes
+    }
+  }
+
+  // Cached path — fast.
+  if (cache) {
+    const cached = await cache.get(kvKey, 'json');
+    if (cached) {
+      const ageS = (Date.now() - new Date(cached.lastSync).getTime()) / 1000;
+      if (Number.isFinite(ageS) && ageS < FBA_INVENTORY_FRESH_S) {
+        // Fresh — serve as-is.
+        return c.json({ ...cached, cached: true });
+      }
+      // Stale — serve immediately, refresh in background.
+      if (c.executionCtx?.waitUntil) {
+        c.executionCtx.waitUntil(refreshFbaInventory(c.env, market, { background: true }));
+      }
+      return c.json({ ...cached, cached: true, stale: true });
+    }
+  }
+
+  // Cold cache — synchronous fetch. ~10–15s end-to-end with pagination.
+  try {
+    const fresh = await refreshFbaInventory(c.env, market);
+    return c.json({ ...fresh, cached: false });
+  } catch (e) {
+    if (e?.rateLimited) {
+      return c.json(
+        { error: 'rate_limited', retryAfter: e.retryAfter || 30, market, source: 'amazon-sp-api' },
+        503,
+      );
+    }
+    throw e;
+  }
 });
 
 // Lightweight connection check — fetches the LWA token only. No SP-API call.

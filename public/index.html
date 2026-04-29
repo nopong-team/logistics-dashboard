@@ -990,8 +990,18 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.18</span> &middot; April 2026
+  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.20</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.20 &mdash; 29 April 2026 (Amazon FBA Inventory)</h4>
+    <ul>
+      <li>Amazon FBA Inventory ported to the Worker &mdash; <code>/api/amazon/inventory?market=CA|US</code> serves a KV-cached snapshot of FBA stock per seller SKU (asin, fnSku, fulfillable, inbound, reserved, unfulfillable). The dashboard's FBA CA / FBA US stock tiles now populate again.</li>
+      <li>Stale-while-revalidate caching &mdash; KV entry lives 24h but is treated as fresh only for 1h. After 1h the route serves the stale snapshot immediately and spawns a background refresh via <code>ctx.waitUntil</code>, so users never block on a paginated cold fetch (~10&ndash;15s) except on an empty cache. <code>?refresh=true</code> forces a synchronous refresh. Falls back to cache on Amazon rate-limit.</li>
+      <li>Each inventory row now carries a <code>dashboardSku</code> (mapped via <code>matchAmzItemToSku</code>) so cross-channel SKU rollups (Woo + Amazon Orders + FBA stock) can join cleanly. Top-level response surfaces <code>matched</code>/<code>unmatched</code> counts so silent SKU drops are visible.</li>
+    </ul>
+    <h4>v2.19 &mdash; 29 April 2026 (rate-limit error visibility)</h4>
+    <ul>
+      <li>Amazon SP-API rate-limit errors hitting <code>postNewReportJobs</code> are now persisted to <code>report_jobs.error</code> and surfaced in the cron tick response (<code>postError</code> field) instead of being silently swallowed. Caught when v2.18's POST-all-jobs-in-one-tick pattern hit Amazon's <code>/reports</code> rate cap and the bail-out had no audit trail &mdash; jobs just sat in <code>pending</code> with no <code>amazon_report_id</code> and no error message.</li>
+    </ul>
     <h4>v2.18 &mdash; 29 April 2026 (Amazon Reports parallelism)</h4>
     <ul>
       <li>Reports state machine now POSTs all un-POSTed pending jobs in one tick (cheap, ~500ms each) instead of being capped at <code>maxJobsPerPhase=3</code>. Previously the SELECT+LIMIT meant lower-id jobs hogged the polling budget and higher-id ones (e.g. <code>2026-02-1h</code>, <code>2026-03-1h</code>, etc.) never got POSTed to Amazon at all &mdash; they starved indefinitely behind in-flight lower-id jobs that hadn&rsquo;t completed yet.</li>
