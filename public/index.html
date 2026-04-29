@@ -74,16 +74,26 @@
     .region-btn:hover { background: #FFF5F7; }
     .region-btn.active { background: #FF578A; color: #fff; }
     .region-btn .region-flag { font-size: 15px; }
-    /* The right side of the header has two groups:
+    /* Sub-header row (immediately below the brand/region header). Lives on its
+       own thin band so the brand row stays uncluttered. Two groups inside:
          • status-group  — Live badge, Xero reconnect (when shown), Data Health
-         • controls-group — Activity chip, Last updated, Refresh
-       flex:1 + margin-left:auto on the controls-group pushes it to the
-       absolute right edge regardless of viewport width, so the gap between
-       the two groups grows or shrinks with the window. The visual gap
-       reinforces "left cluster = status, right cluster = controls". */
-    .header-right { display: flex; align-items: center; gap: 12px; flex: 1; }
+         • controls-group — Activity chip, Newest sync, Refresh
+       margin-left:auto on the controls-group pushes it to the absolute right
+       edge regardless of viewport width. The gap reinforces "left = status,
+       right = controls". Sticky just below the brand header so Activity +
+       Refresh stay reachable while scrolling. */
+    .header-controls-row {
+      background: var(--white);
+      border-bottom: 1px solid var(--border);
+      padding: 6px 28px;
+      display: flex; align-items: center; gap: 12px;
+      position: sticky; top: 58px; z-index: 99;
+    }
     .header-status-group   { display: flex; align-items: center; gap: 12px; }
     .header-controls-group { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+    @media (max-width: 768px) {
+      .header-controls-row { padding: 6px 16px; flex-wrap: wrap; }
+    }
     .last-updated { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
     .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #22C55E; flex-shrink: 0; }
 
@@ -107,7 +117,8 @@
 
     /* Health details panel (shown on click) */
     .health-panel {
-      position: fixed; top: 56px; right: 16px; z-index: 200;
+      /* anchored just below the sub-header controls row (brand 58px + controls ~36px) */
+      position: fixed; top: 100px; right: 16px; z-index: 200;
       background: #fff; border: 1px solid #E5E7EB; border-radius: 8px;
       padding: 14px 16px; width: 440px; max-width: calc(100vw - 32px);
       box-shadow: 0 10px 30px rgba(0,0,0,0.12);
@@ -147,7 +158,8 @@
     .activity-chip:hover { background: #E5E7EB; }
     .activity-chip-caret { font-size: 9px; opacity: 0.6; }
     .activity-panel {
-      position: fixed; top: 56px; right: 16px; z-index: 200;
+      /* anchored just below the sub-header controls row (brand 58px + controls ~36px) */
+      position: fixed; top: 100px; right: 16px; z-index: 200;
       background: #fff; border: 1px solid #E5E7EB; border-radius: 8px;
       padding: 14px 16px; width: 560px; max-width: calc(100vw - 32px);
       box-shadow: 0 10px 30px rgba(0,0,0,0.12);
@@ -461,7 +473,6 @@
       .chart-legend { display: none; }
       .card-value { font-size: 22px; }
       .card-value.xl { font-size: 24px; }
-      .header-right { flex-wrap: wrap; gap: 8px; }
     }
   </style>
 </head>
@@ -481,36 +492,40 @@
       </button>
     </div>
   </div>
-  <div class="header-right" id="header-right-ca">
-    <!-- Left cluster: live-data status + Data Health badge. Things that
-         describe what state the data is in. -->
-    <div class="header-status-group">
-      <span class="prototype-badge">Live</span>
-      <a id="xero-reconnect-btn" href="/auth/xero" style="display:none; font-size:11px; padding:4px 10px; border-radius:6px; text-decoration:none; font-weight:600;"></a>
-      <div id="healthBadge" class="health-badge gray" onclick="toggleHealthPanel()" title="Click for data health details">
-        <div class="health-badge-dot"></div>
-        <span id="healthBadgeText">Checking…</span>
-      </div>
-    </div>
-    <!-- Right cluster: controls. Activity log + when-was-this-fresh + the
-         action that re-fetches it. margin-left:auto pushes them to the absolute
-         right edge regardless of viewport width, leaving a clear gap from the
-         status-group on the left. -->
-    <div class="header-controls-group">
-      <div id="activityChip" class="activity-chip" onclick="toggleActivityPanel()" title="Click for activity log: cron ticks, snapshots, report ingests">
-        <span>Activity</span>
-        <span class="activity-chip-caret">▼</span>
-      </div>
-      <div class="last-updated">
-        <div class="status-dot"></div>
-        <span id="lastUpdatedText">Last updated: —</span>
-      </div>
-      <button class="btn-refresh" onclick="handleRefresh()" title="Re-renders the dashboard from cached data. Upstream sources are pulled by the cron every 15 min — see Activity log for the latest pulls per source. Logiwa is a manual CSV upload, not a pull.">
-        <span class="refresh-icon" id="refreshIcon">↻</span> Refresh
-      </button>
+</header>
+
+<!-- Sub-header controls row. Lives below the brand+region header so the brand
+     row stays uncluttered and the controls have their own breathing space.
+     id stays as `header-right-ca` so the AU region toggle in switchRegion()
+     keeps hiding it without code changes. -->
+<div class="header-controls-row" id="header-right-ca">
+  <!-- Left cluster: live-data status + Data Health badge. Things that
+       describe what state the data is in. -->
+  <div class="header-status-group">
+    <span class="prototype-badge">Live</span>
+    <a id="xero-reconnect-btn" href="/auth/xero" style="display:none; font-size:11px; padding:4px 10px; border-radius:6px; text-decoration:none; font-weight:600;"></a>
+    <div id="healthBadge" class="health-badge gray" onclick="toggleHealthPanel()" title="Click for data health details">
+      <div class="health-badge-dot"></div>
+      <span id="healthBadgeText">Checking…</span>
     </div>
   </div>
-</header>
+  <!-- Right cluster: controls. Activity log + when-was-this-fresh + the
+       action that re-fetches it. margin-left:auto pushes them to the absolute
+       right edge regardless of viewport width. -->
+  <div class="header-controls-group">
+    <div id="activityChip" class="activity-chip" onclick="toggleActivityPanel()" title="Click for activity log: cron ticks, snapshots, report ingests">
+      <span>Activity</span>
+      <span class="activity-chip-caret">▼</span>
+    </div>
+    <div class="last-updated">
+      <div class="status-dot"></div>
+      <span id="lastUpdatedText">Last updated: —</span>
+    </div>
+    <button class="btn-refresh" onclick="handleRefresh()" title="Re-renders the dashboard from cached data. Upstream sources are pulled by the cron every 15 min — see Activity log for the latest pulls per source. Logiwa is a manual CSV upload, not a pull.">
+      <span class="refresh-icon" id="refreshIcon">↻</span> Refresh
+    </button>
+  </div>
+</div>
 
 <!-- Data Health details panel (toggled by badge click) -->
 <div id="healthPanel" class="health-panel">
@@ -1090,10 +1105,12 @@
   <br>
   <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.26</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
-    <h4>v2.26 &mdash; 29 April 2026 (chip + refresh fixes, header layout, all 7 sources)</h4>
+    <h4>v2.26 &mdash; 29 April 2026 (chip + refresh fixes, sub-header layout, all 7 sources, schedule tooltips)</h4>
     <ul>
+      <li><strong>Sub-header row.</strong> The brand row (logo + region switch) now stands alone; the data status &amp; controls live on a thin sticky sub-header below it (Live / Data Health / &middot;&middot;&middot; / Activity / Newest sync / Refresh). Less crowded, controls still pinned to the absolute right.</li>
       <li><strong>Per-source chips finally show real timing.</strong> <code>loadWooSales</code>, <code>loadAmazonSales</code>, and <code>loadXeroInvoices</code> no longer overwrite <code>sourceSyncTimes</code> from their own <code>data.lastSync</code> field &mdash; those endpoints are KV-cached, so a fresh deploy left the chips clobbered with stale timestamps from the cached payload. <code>/api/sync-status</code> (uncached, reads <code>sync_state</code> + KV markers + <code>xero_tokens.updated_at</code> directly) is now the only writer.</li>
-      <li><strong>All 7 sources in the chip row.</strong> Added Logiwa, SalesBinder, and Xero alongside the existing Woo CA / Woo US / Amz CA / Amz US chips. Logiwa's chip shows the last CSV upload time and surfaces the filename in the chip tooltip &mdash; "Manual CSV upload &mdash; last upload 29 Apr 2026, 6:35 pm (ConsolidatedInventoryReport_&hellip;xlsx)". A stale Logiwa chip means "re-upload the CSV", not "the cron failed".</li>
+      <li><strong>All 7 sources in the chip row.</strong> Added Logiwa, SalesBinder, and Xero alongside the existing Woo CA / Woo US / Amz CA / Amz US chips. Logiwa's chip shows the last CSV upload time; SalesBinder's shows the last on-demand pull (it has no cron); Xero's shows the most recent OAuth token refresh.</li>
+      <li><strong>Sync-schedule tooltips.</strong> Hover any chip to see what it is and when the next pull is due &mdash; e.g. "Cron: every 15 min (:00, :15, :30, :45). Next pull due ~10:45 pm (7m)." for Woo / Amazon. SalesBinder's tooltip is honest: "On-demand pull only &mdash; no cron." Logiwa's: "Manual CSV upload &mdash; no cron. Re-upload the export to refresh." Xero's: "OAuth token auto-refreshes on use when expired (~30 min lifespan, rotated)."</li>
       <li><strong>"Last updated" now shows the newest upstream sync</strong> instead of the browser's clock. Reads <code>MAX(sourceSyncTimes)</code> &mdash; "Newest sync: 29 Apr 2026, 10:30 pm" means the dashboard data is at most as fresh as the most-recently-synced source. Falls back to "Loaded: &lt;time&gt;" if no source has reported yet.</li>
       <li><strong>Refresh button actually refreshes &mdash; what it CAN refresh.</strong> Clicking it now sets a <code>__forceRefresh</code> flag that causes <code>loadWooSales</code>/<code>loadAmazonSales</code> to pass <code>?refresh=1</code>, busting the 15-min KV cache and re-aggregating from D1. <strong>Refresh re-renders from cached data; it does not pull from upstream</strong> &mdash; the cron is what does that, every 15 min. Tooltip on the button explains this.</li>
       <li><strong>Header layout split.</strong> Left cluster (Live badge, Data Health) describes data state; right cluster (Activity, Newest sync, Refresh) is grouped controls and is pinned to the absolute right edge with <code>margin-left: auto</code>. Visual gap between them grows with the viewport.</li>
@@ -1532,17 +1549,45 @@ function updateSyncStatusBar() {
   for (const [name, syncTime] of entries.sort((a,b) => a[0].localeCompare(b[0]))) {
     const isStale = syncTime && (Date.now() - new Date(syncTime).getTime() > STALE_MS);
     const color = !syncTime ? '#9CA3AF' : isStale ? '#F59E0B' : '#10B981';
-    // Tooltip = the full ISO timestamp + (if available) extra context. Logiwa
-    // gets a "manual CSV upload" hint plus the filename so it's clear that a
-    // stale Logiwa chip means "re-upload the CSV", not "the cron failed".
-    let tip = syncTime ? new Date(syncTime).toLocaleString('en-AU') : 'never synced';
+    // Tooltip = the full timestamp + the sync schedule for that source so the
+    // viewer can answer "when's the next pull due?" without reading docs.
+    const lastLine  = syncTime ? new Date(syncTime).toLocaleString('en-AU') : 'never synced';
+    const schedLine = sourceScheduleHint(name);
+    let tip = `Last sync: ${lastLine}\n${schedLine}`;
     if (name === 'Logiwa') {
       const fname = (window.__logiwaFileName || '');
-      tip = `Manual CSV upload — last upload ${tip}${fname ? ` (${fname})` : ''}`;
+      if (fname) tip += `\nFile: ${fname}`;
     }
     html += `<span title="${escapeHtml(tip)}" style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:#6B7280;cursor:help;"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${color};"></span>${escapeHtml(name)}: ${escapeHtml(timeAgo(syncTime))}</span>`;
   }
   bar.innerHTML = html;
+}
+
+// Per-source sync schedule. Used by chip tooltips. Where a source has a cron
+// cadence we also compute "next pull due in X min" so the viewer can answer
+// "when am I getting fresh data?" without doing the maths in their head. The
+// cron ('*/15 * * * *') in wrangler.jsonc fires Woo + Amazon Orders + Reports
+// every 15 min on the :00/:15/:30/:45 boundary; FBA inventory, Xero, and
+// SalesBinder don't ride that schedule (see comments below).
+function sourceScheduleHint(name) {
+  if (name === 'Woo CA' || name === 'Woo US' || name === 'Amz CA' || name === 'Amz US') {
+    const now = new Date();
+    const minsToNext = 15 - (now.getMinutes() % 15);
+    const nextDue = new Date(now.getTime() + minsToNext * 60_000);
+    nextDue.setSeconds(0, 0);
+    const next = nextDue.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
+    return `Cron: every 15 min (:00, :15, :30, :45). Next pull due ~${next} (${minsToNext}m).`;
+  }
+  if (name === 'Xero') {
+    return 'OAuth token auto-refreshes on use when expired (~30 min lifespan, rotated).';
+  }
+  if (name === 'SalesBinder') {
+    return 'On-demand pull only — no cron. Refresh by hitting /api/salesbinder/inventory?refresh=true.';
+  }
+  if (name === 'Logiwa') {
+    return 'Manual CSV upload — no cron. Re-upload the export to refresh.';
+  }
+  return '';
 }
 
 // Fetch live PO data from server (if running via server.js)
