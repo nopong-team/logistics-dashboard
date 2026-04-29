@@ -49,10 +49,25 @@ app.route('/api/admin', adminRoutes);
 // Catch-all 404 for unknown /api/* paths and any non-asset path.
 app.notFound((c) => c.json({ error: 'not found', path: c.req.path }, 404));
 
-// Error handler — log full detail to observability, return a generic message.
+// Error handler — log full detail to observability, return a SANITIZED message.
+//
+// Hard rule: anything that ends up in `err.message` may end up in a response
+// body, terminal scrollback, or a transcript. Native fetch() errors bake the
+// full request URL into their message — which for our Woo helper means
+// consumer_key/consumer_secret query params get exposed verbatim if we pass
+// err.message through. We caught one such leak in the wild on 2026-04-29 (a
+// `ttps://` URL typo on WOO_US_URL surfaced both Woo US credentials in the
+// 500 response). The wooFetch helper now sanitizes at the source; this is the
+// belt-and-braces backstop for any other code path that throws.
+function redactSecrets(s) {
+  return String(s || '')
+    .replace(/(consumer_key|consumer_secret|access_token|refresh_token|api_key)=[^&\s"']+/gi, '$1=[REDACTED]')
+    .replace(/\b(ck|cs)_[a-f0-9]{20,}\b/gi, '$1_[REDACTED]');
+}
+
 app.onError((err, c) => {
   console.error('Worker error:', err);
-  return c.json({ error: 'internal error', detail: err.message }, 500);
+  return c.json({ error: 'internal error', detail: redactSecrets(err?.message) }, 500);
 });
 
 // ─── Cron incremental sync ─────────────────────────────────────────────────

@@ -54,22 +54,54 @@ const WOO_STATUSES_ALL = 'any'; // backfill stores everything; queries filter at
 function storeFromEnv(env, market) {
   const key = market.toUpperCase();
   const lookup = {
-    CA: { url: env.WOO_CA_URL, key: env.WOO_CA_KEY, secret: env.WOO_CA_SECRET, currency: 'CAD' },
-    US: { url: env.WOO_US_URL, key: env.WOO_US_KEY, secret: env.WOO_US_SECRET, currency: 'USD' },
+    CA: { market: 'CA', url: env.WOO_CA_URL, key: env.WOO_CA_KEY, secret: env.WOO_CA_SECRET, currency: 'CAD' },
+    US: { market: 'US', url: env.WOO_US_URL, key: env.WOO_US_KEY, secret: env.WOO_US_SECRET, currency: 'USD' },
   };
   return lookup[key];
 }
 
+// Scrub anything that looks like a credential out of a string before it hits
+// any user-visible surface (response body, transcript, scrollback). Belt to
+// the global onError handler's braces.
+function redactSecrets(s) {
+  return String(s || '')
+    .replace(/(consumer_key|consumer_secret|access_token|refresh_token|api_key)=[^&\s"']+/gi, '$1=[REDACTED]')
+    .replace(/\b(ck|cs)_[a-f0-9]{20,}\b/gi, '$1_[REDACTED]');
+}
+
 async function wooFetch(store, endpoint, params) {
-  const url = new URL(`/wp-json/wc/v3${endpoint}`, store.url);
+  let url;
+  try {
+    url = new URL(`/wp-json/wc/v3${endpoint}`, store.url);
+  } catch (e) {
+    // Bad WOO_${market}_URL — almost always a paste typo (missing protocol etc.).
+    throw new Error(
+      `Woo ${store.market}: WOO_${store.market}_URL is not a valid URL. ` +
+      `Re-set it with: npx wrangler secret put WOO_${store.market}_URL`,
+    );
+  }
   url.searchParams.set('consumer_key', store.key);
   url.searchParams.set('consumer_secret', store.secret);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
 
-  const resp = await fetch(url.toString());
+  let resp;
+  try {
+    resp = await fetch(url.toString());
+  } catch (e) {
+    // fetch() throws here on malformed URL schemes (e.g. "ttps://" from a paste
+    // that dropped the leading h), unreachable hosts, etc. The native error
+    // message from undici/Workers includes the full URL — which contains the
+    // consumer_key/consumer_secret query params we just appended. Do NOT
+    // propagate that message; emit a sanitized one that names the likely
+    // remediation without leaking credentials.
+    throw new Error(
+      `Woo ${store.market} fetch failed (likely bad WOO_${store.market}_URL or unreachable host). ` +
+      `Underlying: ${redactSecrets(e?.message || e)}`,
+    );
+  }
   if (!resp.ok) {
     const body = await resp.text();
-    throw new Error(`Woo ${resp.status} on ${endpoint}: ${body.substring(0, 300)}`);
+    throw new Error(`Woo ${store.market} ${resp.status} on ${endpoint}: ${redactSecrets(body).substring(0, 300)}`);
   }
   return {
     data: await resp.json(),

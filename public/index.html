@@ -990,8 +990,12 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.12</span> &middot; April 2026
+  <span class="version-toggle" onclick="document.getElementById('changelog-panel').classList.toggle('open')">v2.13</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.13 &mdash; 29 April 2026 (security fix)</h4>
+    <ul>
+      <li>Sanitize error responses &mdash; <code>wooFetch</code> now catches malformed-URL and unreachable-host fetch failures and emits redacted error messages (no <code>consumer_key</code>/<code>consumer_secret</code> in the response body). Global <code>onError</code> handler also scrubs credential-shaped query params from any <code>err.message</code> before returning. Caught when a paste typo on <code>WOO_US_URL</code> dropped the leading <code>h</code> in <code>https</code> and the ensuing fetch error leaked the Woo US API key &amp; secret into a 500 response (rotated).</li>
+    </ul>
     <h4>v2.12 &mdash; 29 April 2026</h4>
     <ul>
       <li>Cron incremental sync &mdash; every 15 minutes the Worker pulls any new Woo orders since the watermark, writes them into D1, and invalidates the relevant <code>/api/woo/sales</code> KV cache key. Dashboard data refreshes itself without manual intervention.</li>
