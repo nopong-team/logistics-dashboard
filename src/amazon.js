@@ -851,6 +851,7 @@ export async function runAmazonReportsTick(env, market, options = {}) {
 
   let seeded = 0, posted = 0, polled = 0, ingested = 0;
   let postError = null;
+  let runError  = null;
   try {
     seeded = await seedReportJobsIfNeeded(env, market);
     if (Date.now() < deadlineMs) {
@@ -865,9 +866,42 @@ export async function runAmazonReportsTick(env, market, options = {}) {
       ingested = await ingestReadyJobs(env, market, maxJobs, deadlineMs);
     }
   } catch (e) {
-    // Don't blow the whole cron — log and return a partial result.
-    console.error(`Amazon reports tick ${market} error:`, redactSecrets(e?.message || e));
+    // Don't blow the whole cron — log and capture the error so the heartbeat
+    // row reflects it. Partial counts (seeded/posted/polled/ingested) from
+    // before the throw are still meaningful and get persisted as-is.
+    runError = redactSecrets(e?.message || String(e));
+    console.error(`Amazon reports tick ${market} error:`, runError);
   }
+
+  // Heartbeat: write to sync_logs every tick, even when the system is idle
+  // (all 24 ranges fresh-ingested → seeded/posted/polled/ingested all 0). Same
+  // rationale as runAmazonOrdersChunk's write — the dashboard's chips and
+  // activity log are downstream of sync_logs, and a silent table means a silent
+  // UI even though cron is firing every 15 min. This is the canonical writer
+  // for "when did the Reports tick last run for this market".
+  //
+  // action='amazon-reports' is the discriminator used by summariseSyncLog and
+  // by /api/sync-status to find the latest tick per market. orders_added and
+  // items_added carry the meaningful "did work happen" counters (newly ingested
+  // jobs, in-flight polls advanced) — the watermark + pages_fetched columns
+  // aren't applicable to Reports so they're NULL/0.
+  //
+  // Wrapped in its own try/catch so a sync_logs INSERT failure can't break the
+  // tick — we'd rather surface the error in console than abort. Outside the
+  // main try so it fires even when an upstream phase threw.
+  const status = runError ? 'error' : (postError ? 'rate_limited' : 'ok');
+  const errMsg = runError || (postError ? redactSecrets(String(postError)) : null);
+  try {
+    await env.DB.prepare(
+      `INSERT INTO sync_logs
+         (run_at, source, market, action, pages_fetched, orders_added, items_added,
+          watermark_before, watermark_after, status, error, duration_ms)
+       VALUES (strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'amazon', ?, 'amazon-reports', 0, ?, ?, NULL, NULL, ?, ?, ?)`,
+    ).bind(market, ingested, polled, status, errMsg, Date.now() - startMs).run();
+  } catch (e) {
+    console.error(`Amazon reports tick ${market} sync_logs write failed:`, redactSecrets(e?.message || String(e)));
+  }
+
   return { market, seeded, posted, polled, ingested, postError, durationMs: Date.now() - startMs };
 }
 

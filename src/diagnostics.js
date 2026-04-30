@@ -89,13 +89,61 @@ diagnosticsRoutes.get('/sync-status', async (c) => {
     stateBy[`${r.source}:${r.market}`] = r;
   }
 
-  // Order counts in parallel for both sources × both markets.
-  const [wooCa, wooUs, amzCa, amzUs] = await Promise.all([
+  // Order counts in parallel for both sources × both markets, plus the two
+  // Amazon Reports chip queries (one tick-freshness, one ranges-ingested per
+  // market). All six are independent reads — no point serialising.
+  //
+  // Reports freshness comes from sync_logs (canonical "tick fired" history)
+  // not sync_state — sync_state's amazon row is owned by runAmazonOrdersChunk
+  // and we don't want to collide on its key. The MAX(run_at) here will move
+  // every 15 min once Layer 1's heartbeat ships; before then it's null.
+  //
+  // ingestedCount + totalCount let the chip tooltip render "12/12 ingested"
+  // (or "9/12 ingested · 3 pending" mid-backfill) without a separate roundtrip.
+  const [wooCa, wooUs, amzCa, amzUs, amzReportsCaTick, amzReportsUsTick, amzReportsCaJobs, amzReportsUsJobs] = await Promise.all([
     c.env.DB.prepare(`SELECT COUNT(*) AS n FROM orders        WHERE market = 'CA'`).first(),
     c.env.DB.prepare(`SELECT COUNT(*) AS n FROM orders        WHERE market = 'US'`).first(),
     c.env.DB.prepare(`SELECT COUNT(*) AS n FROM amazon_orders WHERE market = 'CA'`).first(),
     c.env.DB.prepare(`SELECT COUNT(*) AS n FROM amazon_orders WHERE market = 'US'`).first(),
+    c.env.DB.prepare(
+      `SELECT MAX(run_at) AS lastSync
+       FROM sync_logs
+       WHERE source = 'amazon' AND market = 'CA' AND action = 'amazon-reports'`,
+    ).first(),
+    c.env.DB.prepare(
+      `SELECT MAX(run_at) AS lastSync
+       FROM sync_logs
+       WHERE source = 'amazon' AND market = 'US' AND action = 'amazon-reports'`,
+    ).first(),
+    c.env.DB.prepare(
+      `SELECT status, COUNT(*) AS n
+       FROM report_jobs
+       WHERE source = 'amazon' AND market = 'CA'
+       GROUP BY status`,
+    ).all(),
+    c.env.DB.prepare(
+      `SELECT status, COUNT(*) AS n
+       FROM report_jobs
+       WHERE source = 'amazon' AND market = 'US'
+       GROUP BY status`,
+    ).all(),
   ]);
+
+  // Roll the per-status counts up into ingested/total per market. Mid-backfill
+  // states (pending, ready, failed) all count toward total but only ingested
+  // counts toward "done". Anything not-yet-seeded shows as a smaller total
+  // until the next seed phase fills it in.
+  function rollupJobs(res) {
+    const by = {};
+    let total = 0;
+    for (const r of (res?.results || [])) {
+      by[r.status] = r.n;
+      total += r.n;
+    }
+    return { ingested: by.ingested || 0, total };
+  }
+  const caJobs = rollupJobs(amzReportsCaJobs);
+  const usJobs = rollupJobs(amzReportsUsJobs);
 
   // FBA inventory cached snapshots + the three KV-only connectors. Best-effort
   // — any of these may not be in KV yet on a fresh env, in which case the chip
@@ -144,6 +192,23 @@ diagnosticsRoutes.get('/sync-status', async (c) => {
       orderCount:   amzUs?.n || 0,
       syncComplete: true,
       syncing:      false,
+    },
+    // Amazon Reports — separate chips from Amazon Orders because they ride a
+    // different state machine (12 ranges per market, async POST→poll→ingest)
+    // and their freshness story is independent of Orders. lastSync comes from
+    // the Layer 1 heartbeat row in sync_logs; ingestedCount/totalCount let the
+    // chip tooltip render "12/12 ranges ingested" without a separate roundtrip.
+    amzReportsCA: {
+      lastSync:      toIsoUtc(amzReportsCaTick?.lastSync) || null,
+      ingestedCount: caJobs.ingested,
+      totalCount:    caJobs.total,
+      syncing:       false,
+    },
+    amzReportsUS: {
+      lastSync:      toIsoUtc(amzReportsUsTick?.lastSync) || null,
+      ingestedCount: usJobs.ingested,
+      totalCount:    usJobs.total,
+      syncing:       false,
     },
     amzInvCA: {
       lastSync: amzInvCa?.lastSync || null, // already ISO-Z (KV writes from JS)
@@ -421,6 +486,22 @@ function summariseSyncLog(row) {
   // status is 'ok' | 'error' | 'rate_limited' | 'partial'.
   if (row.status === 'rate_limited') return row.error || 'rate-limited by upstream';
   if (row.status === 'error')        return row.error?.substring(0, 200) || 'error';
+
+  // Amazon Reports heartbeat rows reuse orders_added/items_added as
+  // jobs-ingested/polls-advanced counters (see runAmazonReportsTick in
+  // src/amazon.js). The "0 new orders" language doesn't fit, so render with
+  // Reports-native vocabulary. Idle ticks are normal — once all 24 ranges are
+  // ingested, most ticks do no work; we show that explicitly so the activity
+  // log doesn't read as "broken" when it's actually "healthy and quiet".
+  if (row.action === 'amazon-reports') {
+    const ing = row.orders_added || 0;
+    const pol = row.items_added  || 0;
+    if (ing === 0 && pol === 0) return 'idle (all ranges fresh)';
+    if (pol === 0) return `+${ing} job${ing === 1 ? '' : 's'} ingested`;
+    if (ing === 0) return `+${pol} poll${pol === 1 ? '' : 's'} advanced`;
+    return `+${ing} job${ing === 1 ? '' : 's'} ingested, +${pol} poll${pol === 1 ? '' : 's'} advanced`;
+  }
+
   const ord = row.orders_added || 0;
   const itm = row.items_added  || 0;
   if (ord === 0 && itm === 0) return '0 new orders, system healthy';

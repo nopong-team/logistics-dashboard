@@ -1104,8 +1104,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.27.2</span> &middot; April 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.28</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.28 &mdash; 30 April 2026 (Amazon Reports visibility)</h4>
+    <ul>
+      <li><strong>Amazon Reports now have their own freshness chips.</strong> <code>Amz Reports CA</code> and <code>Amz Reports US</code> joined the per-source row. Previously the only Amazon chip was Orders, so when Reports was the connector that mattered (it drives Monthly SKU Sales) there was no direct way to see whether it was running.</li>
+      <li><strong>Activity log now sees the Reports cron tick every 15 min.</strong> Previously <code>runAmazonReportsTick</code> only left a trace via <code>report_jobs.updated_at</code> &mdash; once all 24 ranges were stably <em>ingested</em>, no row's timestamp moved and the activity dropdown went silent for hours even though cron was firing every 15 min. The function now writes a heartbeat row to <code>sync_logs</code> on every tick (<code>action='amazon-reports'</code>) regardless of whether work happened. Idle ticks render as <em>"idle (all ranges fresh)"</em>; busy ticks render as e.g. <em>"+1 job ingested, +2 polls advanced"</em>; rate-limited or errored ticks surface the upstream error inline.</li>
+      <li><strong>Reports chip tooltip shows ingested/total ranges.</strong> Hover <code>Amz Reports CA</code> &rarr; <em>"Ranges: 12/12 ingested"</em> alongside the cron schedule, so it's immediately obvious whether a backfill is still in flight (e.g. <em>"9/12 ingested"</em>) or steady state.</li>
+      <li><strong>Reports tooltip explains the "mostly idle" cadence.</strong> The schedule hint reads <em>"Cron: every 15 min &hellip; Most ticks are no-ops; active ranges (this/last month) refresh every 24h, historical ranges never re-run."</em> &mdash; pre-empting the "why does it look stale?" question that comes up when nothing's ingested for 15+ hours during normal operation.</li>
+    </ul>
     <h4>v2.27.2 &mdash; 29 April 2026 (favicon)</h4>
     <ul>
       <li>Added the No Pong brand favicon at <code>/favicon.png</code> and linked from the document head.</li>
@@ -1591,6 +1598,11 @@ function updateSyncStatusBar() {
       const fname = (window.__logiwaFileName || '');
       if (fname) tip += `\nFile: ${fname}`;
     }
+    if (name === 'Amz Reports CA' || name === 'Amz Reports US') {
+      const mkt = name === 'Amz Reports CA' ? 'CA' : 'US';
+      const c = (window.__amzReportsCounts || {})[mkt];
+      if (c && c.total) tip += `\nRanges: ${c.ingested}/${c.total} ingested`;
+    }
     html += `<span title="${escapeHtml(tip)}" style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:#6B7280;cursor:help;"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${color};"></span>${escapeHtml(name)}: ${escapeHtml(timeAgo(syncTime))}</span>`;
   }
   bar.innerHTML = html;
@@ -1603,12 +1615,21 @@ function updateSyncStatusBar() {
 // every 15 min on the :00/:15/:30/:45 boundary; FBA inventory, Xero, and
 // SalesBinder don't ride that schedule (see comments below).
 function sourceScheduleHint(name) {
-  if (name === 'Woo CA' || name === 'Woo US' || name === 'Amz CA' || name === 'Amz US') {
+  if (name === 'Woo CA' || name === 'Woo US' || name === 'Amz CA' || name === 'Amz US'
+      || name === 'Amz Reports CA' || name === 'Amz Reports US') {
     const now = new Date();
     const minsToNext = 15 - (now.getMinutes() % 15);
     const nextDue = new Date(now.getTime() + minsToNext * 60_000);
     nextDue.setSeconds(0, 0);
     const next = nextDue.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
+    // Reports has an extra wrinkle vs Orders: the cron tick is every 15 min,
+    // but each tick is mostly idle once all 24 ranges are ingested. Active
+    // ranges (this + last month) refresh every 24h; frozen ranges never re-run.
+    if (name === 'Amz Reports CA' || name === 'Amz Reports US') {
+      return `Cron: every 15 min (:00, :15, :30, :45). Next tick ~${next} (${minsToNext}m). ` +
+             `Most ticks are no-ops; active ranges (this/last month) refresh every 24h, ` +
+             `historical ranges never re-run.`;
+    }
     return `Cron: every 15 min (:00, :15, :30, :45). Next pull due ~${next} (${minsToNext}m).`;
   }
   if (name === 'FBA Inv CA' || name === 'FBA Inv US') {
@@ -5711,6 +5732,14 @@ async function loadAllData() {
       if (syncData.wooUS?.lastSync)       sourceSyncTimes['Woo US']      = syncData.wooUS.lastSync;
       if (syncData.amzCA?.lastSync)       sourceSyncTimes['Amz CA']      = syncData.amzCA.lastSync;
       if (syncData.amzUS?.lastSync)       sourceSyncTimes['Amz US']      = syncData.amzUS.lastSync;
+      if (syncData.amzReportsCA?.lastSync) sourceSyncTimes['Amz Reports CA'] = syncData.amzReportsCA.lastSync;
+      if (syncData.amzReportsUS?.lastSync) sourceSyncTimes['Amz Reports US'] = syncData.amzReportsUS.lastSync;
+      // Stash ingested/total per market so updateSyncStatusBar can show
+      // "12/12 ranges ingested" in the chip tooltip without a second roundtrip.
+      window.__amzReportsCounts = {
+        CA: syncData.amzReportsCA ? { ingested: syncData.amzReportsCA.ingestedCount || 0, total: syncData.amzReportsCA.totalCount || 0 } : null,
+        US: syncData.amzReportsUS ? { ingested: syncData.amzReportsUS.ingestedCount || 0, total: syncData.amzReportsUS.totalCount || 0 } : null,
+      };
       if (syncData.amzInvCA?.lastSync)    sourceSyncTimes['FBA Inv CA']  = syncData.amzInvCA.lastSync;
       if (syncData.amzInvUS?.lastSync)    sourceSyncTimes['FBA Inv US']  = syncData.amzInvUS.lastSync;
       if (syncData.logiwa?.lastSync)      sourceSyncTimes['Logiwa']      = syncData.logiwa.lastSync;
