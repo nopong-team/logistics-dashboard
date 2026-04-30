@@ -1104,8 +1104,13 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.28</span> &middot; April 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.28.1</span> &middot; April 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.28.1 &mdash; 30 April 2026 (Reports activity log + chip order)</h4>
+    <ul>
+      <li><strong>Reports rows in the activity log are now labelled <code>amazon-reports</code></strong> instead of inheriting <code>amazon</code> from the underlying <code>sync_logs</code> row. Previously a heartbeat tick read as "amazon CA — idle (all ranges fresh)" sitting next to "amazon CA — +1 order", which was correct underneath but visually indistinguishable. Now reads as "amazon-reports CA" and groups with the existing report_jobs entries.</li>
+      <li><strong>Sync bar chips now follow an explicit order</strong> instead of alphabetical: Woo CA/US &rarr; Amz CA/US &rarr; Amz Reports CA/US &rarr; FBA Inv CA/US &rarr; SalesBinder &rarr; Logiwa &rarr; Xero. Reads left-to-right by category instead of mixing Reports between Orders. Unknown chips fall to the end and sort alphabetically among themselves so a new connector chip appears predictably.</li>
+    </ul>
     <h4>v2.28 &mdash; 30 April 2026 (Amazon Reports visibility)</h4>
     <ul>
       <li><strong>Amazon Reports now have their own freshness chips.</strong> <code>Amz Reports CA</code> and <code>Amz Reports US</code> joined the per-source row. Previously the only Amazon chip was Orders, so when Reports was the connector that mattered (it drives Monthly SKU Sales) there was no direct way to see whether it was running.</li>
@@ -1571,6 +1576,21 @@ function timeAgo(dateStr) {
   return `${Math.round(hrs / 24)}d ago`;
 }
 
+// Chip order in the sync status bar. Explicit list (not alphabetical) so
+// related chips sit together: Woo Orders → Amazon Orders → Amazon Reports →
+// Amazon Inventory → other connectors. Anything not in this list falls to the
+// end and gets sorted alphabetically among itself, so a new connector chip
+// appears on first add but in a predictable spot.
+const CHIP_ORDER = [
+  'Woo CA', 'Woo US',
+  'Amz CA', 'Amz US',
+  'Amz Reports CA', 'Amz Reports US',
+  'FBA Inv CA', 'FBA Inv US',
+  'SalesBinder',
+  'Logiwa',
+  'Xero',
+];
+
 function updateSyncStatusBar() {
   const bar = document.getElementById('sync-status-bar');
   if (!bar) return;
@@ -1586,7 +1606,14 @@ function updateSyncStatusBar() {
   // Check for stale sources (>6 hours old)
   const STALE_MS = 6 * 60 * 60 * 1000;
   let html = '';
-  for (const [name, syncTime] of entries.sort((a,b) => a[0].localeCompare(b[0]))) {
+  for (const [name, syncTime] of entries.sort((a,b) => {
+    const ia = CHIP_ORDER.indexOf(a[0]);
+    const ib = CHIP_ORDER.indexOf(b[0]);
+    const pa = ia === -1 ? CHIP_ORDER.length : ia;
+    const pb = ib === -1 ? CHIP_ORDER.length : ib;
+    if (pa !== pb) return pa - pb;
+    return a[0].localeCompare(b[0]); // tie-breaker for unlisted chips
+  })) {
     const isStale = syncTime && (Date.now() - new Date(syncTime).getTime() > STALE_MS);
     const color = !syncTime ? '#9CA3AF' : isStale ? '#F59E0B' : '#10B981';
     // Tooltip = the full timestamp + the sync schedule for that source so the

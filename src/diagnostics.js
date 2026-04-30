@@ -559,9 +559,17 @@ diagnosticsRoutes.get('/import-log', async (c) => {
 
   const rows = [];
   for (const r of (syncLogsRes.results || [])) {
+    // Relabel Reports heartbeat rows so they render as a distinct source in
+    // the activity log. The underlying sync_logs row uses source='amazon'
+    // (single source-of-truth for Amazon ticks at the storage level), but in
+    // the user-facing feed Orders and Reports should be visually separate —
+    // and report_jobs rows below already use source='amazon-reports', so
+    // matching the convention groups them together. Action discriminator
+    // stays on the row so summariseSyncLog still picks the right vocabulary.
+    const displaySource = r.action === 'amazon-reports' ? 'amazon-reports' : r.source;
     rows.push({
       when:       toIsoUtc(r.run_at),
-      source:     r.source,
+      source:     displaySource,
       market:     r.market || null,
       action:     r.action || 'sync',
       status:     r.status || 'ok',
