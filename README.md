@@ -52,3 +52,8 @@ Never paste a real secret into `wrangler.jsonc`, source code, or chat. Hard rule
 | Pre-rendered response cache | Cloudflare KV |
 | Scheduled syncs | Cloudflare Cron Triggers |
 | Auth | Cloudflare Access (Google Workspace SSO) |
+
+## Contributors
+
+- Chris — backend, Cloudflare infra, build/release
+- Melanie — product, data model, AU region
