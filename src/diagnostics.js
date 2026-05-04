@@ -363,9 +363,43 @@ async function buildWooAuditForMarket(env, market, startDate) {
   };
 }
 
+// Count amazon_items rows tied to superseded (non-latest) ingested jobs per
+// range_label for a market. >0 means the v2.28 doubling bug has rows still
+// sitting in D1 — either pre-fix data not yet cleaned up, or a regression.
+// Powers the Data Health "Amazon SKU rows duplicated across jobs" check, the
+// blind spot that let the original bug ship green for weeks. SQL: per
+// range_label, find MAX(id) of ingested jobs (the survivor) and count rows
+// tied to OTHER ingested jobs for the same range. Sums across range_labels.
+async function countAmazonSupersededRows(env, market) {
+  const res = await env.DB.prepare(
+    `SELECT COALESCE(SUM(superseded), 0) AS n
+     FROM (
+       SELECT (
+         SELECT COUNT(*)
+         FROM amazon_items ai
+         WHERE ai.market = rj.market
+           AND ai.report_job_id IN (
+             SELECT id FROM report_jobs
+             WHERE source = 'amazon' AND market = rj.market
+               AND range_label = rj.range_label AND status = 'ingested'
+           )
+           AND ai.report_job_id != (
+             SELECT MAX(id) FROM report_jobs
+             WHERE source = 'amazon' AND market = rj.market
+               AND range_label = rj.range_label AND status = 'ingested'
+           )
+       ) AS superseded
+       FROM report_jobs rj
+       WHERE rj.source = 'amazon' AND rj.market = ? AND rj.status = 'ingested'
+       GROUP BY rj.range_label
+     )`,
+  ).bind(market).first();
+  return res?.n || 0;
+}
+
 async function buildAmazonAudit(env) {
   const { startDate } = buildMonthWindow();
-  const [caSku, usSku, caState, usState, caJobs, usJobs] = await Promise.all([
+  const [caSku, usSku, caState, usState, caJobs, usJobs, caSuperseded, usSuperseded] = await Promise.all([
     env.DB.prepare(
       `SELECT COUNT(DISTINCT dashboard_sku) AS n
        FROM amazon_items
@@ -396,6 +430,8 @@ async function buildAmazonAudit(env) {
        FROM report_jobs
        WHERE source = 'amazon' AND market = 'US' AND status = 'ingested'`,
     ).first(),
+    countAmazonSupersededRows(env, 'CA'),
+    countAmazonSupersededRows(env, 'US'),
   ]);
 
   const splitSignals = (s) => (s ? String(s).split(',').filter(Boolean) : []);
@@ -420,6 +456,13 @@ async function buildAmazonAudit(env) {
     usFilterSignals:    splitSignals(usJobs?.signals),
     caWrongMarketCount: caJobs?.wrong_market  || 0,
     usWrongMarketCount: usJobs?.wrong_market  || 0,
+    // Doubling-bug guard: rows in amazon_items belonging to superseded
+    // (non-latest) ingested jobs for the same range_label, per market.
+    // Should be 0 in steady state. >0 = stale duplicate rows are still in
+    // D1 (run POST /api/admin/amazon/dedupe-items to clean), or — if it
+    // climbs after a clean run — the ingest fix has regressed.
+    caSupersededRowCount: caSuperseded,
+    usSupersededRowCount: usSuperseded,
   };
 }
 
