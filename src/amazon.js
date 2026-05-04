@@ -692,8 +692,22 @@ async function ingestReadyJobs(env, market, maxJobs, deadlineMs) {
       const doc = await spApiRequest(env, market, `/reports/2021-06-30/documents/${job.document_id}`);
       const text = await downloadReportDocument(doc);
       const parsed = parseAmazonReportTsv(text, market);
-      // Re-ingestion: clean any prior rows for this job before inserting.
-      await env.DB.prepare(`DELETE FROM amazon_items WHERE report_job_id = ?`).bind(job.id).run();
+      // Re-ingestion: clean any prior rows covering this job's date window —
+      // not just rows tagged with this job_id. Active ranges (this/last month)
+      // are re-fetched roughly every 24h and each re-fetch creates a new
+      // report_jobs row with a fresh id. The old "DELETE WHERE report_job_id = ?"
+      // only wiped this job's own rows, leaving every prior superseded job's
+      // rows for the same date range in place. Aggregations in
+      // handleAmazonSalesRequest sum across job_ids, so the per-SKU monthly
+      // totals scaled by the number of cron cycles that had already touched
+      // an active range — visible as Amazon SKU quantities that grow week
+      // over week with no underlying business activity. (Fixed v2.29.)
+      await env.DB.prepare(
+        `DELETE FROM amazon_items
+           WHERE market = ?
+             AND date_created >= ?
+             AND date_created <  ?`,
+      ).bind(market, job.data_start_time, job.data_end_time).run();
       if (parsed.rows.length > 0) {
         const stmts = [];
         for (const r of parsed.rows) {

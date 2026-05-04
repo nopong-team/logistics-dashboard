@@ -1104,8 +1104,14 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.28.1</span> &middot; April 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.29</span> &middot; May 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.29 &mdash; 4 May 2026 (Amazon SKU monthly doubling fix)</h4>
+    <ul>
+      <li><strong>Fixed Monthly SKU Sales over-reporting Amazon by 2x or more.</strong> The Reports ingest path (<code>ingestReadyJobs</code> in <code>src/amazon.js</code>) scoped its pre-insert DELETE by <code>report_job_id</code> only. Every ~24h, the Reports cron re-fetched each active range (this month + last month) and the new fetch got a new <code>report_jobs</code> row with a fresh id &mdash; so the DELETE only wiped its own (empty) rows and the prior job's rows for the same date range stayed in <code>amazon_items</code>. <code>handleAmazonSalesRequest</code> aggregates across job_ids, so per-SKU monthly quantities scaled by the number of cron cycles that had touched that range. Older months (frozen ranges, never re-fetched) reported correctly; the most recent two months drifted further from reality every day. Both CA and US affected. The DELETE is now scoped by the job's date window (<code>data_start_time</code> / <code>data_end_time</code>) instead of by job id, so the new fetch always replaces the old data for that window.</li>
+      <li><strong>One-time cleanup endpoint for the duplicate rows already in D1.</strong> <code>POST /api/admin/amazon/dedupe-items</code> walks every range_label per market, keeps only rows from the most-recent ingested job, deletes the rest, and busts the sales cache. Idempotent &mdash; safe to re-run. Returns a per-(market, range_label) summary of kept vs deleted counts. The fix above stops new duplicates accumulating; this endpoint clears the existing ones so the dashboard reflects clean numbers immediately rather than waiting for old rows to age out of the 6-month window.</li>
+      <li><strong>New Data Health check: "Amazon SKU rows duplicated across jobs."</strong> The reason this bug shipped green for weeks is that none of the existing checks could see it &mdash; sum reconciliation, duplicate order IDs, market separation, and SKU mapping coverage all stayed happy because the duplication was structural at the row level, not at the SKU or order level. New check counts <code>amazon_items</code> rows tied to superseded (non-latest) ingested jobs per range_label and flags red if any exist. <code>/api/audit</code> exposes the counts as <code>amazon.caSupersededRowCount</code> / <code>amazon.usSupersededRowCount</code>; the badge will catch this class of regression on the next data refresh going forward.</li>
+    </ul>
     <h4>v2.28.1 &mdash; 30 April 2026 (Reports activity log + chip order)</h4>
     <ul>
       <li><strong>Reports rows in the activity log are now labelled <code>amazon-reports</code></strong> instead of inheriting <code>amazon</code> from the underlying <code>sync_logs</code> row. Previously a heartbeat tick read as "amazon CA — idle (all ranges fresh)" sitting next to "amazon CA — +1 order", which was correct underneath but visually indistinguishable. Now reads as "amazon-reports CA" and groups with the existing report_jobs entries.</li>
@@ -5457,6 +5463,30 @@ async function runDataHealthChecks() {
     } else {
       checks.push({ status: 'pass', name: 'Amazon SKU mapping coverage',
         detail: 'Every Amazon sales row was mapped to a dashboard SKU' });
+    }
+  }
+
+  // ── Check 3c: Amazon ingest dedup — rows from superseded report jobs ──
+  // The whole reason this check exists: prior to v2.29 the Reports ingest
+  // path scoped its pre-insert DELETE by report_job_id only, so each ~24h
+  // re-fetch of an active range left the previous job's rows in
+  // amazon_items. handleAmazonSalesRequest aggregates across job_ids, so
+  // per-SKU monthly quantities scaled by the number of cron cycles that
+  // had touched that range — the dashboard's Amazon column ran 2x, then
+  // 3x, then more, while every existing health check stayed green. This
+  // counts rows tied to non-latest ingested jobs per range_label and
+  // flags red if any exist. After the dedupe endpoint runs once, this
+  // should sit at zero in perpetuity.
+  if (audit?.amazon) {
+    const caSup = audit.amazon.caSupersededRowCount || 0;
+    const usSup = audit.amazon.usSupersededRowCount || 0;
+    const total = caSup + usSup;
+    if (total > 0) {
+      checks.push({ status: 'fail', name: 'Amazon SKU rows duplicated across jobs',
+        detail: `${total.toLocaleString()} amazon_items rows tied to superseded report jobs (${caSup.toLocaleString()} CA, ${usSup.toLocaleString()} US). Monthly SKU totals are inflated. Run POST /api/admin/amazon/dedupe-items to clean.` });
+    } else {
+      checks.push({ status: 'pass', name: 'Amazon SKU ingest dedup',
+        detail: 'No amazon_items rows from superseded report jobs — re-ingest is replacing prior data correctly' });
     }
   }
 

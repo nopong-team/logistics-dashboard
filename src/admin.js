@@ -31,7 +31,7 @@
 
 import { Hono } from 'hono';
 import { redactSecrets } from './redact.js';
-import { runAmazonOrdersChunk, runAmazonReportsTick, spApiRequest } from './amazon.js';
+import { runAmazonOrdersChunk, runAmazonReportsTick, spApiRequest, invalidateAmazonSalesCache } from './amazon.js';
 
 export const adminRoutes = new Hono();
 
@@ -369,6 +369,114 @@ adminRoutes.get('/amazon/debug-report', async (c) => {
   } catch (e) {
     return c.json({ error: redactSecrets(e?.message || String(e)) }, 500);
   }
+});
+
+// ─── Dedupe Amazon items (one-time cleanup for the v2.28 doubling bug) ────
+//
+// POST /api/admin/amazon/dedupe-items?market=CA   (or market=US, or omit for both)
+//
+// Before v2.29, ingestReadyJobs only deleted prior rows for the SAME job_id
+// before re-inserting, so each ~24h re-fetch of an active range left the
+// previous job's rows in amazon_items. handleAmazonSalesRequest aggregates
+// across job_ids, so per-SKU monthly quantities scaled by the number of cron
+// cycles that had touched that range. This endpoint walks every range_label
+// for the requested market(s), keeps only the rows from the most-recent
+// ingested job for that range, deletes the rest, and invalidates the sales
+// cache so the next dashboard load reflects clean data immediately.
+//
+// Idempotent — safe to re-run. Returns a per-(market, range_label) summary.
+adminRoutes.post('/amazon/dedupe-items', async (c) => {
+  if (!c.env.DB) {
+    return c.json({ error: 'D1 binding DB not configured' }, 500);
+  }
+  const requested = (c.req.query('market') || '').toUpperCase();
+  const markets = requested
+    ? (['CA', 'US'].includes(requested) ? [requested] : [])
+    : ['CA', 'US'];
+  if (markets.length === 0) {
+    return c.json({ error: 'market must be CA, US, or omitted (both)' }, 400);
+  }
+
+  const summary = [];
+  let totalKept = 0;
+  let totalDeleted = 0;
+
+  for (const market of markets) {
+    // For each range_label, find the most-recent ingested job_id. If a range
+    // has only one ingested job, the IN-clause filter is a no-op (correct).
+    const latestPerRange = await c.env.DB.prepare(
+      `SELECT range_label, MAX(id) AS latest_job_id
+       FROM report_jobs
+       WHERE source = 'amazon' AND market = ? AND status = 'ingested'
+       GROUP BY range_label`,
+    ).bind(market).all();
+
+    for (const row of (latestPerRange.results || [])) {
+      const { range_label, latest_job_id } = row;
+
+      // All ingested job_ids for this range — needed because amazon_items
+      // doesn't carry range_label directly; we identify "rows belonging to
+      // this range" by their report_job_id being any of these.
+      const jobsForRange = await c.env.DB.prepare(
+        `SELECT id FROM report_jobs
+         WHERE source = 'amazon' AND market = ? AND status = 'ingested'
+           AND range_label = ?`,
+      ).bind(market, range_label).all();
+      const jobIds = (jobsForRange.results || []).map((r) => r.id);
+      if (jobIds.length <= 1) {
+        // Only one job ever ingested this range — nothing to dedupe.
+        const kept = await c.env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM amazon_items WHERE market = ? AND report_job_id = ?`,
+        ).bind(market, latest_job_id).first();
+        summary.push({ market, range_label, latestJobId: latest_job_id, jobsSeen: 1, kept: kept?.n || 0, deleted: 0 });
+        totalKept += kept?.n || 0;
+        continue;
+      }
+
+      // Build the IN clause dynamically — D1 doesn't bind arrays.
+      const placeholders = jobIds.map(() => '?').join(',');
+      const supersededIds = jobIds.filter((id) => id !== latest_job_id);
+      const supersededPh  = supersededIds.map(() => '?').join(',');
+
+      const before = await c.env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM amazon_items WHERE market = ? AND report_job_id IN (${placeholders})`,
+      ).bind(market, ...jobIds).first();
+      const keptCount = await c.env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM amazon_items WHERE market = ? AND report_job_id = ?`,
+      ).bind(market, latest_job_id).first();
+
+      // Delete every row tied to a superseded job for this range.
+      const delRes = await c.env.DB.prepare(
+        `DELETE FROM amazon_items WHERE market = ? AND report_job_id IN (${supersededPh})`,
+      ).bind(market, ...supersededIds).run();
+
+      const deleted = (delRes.meta?.changes ?? ((before?.n || 0) - (keptCount?.n || 0)));
+      summary.push({
+        market,
+        range_label,
+        latestJobId: latest_job_id,
+        jobsSeen:    jobIds.length,
+        kept:        keptCount?.n || 0,
+        deleted,
+      });
+      totalKept    += keptCount?.n || 0;
+      totalDeleted += deleted;
+    }
+
+    // Bust the sales cache so the dashboard's next /api/amazon/sales call
+    // re-aggregates from the now-clean amazon_items.
+    await invalidateAmazonSalesCache(c.env, market);
+  }
+
+  return c.json({
+    ok:           true,
+    markets,
+    totalKept,
+    totalDeleted,
+    rangesProcessed: summary.length,
+    summary,
+    note: 'Sales cache invalidated. Reload the dashboard or hit Refresh to see cleaned numbers.',
+  });
 });
 
 // ─── Reconcile ──────────────────────────────────────────────────────────────
