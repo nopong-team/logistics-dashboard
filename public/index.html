@@ -1104,8 +1104,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.29</span> &middot; May 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.30</span> &middot; May 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.30 &mdash; 4 May 2026 (Monthly SKU Sales now in tins, not Woo line items)</h4>
+    <ul>
+      <li><strong>Monthly SKU Sales tab + CSV export now show tin-equivalent counts for SRT bundles and WC- wholesale cartons.</strong> Previously the Woo per-SKU bucket (powering the Monthly/Weekly SKU Sales tab and <code>downloadMonthlyCSV</code>) collapsed variant SKUs into their base SKU (e.g. <code>CA-SRT-OG-NPO-35x12</code> &rarr; <code>CA-OG-NPO-35</code>) but added the <em>raw line quantity</em> &mdash; so a 12-pack bundle counted as 1 tin, not 12, and a WC- wholesale carton counted as 1 tin, not 48. The TINS data structure (run rates, forecasting, top-level "tins shipped" cards) was already applying the multiplier correctly &mdash; the bug was confined to the per-SKU view layer. For April 2026 CA Woo this meant <code>CA-OG-NPO-35</code> displayed as 1,239 tins when 6 SRT bundles bumped it to 1,305 (a 66-tin gap), with similar shortfalls on every base SKU that had SRT or WC- sales in the period. Total April CA Woo "tins" was under-reported by 187 (17 SRT bundles &times; 11 missed-tin-each).</li>
+      <li><strong>Fix is one-line-per-bucket in <code>loadWooSales</code></strong> &mdash; multiply <code>info.monthlyQty</code> and <code>info.weeklyQty</code> by <code>norm.multiplier</code> when populating <code>SKU_CHANNEL_DATA[wooBucketKey]</code> / <code>SKU_WEEKLY_DATA[wooBucketKey]</code>. Revenue (<code>monthly</code>) stays un-multiplied because a 12-pack is one transaction with one revenue line.</li>
+      <li><strong>CTN cartons (Xero <code>CA-CTN-*-48</code>) intentionally NOT rolled into base tin SKU.</strong> Per Melanie's forecasting model, cartons are tracked as their own SKUs in the Monthly SKU Sales view and forecast separately. The existing forecasting code (around <code>cartonTinDemand</code>) already accounts for tin-equivalent demand from carton sales when computing inventory burn rates &mdash; that path is unchanged.</li>
+      <li><strong>Validated against Seller Central + Xero exports for April 2026 CA</strong> after deploy: per-SKU Amazon tins matched validation file exactly (1,478 total). Per-SKU Woo tins now match expected post-multiplier values. Per-SKU Xero values match validation file exactly (672/11/3/1).</li>
+    </ul>
     <h4>v2.29 &mdash; 4 May 2026 (Amazon SKU monthly doubling fix)</h4>
     <ul>
       <li><strong>Fixed Monthly SKU Sales over-reporting Amazon by 2x or more.</strong> The Reports ingest path (<code>ingestReadyJobs</code> in <code>src/amazon.js</code>) scoped its pre-insert DELETE by <code>report_job_id</code> only. Every ~24h, the Reports cron re-fetched each active range (this month + last month) and the new fetch got a new <code>report_jobs</code> row with a fresh id &mdash; so the DELETE only wiped its own (empty) rows and the prior job's rows for the same date range stayed in <code>amazon_items</code>. <code>handleAmazonSalesRequest</code> aggregates across job_ids, so per-SKU monthly quantities scaled by the number of cron cycles that had touched that range. Older months (frozen ranges, never re-fetched) reported correctly; the most recent two months drifted further from reality every day. Both CA and US affected. The DELETE is now scoped by the job's date window (<code>data_start_time</code> / <code>data_end_time</code>) instead of by job id, so the new fetch always replaces the old data for that window.</li>
@@ -1944,6 +1951,16 @@ async function loadWooSales(marketplace) {
 
     // Populate per-SKU channel data for Monthly SKU Sales tab.
     // Write into the per-market bucket and REPLACE it so auto-refresh doesn't double/triple the data.
+    //
+    // QUANTITIES are multiplied by norm.multiplier so a 12-pack SRT bundle counts
+    // as 12 tins and a WC- wholesale carton counts as 48 tins. Without this, the
+    // Monthly SKU Sales tab + its CSV export under-reported tins for any base
+    // SKU that had SRT or WC- variants in the period (the tin-equivalent rollup
+    // was already correct in the TINS data structure used for forecasting/run
+    // rates — but this view-layer bucket was reading raw line counts). Fixed v2.30.
+    //
+    // REVENUE is NOT multiplied: a 12-pack is one transaction worth one revenue
+    // line, not 12 separate revenue events.
     const wooBucketKey = marketplace === 'CA' ? 'wooCA' : 'wooUS';
     const wooBucket = {};
     const wooWeekBucket = {};
@@ -1951,14 +1968,15 @@ async function loadWooSales(marketplace) {
       const norm = normaliseWooSku(sku);
       if (!norm) continue;
       const bsku = norm.baseSku;
+      const mult = norm.multiplier || 1;  // SRT bundle ×12, WC- carton ×48, others ×1
       if (!wooBucket[bsku]) wooBucket[bsku] = { monthly: [0,0,0,0,0,0], monthlyQty: [0,0,0,0,0,0] };
       if (info.monthly) info.monthly.forEach((v, i) => { wooBucket[bsku].monthly[i] += v; });
-      if (info.monthlyQty) info.monthlyQty.forEach((v, i) => { wooBucket[bsku].monthlyQty[i] += v; });
-      // Weekly data
+      if (info.monthlyQty) info.monthlyQty.forEach((v, i) => { wooBucket[bsku].monthlyQty[i] += v * mult; });
+      // Weekly quantities — same multiplier rule
       if (info.weeklyQty) {
         if (!wooWeekBucket[bsku]) wooWeekBucket[bsku] = { weeklyQty: {} };
         for (const [wk, qty] of Object.entries(info.weeklyQty)) {
-          wooWeekBucket[bsku].weeklyQty[wk] = (wooWeekBucket[bsku].weeklyQty[wk] || 0) + qty;
+          wooWeekBucket[bsku].weeklyQty[wk] = (wooWeekBucket[bsku].weeklyQty[wk] || 0) + qty * mult;
         }
       }
     }
