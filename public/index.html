@@ -141,6 +141,14 @@
     .health-panel .chk-body { flex: 1; }
     .health-panel .chk-name { font-weight: 600; }
     .health-panel .chk-detail { color: var(--text-secondary); font-size: 11px; margin-top: 2px; }
+    .health-panel .chk-action {
+      display: inline-block; margin-top: 6px; padding: 4px 10px;
+      font-size: 11px; font-weight: 600; line-height: 1;
+      background: #FF578A; color: #fff; border: none; border-radius: 4px;
+      cursor: pointer;
+    }
+    .health-panel .chk-action:hover:not(:disabled) { background: #E04774; }
+    .health-panel .chk-action:disabled { opacity: 0.7; cursor: default; }
     .health-panel .close-x {
       position: absolute; top: 8px; right: 10px; font-size: 16px; line-height: 1;
       cursor: pointer; color: #9CA3AF; background: none; border: none;
@@ -1104,8 +1112,14 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.30</span> &middot; May 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.31</span> &middot; May 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.31 &mdash; 8 May 2026 (Close workers.dev side door, drop ADMIN_KEY, self-serve cleanup button)</h4>
+    <ul>
+      <li><strong>Disabled the unauthenticated <code>logistics-dashboard.no-pong.workers.dev</code> URL.</strong> Cloudflare gives every Worker a default <code>&lt;name&gt;.workers.dev</code> hostname; ours had been live since the Step 3 hello-world and sat outside Cloudflare Access &mdash; meaning anyone who knew or guessed the URL could read company sales data without signing in. Set <code>workers_dev: false</code> in <code>wrangler.jsonc</code> so the Worker is reachable only at <code>logistics.apps.nopong.com</code>, which is fully behind Google Workspace SSO. The deploy-time URL list will now show only the custom hostname.</li>
+      <li><strong>Removed the <code>X-Admin-Key</code> middleware from <code>/api/admin/*</code>.</strong> The <code>ADMIN_KEY</code> Wrangler secret existed solely as an application-layer fence around the workers.dev exposure; with that hostname disabled, the key was friction with no security benefit, and it was actively blocking dashboard-driven admin workflows (the new "Run cleanup" button below couldn't have worked without this change). Cloudflare Access on <code>logistics.apps.nopong.com</code> is now the single auth layer for every route, mirroring the precedent already set by <code>/api/logiwa/upload</code>. The old Wrangler secret can stay set or be deleted with <code>npx wrangler secret delete ADMIN_KEY</code> &mdash; nothing in the code consumes it anymore.</li>
+      <li><strong>"Run cleanup" button on the Amazon dedupe Data Health check.</strong> When the check fails, an inline pink button now appears next to the detail text. Clicking it POSTs to <code>/api/admin/amazon/dedupe-items</code> using the user's existing SSO session (no key needed), shows progress in-button ("Cleaning…" &rarr; "Cleaned N rows"), busts the Amazon sales cache, and re-runs the health checks so the badge flips green without a manual refresh. Closes the loop the v2.29 detail text opened ("Run POST /api/admin/amazon/dedupe-items to clean") &mdash; previously the only way to act on that instruction was a terminal curl with a key only Chris could read back.</li>
+    </ul>
     <h4>v2.30 &mdash; 4 May 2026 (Monthly SKU Sales now in tins, not Woo line items)</h4>
     <ul>
       <li><strong>Monthly SKU Sales tab + CSV export now show tin-equivalent counts for SRT bundles and WC- wholesale cartons.</strong> Previously the Woo per-SKU bucket (powering the Monthly/Weekly SKU Sales tab and <code>downloadMonthlyCSV</code>) collapsed variant SKUs into their base SKU (e.g. <code>CA-SRT-OG-NPO-35x12</code> &rarr; <code>CA-OG-NPO-35</code>) but added the <em>raw line quantity</em> &mdash; so a 12-pack bundle counted as 1 tin, not 12, and a WC- wholesale carton counted as 1 tin, not 48. The TINS data structure (run rates, forecasting, top-level "tins shipped" cards) was already applying the multiplier correctly &mdash; the bug was confined to the per-SKU view layer. For April 2026 CA Woo this meant <code>CA-OG-NPO-35</code> displayed as 1,239 tins when 6 SRT bundles bumped it to 1,305 (a 66-tin gap), with similar shortfalls on every base SKU that had SRT or WC- sales in the period. Total April CA Woo "tins" was under-reported by 187 (17 SRT bundles &times; 11 missed-tin-each).</li>
@@ -5500,8 +5514,15 @@ async function runDataHealthChecks() {
     const usSup = audit.amazon.usSupersededRowCount || 0;
     const total = caSup + usSup;
     if (total > 0) {
-      checks.push({ status: 'fail', name: 'Amazon SKU rows duplicated across jobs',
-        detail: `${total.toLocaleString()} amazon_items rows tied to superseded report jobs (${caSup.toLocaleString()} CA, ${usSup.toLocaleString()} US). Monthly SKU totals are inflated. Run POST /api/admin/amazon/dedupe-items to clean.` });
+      checks.push({
+        status: 'fail',
+        name: 'Amazon SKU rows duplicated across jobs',
+        detail: `${total.toLocaleString()} amazon_items rows tied to superseded report jobs (${caSup.toLocaleString()} CA, ${usSup.toLocaleString()} US). Monthly SKU totals are inflated until cleared.`,
+        // v2.31: self-serve action button. Hits the dedupe endpoint (now Access-only,
+        // no ADMIN_KEY) using the user's existing SSO cookies, then re-runs the
+        // health checks so the badge flips green without a manual refresh.
+        action: { label: 'Run cleanup', handler: 'runAmazonDedupe' }
+      });
     } else {
       checks.push({ status: 'pass', name: 'Amazon SKU ingest dedup',
         detail: 'No amazon_items rows from superseded report jobs — re-ingest is replacing prior data correctly' });
@@ -5643,15 +5664,66 @@ function renderHealthBadge(checks) {
     const li = document.createElement('li');
     const iconCls = c.status === 'pass' ? 'chk-pass' : c.status === 'warn' ? 'chk-warn' : 'chk-fail';
     const iconCh  = c.status === 'pass' ? '✓'        : c.status === 'warn' ? '!'        : '×';
+    // Optional self-serve action button for failing checks. Wired by name to a
+    // global handler so the markup stays free of inline event handlers.
+    const actionMarkup = c.action
+      ? `<button type="button" class="chk-action" data-handler="${c.action.handler}">${c.action.label}</button>`
+      : '';
     li.innerHTML = `
       <span class="chk-icon ${iconCls}">${iconCh}</span>
       <div class="chk-body">
         <div class="chk-name">${c.name}</div>
         <div class="chk-detail">${c.detail}</div>
+        ${actionMarkup}
       </div>`;
+    if (c.action) {
+      const btn = li.querySelector('.chk-action');
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const handler = window[c.action.handler];
+        if (typeof handler === 'function') {
+          await handler(btn);
+        }
+      });
+    }
     list.appendChild(li);
   });
 }
+
+// v2.31: one-shot cleanup for the v2.28 doubling-bug residue. Posts to the
+// admin dedupe endpoint, which is now gated only by Cloudflare Access (the
+// ADMIN_KEY layer was removed in v2.31 alongside disabling workers_dev). The
+// button is rendered inline on the failing health check; on success we
+// re-run runDataHealthChecks so the badge flips green without a manual
+// refresh, and bust the Amazon sales cache so monthly SKU totals re-render
+// from clean data.
+window.runAmazonDedupe = async function(btn) {
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Cleaning…';
+  try {
+    const r = await fetch('/api/admin/amazon/dedupe-items', {
+      method: 'POST',
+      credentials: 'include'  // carry the Cloudflare Access JWT cookie
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      throw new Error(`HTTP ${r.status}: ${body.slice(0, 200) || r.statusText}`);
+    }
+    const data = await r.json();
+    btn.textContent = `Cleaned ${(data.totalDeleted || 0).toLocaleString()} rows`;
+    // Bust any /api/amazon/sales KV cache the dashboard is sitting on, then
+    // re-run the audit so the badge updates and the dedupe check goes green.
+    try { await fetch('/api/amazon/sales?refresh=1&market=CA'); } catch (e) {}
+    try { await fetch('/api/amazon/sales?refresh=1&market=US'); } catch (e) {}
+    setTimeout(() => { runDataHealthChecks().catch(() => {}); }, 500);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = original;
+    alert('Cleanup failed: ' + (e?.message || e));
+  }
+};
 
 function toggleHealthPanel(force) {
   const panel = document.getElementById('healthPanel');
