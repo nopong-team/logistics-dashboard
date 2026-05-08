@@ -1,5 +1,12 @@
 /**
- * Admin routes — gated by an `X-Admin-Key` header that must equal `env.ADMIN_KEY`.
+ * Admin routes — gated by Cloudflare Access (Google Workspace SSO,
+ * @nopong.net / @nopong.com) on logistics.apps.nopong.com. As of v2.31 the
+ * Worker is no longer reachable on its `<name>.workers.dev` URL (see the
+ * `workers_dev: false` setting in wrangler.jsonc), so Access is the only
+ * authentication layer between the public internet and these mutation
+ * endpoints. The previous `X-Admin-Key` middleware was a redundant
+ * application-layer fence around the workers.dev exposure and was removed
+ * in the same release.
  *
  * Two routes today:
  *
@@ -35,19 +42,11 @@ import { runAmazonOrdersChunk, runAmazonReportsTick, spApiRequest, invalidateAma
 
 export const adminRoutes = new Hono();
 
-// ─── Auth middleware ────────────────────────────────────────────────────────
-
-adminRoutes.use('*', async (c, next) => {
-  const expected = c.env.ADMIN_KEY;
-  if (!expected) {
-    return c.json({ error: 'ADMIN_KEY not configured. Run: wrangler secret put ADMIN_KEY' }, 500);
-  }
-  const provided = c.req.header('X-Admin-Key');
-  if (provided !== expected) {
-    return c.json({ error: 'unauthorized' }, 401);
-  }
-  await next();
-});
+// Auth: Cloudflare Access on logistics.apps.nopong.com (Google Workspace SSO).
+// No application-layer auth middleware here — the workers.dev preview URL was
+// disabled in v2.31, leaving Access as the only entry point. If you ever
+// re-enable workers_dev in wrangler.jsonc, you MUST reinstate a gate here
+// (or close it some other way) before deploying — these routes mutate D1.
 
 // ─── Woo client (paginated /orders fetch) ───────────────────────────────────
 

@@ -5,6 +5,14 @@
 	"name": "logistics-dashboard",
 	"main": "src/index.js",
 	"compatibility_date": "2026-04-28",
+	// workers_dev: false disables the default `<name>.workers.dev` preview hostname
+	// (https://logistics-dashboard.no-pong.workers.dev/) so the Worker is reachable
+	// ONLY at logistics.apps.nopong.com — which sits behind Cloudflare Access SSO
+	// (Google Workspace, @nopong.net / @nopong.com). Set in v2.31 (2026-05-08) to
+	// close an unauthenticated side door that was bypassing Access. Do not flip
+	// this back to true. If you need to smoke-test a deploy, do it via the prod
+	// hostname or `wrangler dev` locally — never re-expose an unauthenticated URL.
+	"workers_dev": false,
 	// Account: No Pong (kept here for `wrangler deploy` from CLI; the dashboard's
 	//          Git-connected deploy uses the linked account directly so this is
 	//          informational, not a secret.)
@@ -53,9 +61,14 @@
 		"crons": ["*/15 * * * *"]
 	}
 	// ──────────────────────────────────────────────────────────────────────────
-	// Still pending (NOT in this file):
-	//   • Secrets — set with `wrangler secret put NAME` (Cloudflare-side, never in git):
-	//       WOO_US_URL, WOO_US_KEY, WOO_US_SECRET (US not yet ported)
-	//       ADMIN_KEY (gates /api/admin/* routes; see Step 5)
+	// Secrets — set with `wrangler secret put NAME` (Cloudflare-side, never in git).
+	// All connector credentials (WOO_*, AMAZON_*, XERO_*, SALESBINDER_*, LOGIWA_*)
+	// live there, not in this file. Loaded in bulk via scripts/load-secrets.sh.
+	//
+	// Historical note: ADMIN_KEY was a Wrangler secret that gated /api/admin/*
+	// before v2.31. Removed when workers_dev was disabled — Cloudflare Access on
+	// logistics.apps.nopong.com is now the only auth layer. The old ADMIN_KEY
+	// secret can stay set on Cloudflare's side (no code path consumes it) or be
+	// deleted with `npx wrangler secret delete ADMIN_KEY`.
 	// ──────────────────────────────────────────────────────────────────────────
 }
