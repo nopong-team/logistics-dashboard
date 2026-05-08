@@ -43,8 +43,13 @@ import { Hono } from 'hono';
 export const salesBinderRoutes = new Hono();
 
 // KV cache keys.
+// `packaging:v2` invalidates the v2.30 cache that classified P-BLANK-ENV-A1
+// into `envelopes` instead of the bottom inventory-watchlist section. Bumping
+// the key forces a fresh upstream pull on the first request after deploy
+// rather than waiting for the 4h SALESBINDER_FRESH_MS window or a manual
+// ?refresh=true. Bump again if the schema changes again.
 const KV_INVENTORY_KEY = 'salesbinder:inventory';
-const KV_PACKAGING_KEY = 'salesbinder:packaging';
+const KV_PACKAGING_KEY = 'salesbinder:packaging:v2';
 
 // Categories we DON'T want in the finished-goods inventory tile. Mirrors the
 // legacy filter — packaging/manufacturing line items would otherwise pollute
@@ -60,6 +65,12 @@ const MAX_PAGES = 50;
 // Baked-in packaging overrides. Mirrors backend/packaging-overrides.json
 // from the legacy server. Edit + redeploy to change. Auto-derived
 // committedToPetra is computed in the frontend (see legacy code comment).
+//
+// `leadTimes` is a per-SKU lead-time override (in months) for the non-tin
+// packaging items (envelopes, SRT trays, PCIs, blank cartons). Default lead
+// time is 4 months until Lauren confirms supplier-specific timings — at which
+// point we override here per SKU. Tins still use the hard-coded TIN_LEAD_TIME
+// constant in the frontend (Guanqiao 4mo = 120d).
 const PACKAGING_OVERRIDES = {
   excludeSkus: ['T-CA-EF-BCF-35'],
   perSku: {
@@ -72,7 +83,17 @@ const PACKAGING_OVERRIDES = {
         'blank stock. Stickered for LE SKUs only, never pooled with regular branded 35g.',
     },
   },
+  // Per-SKU lead time overrides (months). Default is 4 if not listed.
+  leadTimes: {
+    // e.g. 'P-ENV-A1': 3,
+    // e.g. 'NP_INSERTS': 2,
+  },
 };
+
+// Default lead time (months) for non-tin paper packaging until Lauren
+// confirms supplier-specific timings. Override per SKU via
+// PACKAGING_OVERRIDES.leadTimes.
+const PAPER_PACKAGING_DEFAULT_LEAD_MONTHS = 4;
 
 // Fields managed exclusively by overrides (or computed in the frontend).
 // Stripped from every cached tin before per-SKU overrides are applied — this
@@ -189,27 +210,68 @@ async function fetchAndCacheInventory(env) {
   return result;
 }
 
+// Recognise non-tin paper packaging SKUs from the Paper Packaging Skus
+// inventory list (Melanie shared 2026-05-08). Categorisation rules:
+//   - P-CA-SRT-*               → per-scent SRT trays (e.g. P-CA-SRT-OG-NPO)
+//   - P-ENV-*                  → active envelope pool (used for every Woo order)
+//   - NP_INSERTS               → postcard inserts (PCIs)
+//   - P-CA-BLANK-CTN-*SRT      → blank outer cartons (2- or 4-SRT)        ┐ inventory
+//   - P-BLANK-ENV-*            → blank envelopes (backup, not in regular  │ watchlist
+//                                rotation per Melanie 2026-05-08)         │ section
+//   - NOPONG-PURO-BOXES        → Purolator boxes for well.ca (multiples   │
+//                                of 4 cartons). Demand pattern unclear,   │
+//                                so tracked here for visibility.          ┘
+//
+// The `blankCartons` bucket is the "inventory watchlist" section in the UI:
+// items tracked for at-a-glance visibility but without a derived demand model.
+// Blank envelopes and Purolator boxes belong here because they're either
+// backup stock or have demand that doesn't trace cleanly through Woo/Xero.
+function classifyNonTinPackaging(sku) {
+  if (sku === 'NP_INSERTS') return 'inserts';
+  if (/^P-CA-BLANK-CTN-\d+SRT$/i.test(sku)) return 'blankCartons';
+  if (/^P-BLANK-ENV-/.test(sku))            return 'blankCartons';
+  if (sku === 'NOPONG-PURO-BOXES')          return 'blankCartons';
+  if (/^P-CA-SRT-/.test(sku))               return 'srt';
+  if (/^P-ENV-/.test(sku))                  return 'envelopes';
+  return null;
+}
+
+// Parse the scent/form linkage from an SRT packaging SKU. e.g.
+//   P-CA-SRT-OG-NPO   → { scent: 'OG', form: 'NPO', linkedTinSku: 'CA-OG-NPO-35' }
+//   P-CA-SRT-SS       → { scent: 'SS', form: '',    linkedTinSku: '' }  (Secret Scenta — no single tin)
+//   P-CA-SRT-CL-VLB   → { scent: 'CL', form: 'VLB', linkedTinSku: 'CA-CL-VLB-35' }
+function parseSrtLinkage(sku) {
+  const m = sku.match(/^P-CA-SRT-([A-Z]{2})(?:-([A-Z]{2,3}))?$/);
+  if (!m) return { scent: '', form: '', linkedTinSku: '' };
+  const [, scent, form] = m;
+  const linkedTinSku = form ? `CA-${scent}-${form}-35` : '';
+  return { scent, form: form || '', linkedTinSku };
+}
+
+function paperLeadTimeFor(sku) {
+  return PACKAGING_OVERRIDES.leadTimes?.[sku] ?? PAPER_PACKAGING_DEFAULT_LEAD_MONTHS;
+}
+
 async function fetchAndCachePackaging(env) {
   const { items, pagesFetched } = await fetchAllItems(env);
 
   const tins = [];
+  const envelopes = [];
+  const srt = [];
+  const inserts = [];
+  const blankCartons = [];
+
   for (const item of items) {
     const sku = (item.sku || '').trim();
-    if (!sku.startsWith('T-')) continue;
 
     const qty = parseFloat(item.quantity || 0);
     const reserved = parseFloat(item.quantity_reserved || 0);
     const incoming = parseFloat(item.quantity_incoming || 0);
     const threshold = parseFloat(item.low_threshold || 0);
     const cost = parseFloat(item.cost || 0);
-
-    const linkedSku = sku.startsWith('T-') ? sku.substring(2) : sku;
-    let size = '';
-    const m = sku.match(/-(\d+)$/);
-    if (m) size = `${m[1]}g`;
-
-    tins.push({
-      sku, linkedSku, size,
+    const category = item.category?.name || item.category || '';
+    const baseRecord = {
+      sku,
       name: item.name || '',
       description: item.description || '',
       onHand: qty,
@@ -218,16 +280,50 @@ async function fetchAndCachePackaging(env) {
       incoming,
       lowThreshold: threshold,
       unitCost: cost,
-      category: item.category?.name || item.category || '',
-    });
+      category,
+    };
+
+    if (sku.startsWith('T-')) {
+      const linkedSku = sku.substring(2);
+      let size = '';
+      const m = sku.match(/-(\d+)$/);
+      if (m) size = `${m[1]}g`;
+      tins.push({ ...baseRecord, linkedSku, size });
+      continue;
+    }
+
+    const kind = classifyNonTinPackaging(sku);
+    if (!kind) continue;
+
+    const leadTimeMonths = paperLeadTimeFor(sku);
+
+    if (kind === 'srt') {
+      const { scent, form, linkedTinSku } = parseSrtLinkage(sku);
+      srt.push({ ...baseRecord, scent, form, linkedTinSku, leadTimeMonths });
+    } else if (kind === 'blankCartons') {
+      // e.g. P-CA-BLANK-CTN-4SRT → 4 SRTs per carton
+      const m = sku.match(/-(\d+)SRT$/i);
+      const srtCapacity = m ? parseInt(m[1], 10) : 0;
+      blankCartons.push({ ...baseRecord, srtCapacity, leadTimeMonths });
+    } else if (kind === 'envelopes') {
+      envelopes.push({ ...baseRecord, leadTimeMonths });
+    } else if (kind === 'inserts') {
+      inserts.push({ ...baseRecord, leadTimeMonths });
+    }
   }
 
   const result = {
     tins,
+    envelopes,
+    srt,
+    inserts,
+    blankCartons,
     count: tins.length,
+    extrasCount: envelopes.length + srt.length + inserts.length + blankCartons.length,
     source: 'salesbinder',
     supplier: 'Guanqiao Tinbox Co., Limited',
     leadTimeDays: 120,
+    paperLeadTimeMonthsDefault: PAPER_PACKAGING_DEFAULT_LEAD_MONTHS,
     pagesFetched,
     lastSync: new Date().toISOString(),
   };
@@ -316,15 +412,38 @@ salesBinderRoutes.get('/inventory', async (c) => {
 
 // ─── /api/salesbinder/packaging ─────────────────────────────────────────────
 
+// Cached payloads from before the v2.31 endpoint expansion only have `tins`
+// — no envelopes/srt/inserts/blankCartons fields. Treat any such payload as
+// stale so the first request after deploy triggers a fresh upstream pull.
+function cachedPackagingHasExtras(cached) {
+  return cached
+    && Array.isArray(cached.envelopes)
+    && Array.isArray(cached.srt)
+    && Array.isArray(cached.inserts)
+    && Array.isArray(cached.blankCartons);
+}
+
+// Default the four extras arrays to [] so the frontend can read them
+// unconditionally even if the cache predates the v2.31 schema.
+function withExtrasDefaults(payload) {
+  return {
+    envelopes: [],
+    srt: [],
+    inserts: [],
+    blankCartons: [],
+    ...payload,
+  };
+}
+
 salesBinderRoutes.get('/packaging', async (c) => {
   const forceRefresh = c.req.query('refresh') === 'true';
   const cache = c.env.CACHE;
 
   if (!forceRefresh && cache) {
     const cached = await cache.get(KV_PACKAGING_KEY, 'json');
-    if (cached?.tins?.length) {
+    if (cached?.tins?.length && cachedPackagingHasExtras(cached)) {
       return c.json({
-        ...cached,
+        ...withExtrasDefaults(cached),
         cached: true,
         tins: applyPackagingOverrides(cached.tins),
       });
@@ -336,7 +455,7 @@ salesBinderRoutes.get('/packaging', async (c) => {
     // data), but apply overrides on the response we actually send out.
     const result = await fetchAndCachePackaging(c.env);
     return c.json({
-      ...result,
+      ...withExtrasDefaults(result),
       cached: false,
       tins: applyPackagingOverrides(result.tins),
     });
@@ -345,7 +464,7 @@ salesBinderRoutes.get('/packaging', async (c) => {
       const cached = await cache.get(KV_PACKAGING_KEY, 'json');
       if (cached?.tins?.length) {
         return c.json({
-          ...cached,
+          ...withExtrasDefaults(cached),
           cached: true,
           staleFallback: true,
           error: 'Upstream SalesBinder error — serving cached snapshot.',
