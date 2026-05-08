@@ -1105,6 +1105,136 @@
       <div id="packaging-pallets" style="padding:16px;"></div>
     </div>
 
+    <!-- ════════════ PAPER PACKAGING (Envelopes, SRT trays, Postcard inserts) ════════════ -->
+    <div style="margin-top:32px;padding-top:18px;border-top:2px solid var(--border);">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;flex-wrap:wrap;">
+        <h3 style="margin:0;font-size:18px;">Paper Packaging</h3>
+        <span style="font-size:13px;color:var(--text-secondary);">
+          Default lead time: <strong>4 months</strong> &middot; Source of truth: SalesBinder weekly &rarr; Logiwa monthly physical count reconciles
+        </span>
+      </div>
+      <div style="font-size:12px;color:var(--text-light);margin-bottom:14px;">
+        Per-SKU lead times can be overridden in <code>src/salesbinder.js</code> &rarr; <code>PACKAGING_OVERRIDES.leadTimes</code> once Lauren confirms supplier timings.
+      </div>
+    </div>
+
+    <!-- SRT Packaging table -->
+    <div class="table-card" style="margin-top:8px;">
+      <div class="table-card-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="table-card-title">SRT Packaging Trays (per scent)</div>
+          <button class="btn-csv" onclick="downloadSrtPackagingCSV()">Export CSV</button>
+        </div>
+        <div class="table-hint">Demand = monthly Woo SRT bundles sold for this scent (CA + US) + Xero CTN cartons sold &times; 4 (each carton holds 4 SRTs). Runway = (On Hand + Incoming) &divide; demand.</div>
+      </div>
+      <div class="table-scroll-sticky"><table>
+        <thead>
+          <tr>
+            <th class="sticky-col">SRT SKU</th>
+            <th>Name</th>
+            <th>Linked Tin</th>
+            <th class="num right" title="SalesBinder Quantity On Hand">On Hand</th>
+            <th class="num right" title="SalesBinder Quantity Incoming">Incoming</th>
+            <th class="num right" title="3-month average Woo bundles + (Xero CTN &times; 4)">Demand/Mo</th>
+            <th class="num right" title="3-mo avg Woo SRT bundles for this scent (CA + US, raw count)">Woo SRT/mo</th>
+            <th class="num right" title="3-mo avg Xero CTN cartons for this scent &times; 4 SRTs each">CTN&times;4/mo</th>
+            <th class="num right" title="(On Hand + Incoming) &divide; Demand/Mo">Runway (mo)</th>
+            <th class="num right" title="Lead time in months (override per SKU once Lauren confirms)">Lead</th>
+            <th class="num right" title="Latest date to place a new order so it lands before stockout. Today + (Runway &minus; Lead). Red = order NOW.">Order By</th>
+            <th class="num right" title="12-month coverage shortfall = max(0, 12 &times; Demand/Mo &minus; (On Hand + Incoming))">12mo Short</th>
+            <th class="num right">Unit Cost</th>
+            <th title="Red &lt; Lead, amber &lt; 1.5&times; Lead, green otherwise.">Status</th>
+          </tr>
+        </thead>
+        <tbody id="srt-packaging-tbody"></tbody>
+      </table></div>
+    </div>
+
+    <!-- Envelopes table -->
+    <div class="table-card" style="margin-top:16px;">
+      <div class="table-card-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="table-card-title">Envelopes</div>
+          <button class="btn-csv" onclick="downloadEnvelopesCSV()">Export CSV</button>
+        </div>
+        <div class="table-hint">Demand = total Woo CA + US monthly orders (1 envelope per order, 3-month average). Only the printed P-ENV-A1 envelope is in regular rotation; blank P-BLANK-ENV-A1 stock is tracked in the watchlist below.</div>
+      </div>
+      <div class="table-scroll-sticky"><table>
+        <thead>
+          <tr>
+            <th class="sticky-col">SKU</th>
+            <th>Name</th>
+            <th class="num right">On Hand</th>
+            <th class="num right">Incoming</th>
+            <th class="num right">Demand/Mo</th>
+            <th class="num right" title="(On Hand + Incoming) &divide; Demand/Mo">Runway (mo)</th>
+            <th class="num right">Lead</th>
+            <th class="num right">Order By</th>
+            <th class="num right">12mo Short</th>
+            <th class="num right">Unit Cost</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="envelopes-tbody"></tbody>
+      </table></div>
+    </div>
+
+    <!-- Postcard Inserts (PCIs) table -->
+    <div class="table-card" style="margin-top:16px;">
+      <div class="table-card-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="table-card-title">Postcard Inserts (PCIs)</div>
+          <button class="btn-csv" onclick="downloadPCICSV()">Export CSV</button>
+        </div>
+        <div class="table-hint">Demand = total Woo CA + US monthly orders (1 PCI per Woo order, 3-month average). Logiwa reconciles the count at month-end.</div>
+      </div>
+      <div class="table-scroll-sticky"><table>
+        <thead>
+          <tr>
+            <th class="sticky-col">SKU</th>
+            <th>Name</th>
+            <th class="num right">On Hand</th>
+            <th class="num right">Incoming</th>
+            <th class="num right">Demand/Mo</th>
+            <th class="num right">Runway (mo)</th>
+            <th class="num right">Lead</th>
+            <th class="num right">Order By</th>
+            <th class="num right">12mo Short</th>
+            <th class="num right">Unit Cost</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="pci-tbody"></tbody>
+      </table></div>
+    </div>
+
+    <!-- Inventory watchlist: blank cartons + blank envelopes (no demand/runway —
+         flagged for visibility only since regular order data doesn't reliably
+         predict demand for these). -->
+    <div class="table-card" style="margin-top:16px;">
+      <div class="table-card-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="table-card-title">Inventory Watchlist (blank stock, no demand model)</div>
+        </div>
+        <div class="table-hint">Items tracked for at-a-glance visibility. Includes outer cartons for 2-SRT / 4-SRT orders and blank envelopes (backup stock, not in regular Woo rotation). Demand is hard to predict from order data &mdash; flagged here so you can eyeball stock when Logiwa reconciles. Lead time is TBD with Lauren.</div>
+      </div>
+      <div class="table-scroll-sticky"><table>
+        <thead>
+          <tr>
+            <th class="sticky-col">SKU</th>
+            <th>Name</th>
+            <th class="num right" title="SRTs per carton (blank cartons only)">Holds</th>
+            <th class="num right">On Hand</th>
+            <th class="num right">Incoming</th>
+            <th class="num right">Low Threshold</th>
+            <th class="num right">Unit Cost</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="blank-cartons-tbody"></tbody>
+      </table></div>
+    </div>
+
   </div>
 
 </main>
@@ -1112,8 +1242,24 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.31</span> &middot; May 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.32</span> &middot; May 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.32 &mdash; 8 May 2026 (Packaging tab: Envelopes, SRT trays, PCIs, Watchlist)</h4>
+    <ul>
+      <li><strong>Packaging tab now covers paper packaging, not just tins.</strong> Four new sections appear below the existing tin table: <em>SRT Packaging Trays (per scent)</em>, <em>Envelopes</em>, <em>Postcard Inserts (PCIs)</em>, and an <em>Inventory Watchlist</em> (blank cartons, blank envelopes, and Purolator boxes for well.ca). Each demand-modelled section pulls live On Hand / Incoming / Unit Cost from SalesBinder and surfaces a runway + Order By date so reorders aren&rsquo;t reactive.</li>
+      <li><strong>Demand derivation per section:</strong>
+        <ul>
+          <li><strong>SRT trays (P-CA-SRT-{scent}-{form}):</strong> 3-month trailing average of Woo SRT bundles sold for that scent (CA + US, raw count) + Xero CTN cartons sold for that scent &times; 4 SRTs per carton. The <code>Woo SRT/mo</code> and <code>CTN&times;4/mo</code> columns show the breakdown so the demand is auditable. Captures raw SRT bundle quantities into a new <code>WOO_SRT_BUNDLES_BY_MARKET</code> store during <code>loadWooSales</code> (the existing <code>SKU_CHANNEL_DATA</code> per-base-SKU bucket multiplies by 12 since v2.30, so it can&rsquo;t be used here).</li>
+          <li><strong>Envelopes (P-ENV-A1):</strong> 1 per Woo order (CA + US), 3-month trailing average of <code>OC.wooCA + OC.wooUS</code>. Only the printed envelope is in active rotation; <code>P-BLANK-ENV-A1</code> is emergency backup stock and lives in the watchlist.</li>
+          <li><strong>PCIs (NP_INSERTS):</strong> 1 per Woo order (CA + US), same calc as envelopes.</li>
+          <li><strong>Watchlist (P-CA-BLANK-CTN-2SRT/-4SRT, P-BLANK-ENV-A1, NOPONG-PURO-BOXES):</strong> no demand math &mdash; flagged for inventory visibility only (status reads &ldquo;Below threshold&rdquo; or &ldquo;Negative stock&rdquo; for at-a-glance attention). Demand for these doesn&rsquo;t trace cleanly through Woo/Xero so we eyeball stock when Logiwa reconciles.</li>
+        </ul>
+      </li>
+      <li><strong>Lead time defaults to 4 months and is overridable per SKU.</strong> Until Lauren confirms supplier-specific timings for paper packaging, runway / Order By math uses a 4-month lead time (matches Guanqiao tins). Per-SKU overrides live in the Worker at <code>src/salesbinder.js</code> &rarr; <code>PACKAGING_OVERRIDES.leadTimes</code> (e.g. <code>{ &lsquo;P-ENV-A1&rsquo;: 3, &lsquo;NP_INSERTS&rsquo;: 2 }</code>) &mdash; edit + redeploy when the actual lead times are nailed down.</li>
+      <li><strong>SalesBinder packaging endpoint now returns five categories instead of one.</strong> <code>/api/salesbinder/packaging</code> now classifies items as <code>tins</code> (T-*), <code>srt</code> (P-CA-SRT-*), <code>envelopes</code> (P-ENV-*), <code>inserts</code> (NP_INSERTS), or <code>blankCartons</code> (P-CA-BLANK-CTN-*SRT, P-BLANK-ENV-*, NOPONG-PURO-BOXES &mdash; the inventory-watchlist bucket). Cache key bumped to <code>salesbinder:packaging:v2</code> so the new schema and reclassification take effect on the first request after deploy &mdash; no manual <code>?refresh=true</code> needed.</li>
+      <li><strong>Per-section CSV exports.</strong> SRT, Envelopes, and PCI tables each have their own Export CSV button so reorder spreadsheets can be pulled independently.</li>
+      <li><strong>Source of truth note.</strong> SalesBinder is treated as the live estimate; Logiwa&rsquo;s end-of-month physical count is authoritative. Surfaced in the table hint so the dashboard doesn&rsquo;t pretend SalesBinder numbers are perfect mid-month.</li>
+    </ul>
     <h4>v2.31 &mdash; 8 May 2026 (Close workers.dev side door, drop ADMIN_KEY, self-serve cleanup button)</h4>
     <ul>
       <li><strong>Disabled the unauthenticated <code>logistics-dashboard.no-pong.workers.dev</code> URL.</strong> Cloudflare gives every Worker a default <code>&lt;name&gt;.workers.dev</code> hostname; ours had been live since the Step 3 hello-world and sat outside Cloudflare Access &mdash; meaning anyone who knew or guessed the URL could read company sales data without signing in. Set <code>workers_dev: false</code> in <code>wrangler.jsonc</code> so the Worker is reachable only at <code>logistics.apps.nopong.com</code>, which is fully behind Google Workspace SSO. The deploy-time URL list will now show only the custom hostname.</li>
@@ -1725,6 +1871,21 @@ async function loadXeroPOs() {
 // Per-market buckets so repeat loads REPLACE (not accumulate) — fixes 2x/3x inflation on auto-refresh.
 // xero is already replaced atomically in loadXeroInvoices so no split needed there.
 const SKU_CHANNEL_DATA = { wooCA: {}, wooUS: {}, amzCA: {}, amzUS: {}, xero: {} };
+
+// Raw (un-multiplied) Woo SRT bundle quantities per scent-form, per market.
+// Used by the Packaging tab to derive demand for P-CA-SRT-{scent}-{form} trays
+// (1 SRT tray packaging consumed per SRT bundle sold). Keyed as
+// WOO_SRT_BUNDLES_BY_MARKET.CA['OG-NPO'] = [m0..m5]. Both markets are summed
+// at read time since SRT trays ship from the same Logiwa pool.
+const WOO_SRT_BUNDLES_BY_MARKET = { CA: {}, US: {} };
+function getWooSrtBundleQty(scentFormKey) {
+  const arr = [0,0,0,0,0,0];
+  for (const mkt of ['CA','US']) {
+    const slice = WOO_SRT_BUNDLES_BY_MARKET[mkt][scentFormKey];
+    if (slice) slice.forEach((v, i) => { arr[i] += v || 0; });
+  }
+  return arr;
+}
 // Weekly per-SKU data: { wooCA: { sku: { weeklyQty: { '2026-03-02': 5, ... } } }, ... }
 const SKU_WEEKLY_DATA = { wooCA: {}, wooUS: {}, amzCA: {}, amzUS: {}, xero: {} };
 
@@ -1996,6 +2157,21 @@ async function loadWooSales(marketplace) {
     }
     SKU_CHANNEL_DATA[wooBucketKey] = wooBucket;
     SKU_WEEKLY_DATA[wooBucketKey] = wooWeekBucket;
+
+    // Capture RAW SRT bundle quantities (un-multiplied) per scent-form so the
+    // Packaging tab can compute SRT-tray packaging demand (1 P-CA-SRT-{scent}-{form}
+    // per bundle sold). Both markets contribute since P-CA-SRT-* trays ship from
+    // the same Logiwa pool. Idempotent: REPLACE this market's slice every call.
+    WOO_SRT_BUNDLES_BY_MARKET[marketplace] = {};
+    for (const [sku, info] of Object.entries(skuTotals)) {
+      // CA-SRT-OG-NPO-35x12 → scent-form key "OG-NPO"
+      const m = sku.match(/^[A-Z]{2}-SRT-([A-Z]{2})-([A-Z]{2,3})-\d+(?:x\d+)?$/);
+      if (!m) continue;
+      const key = `${m[1]}-${m[2]}`;
+      const arr = WOO_SRT_BUNDLES_BY_MARKET[marketplace][key]
+        || (WOO_SRT_BUNDLES_BY_MARKET[marketplace][key] = [0,0,0,0,0,0]);
+      if (info.monthlyQty) info.monthlyQty.forEach((v, i) => { arr[i] += v || 0; });
+    }
 
     console.log(`WooCommerce ${marketplace}: matched ${matched}, skipped ${skipped}, unmatched ${Object.keys(skuTotals).length - matched - skipped} (limited editions etc.)`);
 
@@ -4253,6 +4429,14 @@ const PALLET_85G           = 10000;
 const TIN_BATCH_SIZES      = [15000, 10000, 5000];
 
 let PACKAGING_TINS = [];   // populated by loadPackagingInventory()
+// Non-tin paper packaging from /api/salesbinder/packaging (added v2.31).
+// Each is a flat array of { sku, name, onHand, reserved, available, incoming,
+// lowThreshold, unitCost, leadTimeMonths, ... }. Default leadTimeMonths is 4
+// (set by the backend) until Lauren confirms supplier-specific timings.
+let PACKAGING_ENVELOPES     = [];
+let PACKAGING_SRT           = [];   // P-CA-SRT-* per-scent SRT trays
+let PACKAGING_INSERTS       = [];   // NP_INSERTS (postcards)
+let PACKAGING_BLANK_CARTONS = [];   // P-CA-BLANK-CTN-2SRT / -4SRT outer cartons
 
 async function loadPackagingInventory(forceRefresh = false) {
   try {
@@ -4260,12 +4444,20 @@ async function loadPackagingInventory(forceRefresh = false) {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error('Packaging endpoint not available');
     const data = await resp.json();
-    PACKAGING_TINS = data.tins || [];
-    console.log(`Packaging: loaded ${PACKAGING_TINS.length} tin SKUs (synced ${data.lastSync || 'unknown'})`);
+    PACKAGING_TINS           = data.tins          || [];
+    PACKAGING_ENVELOPES      = data.envelopes     || [];
+    PACKAGING_SRT            = data.srt           || [];
+    PACKAGING_INSERTS        = data.inserts       || [];
+    PACKAGING_BLANK_CARTONS  = data.blankCartons  || [];
+    console.log(`Packaging: loaded ${PACKAGING_TINS.length} tin SKUs + ${PACKAGING_ENVELOPES.length} envelope, ${PACKAGING_SRT.length} SRT, ${PACKAGING_INSERTS.length} insert, ${PACKAGING_BLANK_CARTONS.length} blank-carton SKUs (synced ${data.lastSync || 'unknown'})`);
     if (tab === 'packaging') renderPackagingTab();
   } catch (e) {
     console.log('Packaging inventory unavailable:', e.message);
-    PACKAGING_TINS = [];
+    PACKAGING_TINS           = [];
+    PACKAGING_ENVELOPES      = [];
+    PACKAGING_SRT            = [];
+    PACKAGING_INSERTS        = [];
+    PACKAGING_BLANK_CARTONS  = [];
   }
 }
 
@@ -4717,6 +4909,9 @@ function suggestPallets(rows, palletCap, blankPool = 0) {
 }
 
 function renderPackagingTab() {
+  // Tin section first (existing logic), then the v2.31 paper-packaging sections.
+  renderPaperPackagingSections();
+
   const rows = buildPackagingRows();
 
   // ── Summary cards ──
@@ -5053,6 +5248,338 @@ function downloadPackagingCSV() {
   a.href = URL.createObjectURL(blob);
   a.download = `No Pong Tin Packaging - ${new Date().toISOString().slice(0,10)}.csv`;
   a.click();
+}
+
+// ============================================================
+//  PAPER PACKAGING (Envelopes, SRT trays, PCIs, Blank cartons)
+// ============================================================
+//
+// Source of truth:
+//   - SalesBinder for QOH/Incoming/UnitCost (with monthly Logiwa physical-count
+//     reconciliation per Melanie 2026-05-08 — SalesBinder is "estimated", Logiwa
+//     is authoritative once it lands)
+//   - Demand derived from existing live sales data:
+//       envelopes: 1 per Woo order (CA + US)         → 3-mo avg of OC.wooCA + OC.wooUS
+//       PCIs:      1 per Woo order (CA + US)         → same
+//       SRT (per scent): 1 per Woo SRT bundle sold + 4 per Xero CTN carton sold
+//   - Lead time: default 4 months; per-SKU override via the Worker
+//     PACKAGING_OVERRIDES.leadTimes map once Lauren confirms supplier timings.
+//
+// 3-month average uses the trailing 3 complete months [CM-3 .. CM-1] to avoid
+// the partial current-month bucket pulling the average down.
+
+const PAPER_PKG_DEMAND_WINDOW = 3;
+function avgTrailing3(arr) {
+  // Use the 3 months immediately before CM (which is the partial current month).
+  // CM = 5 (last index in the 6-month window).
+  if (!arr || !arr.length) return 0;
+  const start = Math.max(0, CM - PAPER_PKG_DEMAND_WINDOW);
+  let sum = 0, n = 0;
+  for (let i = start; i < CM; i++) { sum += arr[i] || 0; n++; }
+  return n > 0 ? sum / n : 0;
+}
+
+function fmtMonths(m) {
+  if (m === null || m === undefined) return '';
+  if (m >= 999) return '∞';
+  return m.toFixed(1);
+}
+
+function orderByDateStr(months) {
+  if (months === null || months === undefined) return '';
+  if (months <= 0) return 'NOW';
+  const d = new Date();
+  d.setMonth(d.getMonth() + Math.floor(months));
+  d.setDate(d.getDate() + Math.round((months % 1) * 30));
+  return d.toISOString().slice(0, 10);
+}
+
+function statusForRunway(runwayMo, leadMo) {
+  if (runwayMo === null || runwayMo === undefined) return { color: 'var(--text-light)', text: '—' };
+  if (runwayMo === Infinity)    return { color: 'var(--green-text)', text: '∞' };
+  if (runwayMo < leadMo)        return { color: 'var(--red-text)',   text: 'Order now' };
+  if (runwayMo < leadMo * 1.5)  return { color: 'var(--amber-text)', text: 'Plan reorder' };
+  return { color: 'var(--green-text)', text: 'OK' };
+}
+
+// ── Envelope demand (1 per Woo order, CA + US; 3-mo trailing avg) ──
+function getEnvelopeMonthlyDemand() {
+  const woo = (OC.wooCA || []).map((v, i) => (v || 0) + (OC.wooUS?.[i] || 0));
+  return Math.round(avgTrailing3(woo));
+}
+// PCI demand is identical to envelope demand by current spec (every Woo order
+// gets one PCI). Kept as a separate function so we can diverge later if Melanie
+// changes the rule (e.g. PCIs sometimes go in CTN-only orders).
+const getPciMonthlyDemand = getEnvelopeMonthlyDemand;
+
+// ── SRT packaging demand per scent-form ──
+//   Woo SRT bundles for this scent (raw count, NOT tin-equivalent) + Xero CTN
+//   for this scent × 4 SRTs/carton. 3-mo trailing average.
+function getSrtMonthlyDemandFor(srtItem) {
+  if (!srtItem.scent || !srtItem.form) {
+    // Secret Scenta (P-CA-SRT-SS) and similar with no per-form linkage.
+    // Fall back to a Secret-Scenta-style match: Woo SKUs containing -SRT-SS or
+    // CTN equivalents. For now we don't have a clean rule for SS — leave 0 and
+    // flag in the row (Melanie can layer this later if SS demand needs forecasting).
+    return { demand: 0, wooBundles: 0, ctnSrts: 0, note: 'SS — manual demand' };
+  }
+  const key = `${srtItem.scent}-${srtItem.form}`;
+  const wooBundleSeries = getWooSrtBundleQty(key);
+  const wooBundles = avgTrailing3(wooBundleSeries);
+
+  // Xero CTN sales for this scent-form. Carton SKU is CA-CTN-{scent}-{form}-48.
+  const ctnSku = `CA-CTN-${srtItem.scent}-${srtItem.form}-48`;
+  const xeroEntry = SKU_CHANNEL_DATA.xero?.[ctnSku];
+  const ctnSeries = xeroEntry ? (xeroEntry.monthlyQty || []) : [];
+  const ctnCartons = avgTrailing3(ctnSeries);
+  const ctnSrts = ctnCartons * 4;  // 4 SRT trays per carton
+
+  return {
+    demand: Math.round(wooBundles + ctnSrts),
+    wooBundles: Math.round(wooBundles * 10) / 10,
+    ctnSrts: Math.round(ctnSrts * 10) / 10,
+    note: '',
+  };
+}
+
+// ── Row builders (one per section) ──
+
+function buildSrtPackagingRows() {
+  return PACKAGING_SRT.map(item => {
+    const d = getSrtMonthlyDemandFor(item);
+    const supply = (item.onHand || 0) + (item.incoming || 0);
+    const lead = item.leadTimeMonths || 4;
+    const runway = d.demand > 0 ? supply / d.demand : Infinity;
+    const orderByMo = (runway === Infinity) ? null : runway - lead;
+    const shortfall12 = d.demand > 0 ? Math.max(0, 12 * d.demand - supply) : 0;
+    return {
+      sku: item.sku,
+      name: item.name || '',
+      linkedTinSku: item.linkedTinSku || '',
+      onHand: item.onHand || 0,
+      incoming: item.incoming || 0,
+      demand: d.demand,
+      wooBundles: d.wooBundles,
+      ctnSrts: d.ctnSrts,
+      note: d.note,
+      lead,
+      runway,
+      orderByMo,
+      shortfall12,
+      unitCost: item.unitCost || 0,
+    };
+  });
+}
+
+function buildPaperRows(items, demandPerMo) {
+  // Generic builder for Envelopes / PCIs where a single demand value applies
+  // to a pool of related SKUs (envelopes are pool-shared; PCIs is just NP_INSERTS).
+  const totalSupply = items.reduce((s, i) => s + (i.onHand || 0) + (i.incoming || 0), 0);
+  const poolRunway = demandPerMo > 0 ? totalSupply / demandPerMo : Infinity;
+  const poolShortfall12 = demandPerMo > 0 ? Math.max(0, 12 * demandPerMo - totalSupply) : 0;
+  return items.map(item => {
+    const lead = item.leadTimeMonths || 4;
+    const orderByMo = (poolRunway === Infinity) ? null : poolRunway - lead;
+    return {
+      sku: item.sku,
+      name: item.name || '',
+      onHand: item.onHand || 0,
+      incoming: item.incoming || 0,
+      demand: demandPerMo,
+      poolRunway,
+      lead,
+      orderByMo,
+      poolShortfall12,
+      unitCost: item.unitCost || 0,
+    };
+  });
+}
+
+// ── Renderers ──
+
+function renderSrtPackagingTable() {
+  const tbody = document.getElementById('srt-packaging-tbody');
+  if (!tbody) return;
+  const rows = buildSrtPackagingRows();
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;color:var(--text-light);padding:14px;">No SRT packaging items returned by SalesBinder.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const status = statusForRunway(r.runway, r.lead);
+    const orderByCell = (r.orderByMo === null) ? ''
+      : (r.orderByMo <= 0
+          ? `<span style="color:var(--red-text);font-weight:600;">${orderByDateStr(r.orderByMo)}</span>`
+          : orderByDateStr(r.orderByMo));
+    return `<tr>
+      <td class="sticky-col" style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;">${r.sku}</td>
+      <td>${r.name}${r.note ? ` <span style="color:var(--text-light);font-size:11px;">(${r.note})</span>` : ''}</td>
+      <td style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;color:var(--text-secondary);">${r.linkedTinSku || '—'}</td>
+      <td class="num right">${fmtNum(r.onHand)}</td>
+      <td class="num right">${fmtNum(r.incoming)}</td>
+      <td class="num right"><strong>${fmtNum(r.demand)}</strong></td>
+      <td class="num right" style="color:var(--text-secondary);">${r.wooBundles}</td>
+      <td class="num right" style="color:var(--text-secondary);">${r.ctnSrts}</td>
+      <td class="num right">${fmtMonths(r.runway)}</td>
+      <td class="num right">${r.lead}</td>
+      <td class="num right">${orderByCell}</td>
+      <td class="num right">${fmtNum(Math.round(r.shortfall12))}</td>
+      <td class="num right">$${r.unitCost.toFixed(2)}</td>
+      <td><span style="color:${status.color};font-weight:600;">${status.text}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderEnvelopesTable() {
+  const tbody = document.getElementById('envelopes-tbody');
+  if (!tbody) return;
+  const demand = getEnvelopeMonthlyDemand();
+  const rows = buildPaperRows(PACKAGING_ENVELOPES, demand);
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text-light);padding:14px;">No envelope SKUs returned by SalesBinder.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const status = statusForRunway(r.poolRunway, r.lead);
+    const orderByCell = (r.orderByMo === null) ? ''
+      : (r.orderByMo <= 0
+          ? `<span style="color:var(--red-text);font-weight:600;">${orderByDateStr(r.orderByMo)}</span>`
+          : orderByDateStr(r.orderByMo));
+    return `<tr>
+      <td class="sticky-col" style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;">${r.sku}</td>
+      <td>${r.name}</td>
+      <td class="num right">${fmtNum(r.onHand)}</td>
+      <td class="num right">${fmtNum(r.incoming)}</td>
+      <td class="num right"><strong>${fmtNum(r.demand)}</strong></td>
+      <td class="num right">${fmtMonths(r.poolRunway)}</td>
+      <td class="num right">${r.lead}</td>
+      <td class="num right">${orderByCell}</td>
+      <td class="num right">${fmtNum(Math.round(r.poolShortfall12))}</td>
+      <td class="num right">$${r.unitCost.toFixed(2)}</td>
+      <td><span style="color:${status.color};font-weight:600;">${status.text}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderPCITable() {
+  const tbody = document.getElementById('pci-tbody');
+  if (!tbody) return;
+  const demand = getPciMonthlyDemand();
+  const rows = buildPaperRows(PACKAGING_INSERTS, demand);
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text-light);padding:14px;">No postcard insert SKUs returned by SalesBinder.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const status = statusForRunway(r.poolRunway, r.lead);
+    const orderByCell = (r.orderByMo === null) ? ''
+      : (r.orderByMo <= 0
+          ? `<span style="color:var(--red-text);font-weight:600;">${orderByDateStr(r.orderByMo)}</span>`
+          : orderByDateStr(r.orderByMo));
+    return `<tr>
+      <td class="sticky-col" style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;">${r.sku}</td>
+      <td>${r.name}</td>
+      <td class="num right">${fmtNum(r.onHand)}</td>
+      <td class="num right">${fmtNum(r.incoming)}</td>
+      <td class="num right"><strong>${fmtNum(r.demand)}</strong></td>
+      <td class="num right">${fmtMonths(r.poolRunway)}</td>
+      <td class="num right">${r.lead}</td>
+      <td class="num right">${orderByCell}</td>
+      <td class="num right">${fmtNum(Math.round(r.poolShortfall12))}</td>
+      <td class="num right">$${r.unitCost.toFixed(2)}</td>
+      <td><span style="color:${status.color};font-weight:600;">${status.text}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderBlankCartonsTable() {
+  const tbody = document.getElementById('blank-cartons-tbody');
+  if (!tbody) return;
+  const items = PACKAGING_BLANK_CARTONS;
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-light);padding:14px;">No watchlist items returned by SalesBinder.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = items.map(item => {
+    const onHand = item.onHand || 0;
+    const incoming = item.incoming || 0;
+    const threshold = item.lowThreshold || 0;
+    // No demand math — just flag below-threshold inventory.
+    const belowThreshold = threshold > 0 && onHand < threshold;
+    const negStock = onHand < 0;
+    let statusText = 'OK', statusColor = 'var(--green-text)';
+    if (negStock)        { statusText = 'Negative stock'; statusColor = 'var(--red-text)'; }
+    else if (belowThreshold && incoming === 0) { statusText = 'Below threshold'; statusColor = 'var(--amber-text)'; }
+    else if (belowThreshold)                   { statusText = 'Below — incoming'; statusColor = 'var(--text-secondary)'; }
+    return `<tr>
+      <td class="sticky-col" style="font-family:'SF Mono','Fira Code',monospace;font-size:12px;">${item.sku}</td>
+      <td>${item.name || ''}</td>
+      <td class="num right">${item.srtCapacity || ''}</td>
+      <td class="num right" style="${negStock ? 'color:var(--red-text);font-weight:600;' : ''}">${fmtNum(onHand)}</td>
+      <td class="num right">${fmtNum(incoming)}</td>
+      <td class="num right">${threshold ? fmtNum(threshold) : '—'}</td>
+      <td class="num right">$${(item.unitCost || 0).toFixed(2)}</td>
+      <td><span style="color:${statusColor};font-weight:600;">${statusText}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderPaperPackagingSections() {
+  renderSrtPackagingTable();
+  renderEnvelopesTable();
+  renderPCITable();
+  renderBlankCartonsTable();
+}
+
+// ── CSV exports ──
+function _csvBlobDownload(rows, filename) {
+  const csv = rows.map(row => row.map(v => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+}
+function downloadSrtPackagingCSV() {
+  const rows = buildSrtPackagingRows();
+  const lines = [['SRT SKU','Name','Linked Tin','On Hand','Incoming','Demand/Mo','Woo SRT/mo (3mo avg)','CTN×4/mo (3mo avg)','Runway (mo)','Lead (mo)','Order By','12mo Shortfall','Unit Cost','Note']];
+  rows.forEach(r => lines.push([
+    r.sku, r.name, r.linkedTinSku, r.onHand, r.incoming, r.demand, r.wooBundles, r.ctnSrts,
+    r.runway === Infinity ? '' : r.runway.toFixed(1),
+    r.lead,
+    r.orderByMo === null ? '' : orderByDateStr(r.orderByMo),
+    Math.round(r.shortfall12), r.unitCost.toFixed(2), r.note,
+  ]));
+  _csvBlobDownload(lines, `No Pong SRT Packaging - ${new Date().toISOString().slice(0,10)}.csv`);
+}
+function downloadEnvelopesCSV() {
+  const demand = getEnvelopeMonthlyDemand();
+  const rows = buildPaperRows(PACKAGING_ENVELOPES, demand);
+  const lines = [['SKU','Name','On Hand','Incoming','Demand/Mo (pool)','Pool Runway (mo)','Lead (mo)','Order By','12mo Shortfall (pool)','Unit Cost']];
+  rows.forEach(r => lines.push([
+    r.sku, r.name, r.onHand, r.incoming, r.demand,
+    r.poolRunway === Infinity ? '' : r.poolRunway.toFixed(1),
+    r.lead,
+    r.orderByMo === null ? '' : orderByDateStr(r.orderByMo),
+    Math.round(r.poolShortfall12), r.unitCost.toFixed(2),
+  ]));
+  _csvBlobDownload(lines, `No Pong Envelopes - ${new Date().toISOString().slice(0,10)}.csv`);
+}
+function downloadPCICSV() {
+  const demand = getPciMonthlyDemand();
+  const rows = buildPaperRows(PACKAGING_INSERTS, demand);
+  const lines = [['SKU','Name','On Hand','Incoming','Demand/Mo','Runway (mo)','Lead (mo)','Order By','12mo Shortfall','Unit Cost']];
+  rows.forEach(r => lines.push([
+    r.sku, r.name, r.onHand, r.incoming, r.demand,
+    r.poolRunway === Infinity ? '' : r.poolRunway.toFixed(1),
+    r.lead,
+    r.orderByMo === null ? '' : orderByDateStr(r.orderByMo),
+    Math.round(r.poolShortfall12), r.unitCost.toFixed(2),
+  ]));
+  _csvBlobDownload(lines, `No Pong Postcard Inserts - ${new Date().toISOString().slice(0,10)}.csv`);
 }
 
 // ── Region switcher (CA ↔ AU) ──
