@@ -183,11 +183,30 @@ function isDiscontinued(sku) {
 
 // ─── Stock + Products ingestion ────────────────────────────────────────────
 
+// FBA branch detection. CIN7's actual branch name is "Amazon FBA" (with a
+// space) — confirmed from CIN7's UI 2026-05-10. v2.34's strict equality
+// against `'amazonfba'` (no space) failed silently, leaving `fba_cin7: 0`
+// for every SKU. Switched to a whitespace-insensitive substring match so
+// we tolerate "Amazon FBA", "AmazonFBA", "Amazon-FBA", etc. — and any
+// "Amazon FBA AU" if CIN7 adds region-tagged branches later.
+function isFbaBranchName(branchName) {
+  return /amazon\s*fba/i.test(branchName || '');
+}
+
 // Stock comes back per (productOption × branch). The CSV pipeline (build_data.py)
 // reads SKU-level totals from CIN7's stock-by-branch CSV, but the API gives us
-// per-branch rows that we need to aggregate. AmazonFBA branch is captured
-// separately so we can compare it against the Amazon SP-API truth (Phase 3)
-// and surface drift in the Inventory tab.
+// per-branch rows that we have to aggregate.
+//
+// We keep three buckets per SKU:
+//   • total      — sum across all branches
+//   • fba        — Amazon FBA branch only (drift detection vs SP-API truth)
+//   • warehouse  — derived as total − fba (everything not at FBA)
+//
+// "Warehouse" is the operationally relevant number: physical stock we control
+// and can fulfill Woo / wholesale / EDI orders from. FBA stock is one-way
+// (Amazon-fulfilled only, replenished on its own cadence). Surfacing them
+// separately matters because conflating them (v2.34 just summed total) hides
+// the actionable bucket.
 async function fetchStockBySku(env) {
   const fields = [
     'productId', 'productOptionId', 'modifiedDate', 'styleCode', 'code', 'barcode',
@@ -205,17 +224,27 @@ async function fetchStockBySku(env) {
     const acc = bySku.get(code) || {
       code,
       name: '',
+      // Totals across all branches
       soh: 0,
       avail: 0,
       incoming: 0,
-      fba: 0,
+      // FBA branch only (Amazon FBA, isFbaBranchName-matched)
+      fba_soh: 0,
+      fba_avail: 0,
+      fba_incoming: 0,
     };
-    // Per-branch values accumulate
-    acc.soh      += Number(row.stockOnHand)      || 0;
-    acc.avail    += Number(row.available)        || 0;
-    acc.incoming += Number(row.openPurchaseOrders) || 0;
-    if ((row.branchName || '').toLowerCase() === 'amazonfba') {
-      acc.fba += Number(row.stockOnHand) || 0;
+    const stockOnHand        = Number(row.stockOnHand)        || 0;
+    const available          = Number(row.available)          || 0;
+    const openPurchaseOrders = Number(row.openPurchaseOrders) || 0;
+    // Total accumulates across every branch
+    acc.soh      += stockOnHand;
+    acc.avail    += available;
+    acc.incoming += openPurchaseOrders;
+    // FBA branch is captured separately for drift detection + warehouse split
+    if (isFbaBranchName(row.branchName)) {
+      acc.fba_soh      += stockOnHand;
+      acc.fba_avail    += available;
+      acc.fba_incoming += openPurchaseOrders;
     }
     if (!acc.name && row.productName) {
       const opt = [row.option1, row.option2, row.option3].filter(Boolean).join(' / ');
@@ -223,7 +252,7 @@ async function fetchStockBySku(env) {
     }
     bySku.set(code, acc);
   }
-  return bySku; // Map<sku, { code, name, soh, avail, incoming, fba }>
+  return bySku;
 }
 
 // Products gives us category / status. We need this to filter the inventory
@@ -267,15 +296,21 @@ async function fetchProductMeta(env) {
 function buildInventory(stockBySku, productMeta) {
   // First pass: SRT rollup — find AU-SRT-...x12 rows and accumulate their
   // contribution (×12 tins) onto the matching base SKU. Drop SRT rows that
-  // don't have a base in stock (orphan trays — rare but possible).
+  // don't have a base in stock (orphan trays — rare but possible). SRTs are
+  // physical-warehouse-only (Amazon FBA never sees trays), so we only roll
+  // them up into the warehouse buckets, not FBA.
   const srtExtraSoh   = new Map();
   const srtExtraAvail = new Map();
   for (const [code, s] of stockBySku.entries()) {
     if (!code.startsWith('AU-SRT-') || code.startsWith('AU-CTN-SRT-')) continue;
     const [base, mult] = normalizeAuSku(code);
     if (!base || !stockBySku.has(base)) continue;
-    srtExtraSoh.set(base,   (srtExtraSoh.get(base)   || 0) + (s.soh   * mult));
-    srtExtraAvail.set(base, (srtExtraAvail.get(base) || 0) + (s.avail * mult));
+    // Use warehouse component (total minus FBA) so we don't double-count FBA
+    // tray stock. In practice FBA never holds trays, so this is just defensive.
+    const sohWarehouse   = s.soh   - s.fba_soh;
+    const availWarehouse = s.avail - s.fba_avail;
+    srtExtraSoh.set(base,   (srtExtraSoh.get(base)   || 0) + (sohWarehouse   * mult));
+    srtExtraAvail.set(base, (srtExtraAvail.get(base) || 0) + (availWarehouse * mult));
   }
 
   const out = [];
@@ -293,24 +328,48 @@ function buildInventory(stockBySku, productMeta) {
     else if (code.startsWith('AU-B-')) { kind = 'base-b'; mult = 1; }
     else { kind = 'base'; mult = 1; }
 
+    // SRT trays are warehouse-only (FBA never holds trays), so the rollup
+    // contribution lands on the warehouse and total buckets but not FBA.
+    const srtSoh   = srtExtraSoh.get(code)   || 0;
+    const srtAvail = srtExtraAvail.get(code) || 0;
+    const totalSoh      = s.soh      + srtSoh;
+    const totalAvail    = s.avail    + srtAvail;
+    const totalIncoming = s.incoming;
+    const warehouseSoh      = totalSoh      - s.fba_soh;
+    const warehouseAvail    = totalAvail    - s.fba_avail;
+    const warehouseIncoming = totalIncoming - s.fba_incoming;
+
     out.push({
-      sku:           code,
-      name:          s.name,
-      category:      cat,
+      sku:                code,
+      name:               s.name,
+      category:           cat,
       kind,
       mult,
-      soh:           s.soh   + (srtExtraSoh.get(code)   || 0),
-      avail:         s.avail + (srtExtraAvail.get(code) || 0),
-      incoming:      s.incoming,
-      fba_cin7:      s.fba,    // CIN7's mirror of Amazon FBA — drift detection
-      fba_amz:       null,     // SP-API truth — Phase 3
-      discontinued:  isDiscontinued(code),
+      // Total across all branches — kept for backwards compat with callers
+      // that previously used these fields, and for KPIs that want the global
+      // headline number. Most UI now reads warehouse_* preferentially.
+      soh:                totalSoh,
+      avail:              totalAvail,
+      incoming:           totalIncoming,
+      // Warehouse-only — physical stock we control (Ingleburn + any non-FBA
+      // branches). This is what the Inventory tab shows by default; status
+      // thresholds (low stock < 100) and the on-hand KPIs run off this.
+      warehouse_soh:      warehouseSoh,
+      warehouse_avail:    warehouseAvail,
+      warehouse_incoming: warehouseIncoming,
+      // FBA branch only — CIN7's mirror of what Amazon FBA holds. Drift
+      // detection vs `fba_amz` (Amazon SP-API truth, Phase 3) flags any
+      // CIN7-side sync issue when `|fba_amz - fba_cin7| > 10`.
+      fba_cin7:           s.fba_soh,
+      fba_amz:            null,
+      discontinued:       isDiscontinued(code),
     });
   }
-  // Stable order: discontinued sink to bottom, otherwise SOH desc.
+  // Stable order: discontinued sink to bottom, otherwise warehouse SOH desc
+  // (the operationally relevant number — what's reorderable).
   out.sort((a, b) => {
     if (a.discontinued !== b.discontinued) return a.discontinued ? 1 : -1;
-    return (b.soh || 0) - (a.soh || 0);
+    return (b.warehouse_soh || 0) - (a.warehouse_soh || 0);
   });
   return out;
 }
