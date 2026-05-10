@@ -1339,8 +1339,21 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.34</span> &middot; May 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.34.1</span> &middot; May 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.34.1 &mdash; 10 May 2026 (CIN7 rate-limit handling: pacing + backoff + serial fetch)</h4>
+    <ul>
+      <li><strong>First load of <code>/api/au/inventory</code> failed with HTTP 500 wrapping CIN7&rsquo;s <code>429 Too Many Requests</code>.</strong> CIN7 Omni rate-limits to <strong>3 calls/sec, 60/min, 5,000/day</strong>. The v2.34 implementation paginated <code>/Stock</code> and <code>/Products</code> with no inter-page delay AND ran them in parallel via <code>Promise.all</code>, which roughly doubled the rate and tripped the per-second cap immediately on a cold cache.</li>
+      <li><strong>Three-layer fix in <code>src/cin7.js</code>:</strong>
+        <ul>
+          <li><strong>Inter-page pacing.</strong> <code>cin7FetchAll</code> now sleeps <code>PAGE_DELAY_MS = 400</code> between pagination calls (after the first), targeting ~2.5 calls/sec to stay safely under the 3/sec cap.</li>
+          <li><strong>Serial Stock + Products.</strong> <code>buildAuInventoryPayload</code> awaits Stock then Products instead of running them in parallel via <code>Promise.all</code>. Roughly halves peak rate at the cost of a couple of extra seconds wall-time on a cold cache &mdash; still well within Worker CPU/duration budgets.</li>
+          <li><strong>429 retry with exponential backoff.</strong> <code>cin7Fetch</code> retries up to 3 times on a 429 response (1s &rarr; 2s &rarr; 4s) before bubbling. Other 4xx/5xx remain fatal because retrying a malformed query or an upstream bug just wastes the daily quota. Network-level <code>fetch()</code> throws also retry once at the first delay so a transient TCP blip doesn&rsquo;t fail the build.</li>
+        </ul>
+      </li>
+      <li><strong>Defence-in-depth.</strong> The three layers stack: pacing keeps us under the limit, serialising halves the burst rate, and retry covers the case where CIN7&rsquo;s minute or daily counter is already partially spent from another consumer (cron, manual smoke tests, etc.). On a warm KV cache (15-min TTL from v2.34) we don&rsquo;t hit CIN7 at all, so this only matters on the first request after deploy or after the cache expires.</li>
+      <li><strong>Frontend graceful-degradation worked perfectly under failure.</strong> Inventory tab showed <em>CIN7 fallback (static)</em> chip with the full 429 error in the tooltip, and rendered the static rows from <code>/au-data.js</code> behind it &mdash; exactly the design intent. No diagnostic guesswork was needed; the UI surfaced the upstream message directly.</li>
+    </ul>
     <h4>v2.34 &mdash; 10 May 2026 (AU Phase 2a: live CIN7 inventory)</h4>
     <ul>
       <li><strong>AU Inventory tab now reads live from CIN7 Omni.</strong> The Inventory rows on the AU dashboard are no longer pulled from the static <code>/au-data.js</code> snapshot &mdash; they're fetched from a new <code>GET /api/au/inventory</code> endpoint that builds them in real time from CIN7's <code>/Products</code> + <code>/Stock</code>. Sales by Channel, Monthly SKU Sales, Purchase Orders, Refunds and the placeholders still ship from <code>/au-data.js</code> for now and migrate in subsequent PRs.</li>
