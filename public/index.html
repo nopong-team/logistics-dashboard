@@ -498,11 +498,14 @@
        reused as-is from the CA stylesheet above.
        ══════════════════════════════════════════════════════════════════════ */
     .cards-5 { grid-template-columns: repeat(5, 1fr); }
+    .cards-6 { grid-template-columns: repeat(6, 1fr); }
     @media (max-width: 1100px) {
       .cards-5 { grid-template-columns: repeat(3, 1fr); }
+      .cards-6 { grid-template-columns: repeat(3, 1fr); }
     }
     @media (max-width: 800px) {
       .cards-5 { grid-template-columns: 1fr 1fr; }
+      .cards-6 { grid-template-columns: 1fr 1fr; }
     }
 
     /* AU sub-header — source chips + month picker (lives inside .controls-bar) */
@@ -1339,8 +1342,27 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.34.1</span> &middot; May 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.34.2</span> &middot; May 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.34.2 &mdash; 10 May 2026 (AU Inventory: FBA branch-name fix + warehouse vs FBA split)</h4>
+    <ul>
+      <li><strong>FBA branch-name match was broken silently.</strong> v2.34's <code>fetchStockBySku</code> matched the FBA branch with strict equality against <code>'amazonfba'</code> (no space). CIN7's actual branch name is <code>"Amazon FBA"</code> (with a space) &mdash; confirmed from the CIN7 UI &mdash; so the equality always failed, leaving <code>fba_cin7: 0</code> for every SKU. Spot-checks: <code>AU-OG-NPO-35</code> should report 484 at FBA, <code>AU-CL-BCF-35</code> 152, <code>AU-FF-VLB-35</code> 309, all of which were reading 0. Switched to a whitespace-insensitive case-insensitive substring (<code>/amazon\s*fba/i</code>) so we tolerate <em>Amazon FBA</em>, <em>AmazonFBA</em>, <em>Amazon-FBA</em>, and any future region-tagged variants like <em>Amazon FBA AU</em>.</li>
+      <li><strong>Warehouse vs FBA split &mdash; the Inventory tab now treats them as separate buckets.</strong> Previously v2.34 reported <code>soh</code> as the sum of every CIN7 branch, conflating physical-on-site stock with Amazon FBA stock that you can't redirect to fulfil Woo / wholesale / EDI orders. Now each row carries three buckets: <code>soh</code> (total, kept for backwards compat), <code>warehouse_soh</code> (everything not at FBA &mdash; Ingleburn + any other non-FBA branch), and <code>fba_cin7</code> (the FBA branch alone). Mirror fields exist for <code>avail</code> and <code>incoming</code>. Aggregation lives in <code>fetchStockBySku</code> in <code>src/cin7.js</code>; SRT-tray rollup contributions land on the warehouse bucket only since FBA never holds trays.</li>
+      <li><strong>Inventory table column relabel.</strong> The CIN7-prefixed columns are renamed to make the bucket explicit:
+        <ul>
+          <li><em>CIN7 on hand</em> &rarr; <strong>Warehouse on hand</strong></li>
+          <li><em>CIN7 available</em> &rarr; <strong>Warehouse available</strong></li>
+          <li><em>CIN7 on order</em> &rarr; <strong>Warehouse on order</strong></li>
+          <li><em>FBA AU (CIN7 mirror)</em> &mdash; same column, but now actually populated. Gets read of the FBA-only bucket.</li>
+          <li><em>FBA AU (Amazon &middot; truth)</em> &mdash; unchanged Phase 3 placeholder; fills in once AU-side SP-API credentials are configured.</li>
+        </ul>
+        Tooltips updated to spell out which bucket each column shows. The table sorts by warehouse SOH (descending) since that's the operationally relevant ordering &mdash; biggest reorderable stock at the top.
+      </li>
+      <li><strong>Status badge thresholds run on warehouse SOH.</strong> A SKU with 200 at FBA and 0 in the warehouse is operationally <em>out of stock</em> for everything except Amazon, so the &ldquo;Low stock &lt; 100&rdquo; / &ldquo;Out of stock&rdquo; / &ldquo;Negative stock&rdquo; checks now fire off <code>warehouse_soh</code> rather than total. FBA sync drift detection (<code>|fba_amz - fba_cin7| &gt; 10</code>) is unchanged.</li>
+      <li><strong>KPI cards rebalanced &mdash; new &ldquo;Tins at Amazon FBA&rdquo; card.</strong> The card row goes from 5 to 6 tiles. <em>Loose tins on hand</em> now shows the warehouse-only number (with &ldquo;available &middot; warehouse only&rdquo; in the sub-line so it&rsquo;s explicit). New <em>Tins at Amazon FBA</em> tile next to it surfaces the FBA bucket separately so it&rsquo;s visible at a glance without clicking through. <em>Cartons on hand</em> and <em>Discontinued tins</em> are also warehouse-only now.</li>
+      <li><strong>CSV export updated to match.</strong> The <code>au-inventory.csv</code> now exports <em>Warehouse on hand</em>, <em>Warehouse available</em>, <em>Warehouse on order</em> alongside the existing <em>FBA Amazon (truth)</em> and <em>FBA CIN7 (mirror)</em> columns, plus a <em>CIN7 total on hand</em> sanity column for any downstream sheet that wants to reconcile against the legacy total. Header row matches the on-screen labels.</li>
+      <li><strong>Static-fallback compatibility preserved.</strong> When the live <code>/api/au/inventory</code> fetch fails and the dashboard falls back to <code>window.AU_DATA</code> from <code>/au-data.js</code>, the static rows don&rsquo;t carry the new <code>warehouse_*</code> fields. Three small accessor helpers (<code>auWhSoh</code>, <code>auWhAvail</code>, <code>auWhIncoming</code>) read warehouse fields when present and otherwise derive them as <em>total &minus; FBA</em> from the static <code>soh</code> + <code>fba_cin7</code> &mdash; so the warehouse-vs-FBA split still renders correctly under fallback.</li>
+    </ul>
     <h4>v2.34.1 &mdash; 10 May 2026 (CIN7 rate-limit handling: pacing + backoff + serial fetch)</h4>
     <ul>
       <li><strong>First load of <code>/api/au/inventory</code> failed with HTTP 500 wrapping CIN7&rsquo;s <code>429 Too Many Requests</code>.</strong> CIN7 Omni rate-limits to <strong>3 calls/sec, 60/min, 5,000/day</strong>. The v2.34 implementation paginated <code>/Stock</code> and <code>/Products</code> with no inter-page delay AND ran them in parallel via <code>Promise.all</code>, which roughly doubled the rate and tripped the per-second cap immediately on a cold cache.</li>
@@ -1752,7 +1774,7 @@
       Discontinued lines (currently Spicy Chai) are kept as rows so we can run down stock, tagged and sunk to the bottom.
     </div>
 
-    <div class="cards-grid cards-5" id="au-inv-kpis"></div>
+    <div class="cards-grid cards-6" id="au-inv-kpis"></div>
 
     <div class="table-card">
       <div class="table-card-header">
@@ -1766,12 +1788,12 @@
           <tr>
             <th title="SKU code in CIN7. Cartons (AU-CTN-...-48) and trays (AU-SRT-...x12) appear as their own rows and are tagged with a kind badge.">SKU ⓘ</th>
             <th>Name</th>
-            <th class="num" title="CIN7 Stock On Hand — physical units (tins for base SKUs, cartons for CTN SKUs, trays for SRT SKUs). Sum across all CIN7 branches.">CIN7 on hand ⓘ</th>
-            <th class="num" title="CIN7 Stock Available = SOH minus allocated (committed to open orders).">CIN7 available ⓘ</th>
-            <th class="num" title="FBA inventory pulled directly from Amazon SP-API. Source of truth for what's in Amazon's warehouses. Currently a placeholder — needs an Amazon FBA inventory export in raw/ to populate.">FBA AU (Amazon · truth) ⓘ</th>
-            <th class="num" title="CIN7's mirror of Amazon FBA stock — pulled from the AmazonFBA branch column in CIN7 stock export. If this drifts from the Amazon column on the left, it means CIN7 didn't sync correctly.">FBA AU (CIN7 mirror) ⓘ</th>
-            <th class="num" title="CIN7 Incoming Stock — units expected to arrive from open POs.">CIN7 on order ⓘ</th>
-            <th title="Status badge. Low stock fires when SOH &lt; 100. Negative stock fires when SOH &lt; 0. Drift detection between Amazon and CIN7 will activate once the Amazon column has data.">Status ⓘ</th>
+            <th class="num" title="Physical stock on hand at the No Pong warehouse (Ingleburn) and any other non-FBA branches. This is the actionable number — what we can fulfill Woo / wholesale / EDI orders from. Excludes Amazon FBA stock (shown in its own columns).">Warehouse on hand ⓘ</th>
+            <th class="num" title="Warehouse Stock Available = warehouse SOH minus allocated (committed to open orders). Excludes Amazon FBA.">Warehouse available ⓘ</th>
+            <th class="num" title="FBA inventory pulled directly from Amazon SP-API. Source of truth for what's in Amazon's warehouses. Currently a placeholder — Phase 3 work; populates once AU-side SP-API credentials are set up.">FBA AU (Amazon · truth) ⓘ</th>
+            <th class="num" title="CIN7's mirror of Amazon FBA stock — pulled from the 'Amazon FBA' branch via the CIN7 Omni API. If this drifts from the Amazon column on the left, it means CIN7 didn't sync correctly.">FBA AU (CIN7 mirror) ⓘ</th>
+            <th class="num" title="Warehouse Incoming Stock — units expected to arrive from open POs into the No Pong warehouse. Excludes any FBA-side incoming shipments.">Warehouse on order ⓘ</th>
+            <th title="Status badge. Low stock fires when warehouse SOH &lt; 100 (FBA stock doesn't count toward this since it can't be redirected to fulfill non-Amazon orders). Negative stock fires when warehouse SOH &lt; 0. Drift detection between Amazon and CIN7 activates once the Amazon column has data.">Status ⓘ</th>
           </tr>
         </thead>
         <tbody id="au-inv-tbody"></tbody>
@@ -6340,6 +6362,15 @@ function renderAuMonthlySkuTable() {
 }
 
 // ── Inventory ──
+
+// Read warehouse_* fields when present (live CIN7 endpoint emits them as of
+// v2.34.2), otherwise derive from total - fba_cin7 (works for the static
+// fallback case where AU_DATA.inventory has soh/fba_cin7 but no warehouse_*),
+// and finally fall back to total soh if neither is available (defensive).
+function auWhSoh(r)      { return r.warehouse_soh      ?? ((r.soh      || 0) - (r.fba_cin7 || 0)); }
+function auWhAvail(r)    { return r.warehouse_avail    ?? ((r.avail    || 0) - (r.fba_cin7 || 0)); }
+function auWhIncoming(r) { return r.warehouse_incoming ?? (r.incoming  || 0); }
+
 function renderAuInventoryKpis() {
   const grid = document.getElementById('au-inv-kpis');
   if (!grid) return;
@@ -6347,17 +6378,22 @@ function renderAuInventoryKpis() {
   const baseRows   = active.filter(r => r.kind === 'base' || r.kind === 'base-b');
   const cartonRows = active.filter(r => r.kind === 'carton');
   const discRows   = AU_INVENTORY_DATA.filter(r => r.discontinued);
-  const tinSoh    = baseRows.reduce((a,r) => a + (r.soh   || 0), 0);
-  const tinAvail  = baseRows.reduce((a,r) => a + (r.avail || 0), 0);
-  const cartonSoh = cartonRows.reduce((a,r) => a + (r.soh || 0), 0);
-  const discSoh   = discRows.reduce((a,r)   => a + (r.soh || 0), 0);
-  const onOrd     = active.reduce((a,r) => a + (r.incoming || 0), 0);
+  // KPIs report WAREHOUSE numbers — what's physically on-site and reorderable.
+  // FBA stock is shown separately so Melanie can see the Amazon bucket without
+  // it conflating the warehouse "loose tins" headline.
+  const tinSoh    = baseRows.reduce((a,r) => a + auWhSoh(r),     0);
+  const tinAvail  = baseRows.reduce((a,r) => a + auWhAvail(r),   0);
+  const tinFba    = baseRows.reduce((a,r) => a + (r.fba_cin7 || 0), 0);
+  const cartonSoh = cartonRows.reduce((a,r) => a + auWhSoh(r),   0);
+  const discSoh   = discRows.reduce((a,r)   => a + auWhSoh(r),   0);
+  const onOrd     = active.reduce((a,r)     => a + auWhIncoming(r), 0);
   const cards = [
-    { label:'Active SKUs',        value: fmtAuNum(baseRows.length), accent:'#FF5789' },
-    { label:'Loose tins on hand', value: fmtAuNum(tinSoh),          accent:'#FF5789', sub: fmtAuNum(tinAvail) + ' available' },
-    { label:'Cartons on hand',    value: fmtAuNum(cartonSoh),       accent:'#F0A24E', sub: '×48 each' },
-    { label:'Units on order',     value: fmtAuNum(onOrd),           accent:'#4F6BD4' },
-    { label:'Discontinued tins',  value: fmtAuNum(discSoh),         accent:'#9CA3AF', sub: discRows.length + ' SKUs to run down' },
+    { label:'Active SKUs',         value: fmtAuNum(baseRows.length), accent:'#FF5789' },
+    { label:'Loose tins on hand',  value: fmtAuNum(tinSoh),          accent:'#FF5789', sub: fmtAuNum(tinAvail) + ' available · warehouse only' },
+    { label:'Tins at Amazon FBA',  value: fmtAuNum(tinFba),          accent:'#F0A24E', sub: 'CIN7 mirror — Amazon truth comes Phase 3' },
+    { label:'Cartons on hand',     value: fmtAuNum(cartonSoh),       accent:'#F0A24E', sub: '×48 each · warehouse only' },
+    { label:'Units on order',      value: fmtAuNum(onOrd),           accent:'#4F6BD4', sub: 'open POs into warehouse' },
+    { label:'Discontinued tins',   value: fmtAuNum(discSoh),         accent:'#9CA3AF', sub: discRows.length + ' SKUs to run down' },
   ];
   grid.innerHTML = cards.map(c => `
     <div class="card">
@@ -6382,11 +6418,16 @@ function renderAuInventoryTable() {
     return;
   }
   tb.innerHTML = AU_INVENTORY_DATA.map(r => {
+    // Status thresholds run on warehouse SOH (the actionable bucket).
+    // FBA stock can't be redirected to fulfill non-Amazon orders, so a SKU
+    // with 200 at FBA and 0 in the warehouse is operationally "out of stock"
+    // for everything except Amazon — flag it as such.
+    const whSoh = auWhSoh(r);
     let badge;
     if (r.discontinued)              badge = '<span class="badge" style="background:#EFEFEF;color:#6D6D6D;border-color:#D5D5D5;">Discontinued</span>';
-    else if (r.soh < 0)              badge = '<span class="badge err">Negative stock</span>';
-    else if (r.soh === 0)            badge = '<span class="badge warn">Out of stock</span>';
-    else if (r.soh < 100 && r.kind === 'base') badge = '<span class="badge warn">Low stock</span>';
+    else if (whSoh < 0)              badge = '<span class="badge err">Negative stock</span>';
+    else if (whSoh === 0)            badge = '<span class="badge warn">Out of stock</span>';
+    else if (whSoh < 100 && r.kind === 'base') badge = '<span class="badge warn">Low stock</span>';
     else                             badge = '<span class="badge ok">In stock</span>';
     if (r.fba_amz != null && r.fba_cin7 != null && Math.abs(r.fba_amz - r.fba_cin7) > 10) {
       badge = '<span class="badge err">FBA sync drift</span>';
@@ -6398,11 +6439,11 @@ function renderAuInventoryTable() {
         ${kindBadge ? `<div style="margin-top:3px;">${kindBadge}</div>` : ''}
       </td>
       <td>${r.name || ''}</td>
-      <td class="num">${fmtAuNum(r.soh)}</td>
-      <td class="num">${fmtAuNum(r.avail)}</td>
-      <td class="num">${r.fba_amz != null ? fmtAuNum(r.fba_amz) : '<span style="color:var(--text-light)" title="Drop an Amazon FBA inventory export in raw/ and re-run scripts/build_data.py to populate this column">— (need SP-API)</span>'}</td>
+      <td class="num">${fmtAuNum(whSoh)}</td>
+      <td class="num">${fmtAuNum(auWhAvail(r))}</td>
+      <td class="num">${r.fba_amz != null ? fmtAuNum(r.fba_amz) : '<span style="color:var(--text-light)" title="Phase 3 — populates once AU-side Amazon SP-API credentials are configured">— (need SP-API)</span>'}</td>
       <td class="num">${r.fba_cin7 ? fmtAuNum(r.fba_cin7) : '<span style="color:var(--text-light)">—</span>'}</td>
-      <td class="num">${r.incoming ? fmtAuNum(r.incoming) : '<span style="color:var(--text-light)">—</span>'}</td>
+      <td class="num">${auWhIncoming(r) ? fmtAuNum(auWhIncoming(r)) : '<span style="color:var(--text-light)">—</span>'}</td>
       <td>${badge}</td>
     </tr>`;
   }).join('');
@@ -6579,8 +6620,23 @@ function downloadAuMonthlyCSV() {
 }
 function downloadAuInvCSV() {
   if (!AU_HAS_REAL) { alert('AU data not loaded.'); return; }
-  const lines = [['SKU','Name','Kind','CIN7 on hand','CIN7 available','FBA Amazon (truth)','FBA CIN7 (mirror)','CIN7 on order','Discontinued']];
-  AU_INVENTORY_DATA.forEach(r => lines.push([r.sku, r.name||'', r.kind||'', r.soh||0, r.avail||0, r.fba_amz==null?'':r.fba_amz, r.fba_cin7||0, r.incoming||0, r.discontinued?'yes':'']));
+  // CSV mirrors the on-screen columns exactly: warehouse-only on/avail/order
+  // plus FBA Amazon truth and FBA CIN7 mirror as their own columns. Total
+  // CIN7 SOH (warehouse + FBA) is also exported as a sanity column for any
+  // downstream sheet that wants to reconcile against the legacy total.
+  const lines = [['SKU','Name','Kind','Warehouse on hand','Warehouse available','FBA Amazon (truth)','FBA CIN7 (mirror)','Warehouse on order','CIN7 total on hand','Discontinued']];
+  AU_INVENTORY_DATA.forEach(r => lines.push([
+    r.sku,
+    r.name || '',
+    r.kind || '',
+    auWhSoh(r),
+    auWhAvail(r),
+    r.fba_amz == null ? '' : r.fba_amz,
+    r.fba_cin7 || 0,
+    auWhIncoming(r),
+    r.soh || 0,
+    r.discontinued ? 'yes' : '',
+  ]));
   downloadCSV('au-inventory.csv', lines.map(r => r.map(toCsvField).join(',')).join('\r\n'));
 }
 function downloadAuPosCSV() {
