@@ -53,6 +53,19 @@ const CIN7_BASE = 'https://api.cin7.com/api/v1';
 const PAGE_SIZE = 250;
 const MAX_PAGES = 200; // 50k records — soft cap
 
+// CIN7 Omni rate limits: 3 calls/sec, 60 calls/min, 5000 calls/day.
+// We pace pagination at ~2.5 calls/sec (400ms between pages) to stay safely
+// under the per-second cap, and serialise Stock+Products instead of running
+// them in parallel — running both concurrently doubles the rate and trips
+// the 429. On 429 we retry with exponential backoff (1s, 2s, 4s) so a
+// transient burst doesn't fail the whole inventory build.
+const PAGE_DELAY_MS = 400;
+const RETRY_DELAYS_MS = [1000, 2000, 4000];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function cin7AuthHeader(env) {
   const user = (env.CIN7_USERNAME || '').trim();
   const key  = (env.CIN7_CONNECTION_KEY || '').trim();
@@ -68,6 +81,11 @@ function cin7Configured(env) {
 // Throws on non-200 with the upstream status + a truncated body for debugging.
 // The credential pair is in the Authorization header — never in the URL —
 // so a thrown error message can't leak it.
+//
+// Retries on 429 with exponential backoff (1s, 2s, 4s). Other 4xx/5xx are
+// fatal — no point retrying a bad request or a server-side bug. We also
+// retry once on a connection-level fetch() throw, since Workers→CIN7 is over
+// the public internet and a transient blip shouldn't fail the whole build.
 async function cin7Fetch(env, endpoint, params = {}) {
   const auth = cin7AuthHeader(env);
   if (!auth) {
@@ -78,24 +96,47 @@ async function cin7Fetch(env, endpoint, params = {}) {
   }
   const qs = new URLSearchParams({ page: 1, rows: PAGE_SIZE, ...params }).toString();
   const url = `${CIN7_BASE}/${endpoint}?${qs}`;
-  const resp = await fetch(url, {
-    headers: {
-      Authorization: auth,
-      'Content-Type': 'application/json',
-    },
-  });
-  if (!resp.ok) {
-    const body = await resp.text();
-    throw new Error(`CIN7 ${endpoint}: ${resp.status} ${body.slice(0, 200)}`);
+  const headers = {
+    Authorization: auth,
+    'Content-Type': 'application/json',
+  };
+
+  let lastErrBody = '';
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    let resp;
+    try {
+      resp = await fetch(url, { headers });
+    } catch (e) {
+      // Network-level throw — retry once on the first attempt only.
+      if (attempt === 0) {
+        await sleep(RETRY_DELAYS_MS[0]);
+        continue;
+      }
+      throw new Error(`CIN7 ${endpoint}: network error ${String(e?.message || e).slice(0, 200)}`);
+    }
+    if (resp.ok) return resp.json();
+
+    lastErrBody = await resp.text().catch(() => '');
+    if (resp.status === 429 && attempt < RETRY_DELAYS_MS.length) {
+      // Rate-limited — back off and retry. CIN7 doesn't send Retry-After
+      // headers we can rely on; use the schedule above.
+      await sleep(RETRY_DELAYS_MS[attempt]);
+      continue;
+    }
+    // Non-retryable (or out of retries): throw with status + truncated body.
+    throw new Error(`CIN7 ${endpoint}: ${resp.status} ${lastErrBody.slice(0, 200)}`);
   }
-  return resp.json();
+  throw new Error(`CIN7 ${endpoint}: exhausted retries; last body ${lastErrBody.slice(0, 200)}`);
 }
 
 // Paginate a CIN7 endpoint until a page comes back short. Returns the flat
-// array of all records. `params` is merged into every request.
+// array of all records. `params` is merged into every request. Sleeps
+// PAGE_DELAY_MS between pages (NOT before the first one) to stay under
+// CIN7's 3 calls/sec rate limit.
 async function cin7FetchAll(env, endpoint, params = {}) {
   const all = [];
   for (let page = 1; page <= MAX_PAGES; page++) {
+    if (page > 1) await sleep(PAGE_DELAY_MS);
     const items = await cin7Fetch(env, endpoint, { ...params, page, rows: PAGE_SIZE });
     if (!Array.isArray(items)) break;
     all.push(...items);
@@ -274,13 +315,16 @@ function buildInventory(stockBySku, productMeta) {
   return out;
 }
 
-// Single entry point. Pulls Stock + Products in parallel, builds inventory.
-// Returns the payload we cache + serve.
+// Single entry point. Pulls Stock then Products SERIALLY (not Promise.all)
+// to stay under CIN7's per-second rate limit — running both concurrently
+// roughly doubles the request rate and reliably trips the 3/sec cap.
+// Combined with PAGE_DELAY_MS pacing in cin7FetchAll and the 429-backoff
+// retry in cin7Fetch, this gives us a defence-in-depth against the limit.
+// Total wall time on a cold cache is dominated by Stock pages × delay; for
+// AU's catalogue size that's typically 2–4 seconds. Within Worker budget.
 async function buildAuInventoryPayload(env) {
-  const [stockBySku, productMeta] = await Promise.all([
-    fetchStockBySku(env),
-    fetchProductMeta(env),
-  ]);
+  const stockBySku  = await fetchStockBySku(env);
+  const productMeta = await fetchProductMeta(env);
   const inventory = buildInventory(stockBySku, productMeta);
   return {
     inventory,
