@@ -18,6 +18,7 @@ import { amazonRoutes, runAmazonOrdersChunk, runAmazonReportsTick, runAmazonInve
 import { diagnosticsRoutes } from './diagnostics.js';
 import { xeroRoutes, xeroAuthRoutes, readXeroStatus } from './xero.js';
 import { logiwaRoutes, readLogiwaStatus } from './logiwa.js';
+import { auRoutes } from './cin7.js';
 import buyingToolHistory from './buying-tool-history.js';
 import { redactSecrets } from './redact.js';
 
@@ -94,6 +95,13 @@ app.route('/auth/xero', xeroAuthRoutes);
 // KV. GET returns the snapshot. See src/logiwa.js for the full rationale and
 // the reason there is deliberately no R2, no D1, and no ADMIN_KEY here.
 app.route('/api/logiwa', logiwaRoutes);
+
+// AU dashboard data (Phase 2 — CIN7 Omni live). Today: /cin7/status proof-of-life
+// + /inventory built from CIN7 Products + Stock with the AU SKU rules applied.
+// Sales / refunds / POs still ship from the static window.AU_DATA in /au-data.js
+// and will move here in subsequent PRs. See src/cin7.js header for the full
+// design — KV cache, fallback semantics, secret names.
+app.route('/api/au', auRoutes);
 
 // Buying-tool history — 18+ months of per-SKU monthly sales plus manually
 // curated allocation buffers from the buying-tool spreadsheet. Powers the

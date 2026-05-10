@@ -1339,8 +1339,19 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.33</span> &middot; May 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.34</span> &middot; May 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.34 &mdash; 10 May 2026 (AU Phase 2a: live CIN7 inventory)</h4>
+    <ul>
+      <li><strong>AU Inventory tab now reads live from CIN7 Omni.</strong> The Inventory rows on the AU dashboard are no longer pulled from the static <code>/au-data.js</code> snapshot &mdash; they're fetched from a new <code>GET /api/au/inventory</code> endpoint that builds them in real time from CIN7's <code>/Products</code> + <code>/Stock</code>. Sales by Channel, Monthly SKU Sales, Purchase Orders, Refunds and the placeholders still ship from <code>/au-data.js</code> for now and migrate in subsequent PRs.</li>
+      <li><strong>New <code>src/cin7.js</code> module.</strong> Ports the parked Express CIN7 Omni client (<code>backend/server.js</code> in the Drive folder) to the Worker: <code>btoa()</code> for base64, <code>c.env</code> for secrets, paginated <code>cin7Fetch</code> + <code>cin7FetchAll</code> with a 200-page safety cap. Mounted at <code>app.route('/api/au', auRoutes)</code>. Two endpoints today: <code>GET /api/au/cin7/status</code> (smallest proof-of-life — pings <code>/Branches</code> with <code>rows=1</code>) and <code>GET /api/au/inventory</code>.</li>
+      <li><strong>Server-side AU SKU normalisation.</strong> The same rules that <code>AU Dashboard/scripts/build_data.py</code> applies (CTN ×48, WC- ×54, SRT ×12, MIX ×72, B-prefix distinct, Spicy Chai discontinued) are mirrored in JS so the live inventory rows match the shape and roll-up the static dataset has, byte-for-byte. Keep <code>normalize_sku</code> in build_data.py and <code>normalizeAuSku</code> in <code>src/cin7.js</code> in sync &mdash; canonical doc at <code>AU Dashboard/au-sku-rules.md</code>.</li>
+      <li><strong>Per-branch stock aggregation.</strong> CIN7 Omni returns per-(productOption × branch) rows; we sum <code>stockOnHand</code>, <code>available</code>, and <code>openPurchaseOrders</code> across branches per SKU, while pulling out the <code>AmazonFBA</code> branch separately as <code>fba_cin7</code> so it can be compared against the SP-API truth (Phase 3) and any drift &gt;10 units flags a CIN7 sync issue.</li>
+      <li><strong>KV-cached 15 min, with stale-fallback on upstream error.</strong> Cache key <code>au:inventory:v1</code>; pass <code>?refresh=1</code> to force a fresh upstream pull. If CIN7 errors and a cached snapshot exists, the endpoint returns the stale snapshot with <code>staleFallback: true</code> + an <code>error</code> field instead of failing the request. Same pattern as SalesBinder's <code>/inventory</code>.</li>
+      <li><strong>Frontend graceful degradation.</strong> <code>initAuDashboard</code> still renders static rows immediately so there's no perceived lag; a background fetch of <code>/api/au/inventory</code> then swaps <code>AU_INVENTORY_DATA</code> for the live rows and re-renders the Inventory tab. A new <code>source-chip</code> in the Inventory table header shows <em>CIN7 live</em> / <em>CIN7 cached</em> / <em>CIN7 fallback (static)</em> so it's visible at a glance which dataset you're looking at. Failed fetch keeps the static rows &mdash; no broken view.</li>
+      <li><strong>Wrangler secrets:</strong> <code>CIN7_USERNAME</code> + <code>CIN7_CONNECTION_KEY</code> (HTTP Basic auth, values from CIN7 &rarr; Integrations &rarr; API). Set with <code>npx wrangler secret put</code>; visible in <code>npx wrangler secret list</code>. Same shape the parked Express server consumed, so the values lift cleanly out of the legacy <code>backend/.env</code>.</li>
+      <li><strong>Phase 2 plan.</strong> Phase 2a = inventory live (this PR). Phase 2b = Sales by Channel, Refunds, Purchase Orders also live from CIN7 (<code>SalesOrders</code>, <code>PurchaseOrders</code> endpoints, channel attribution per <code>au-sku-rules.md</code>). Phase 3 = Amazon AU SP-API + Metorik (Woo) live; the <code>fba_amz</code> column on the Inventory tab populates then and unlocks drift detection.</li>
+    </ul>
     <h4>v2.33 &mdash; 10 May 2026 (AU dashboard goes live: Phase 1 static-data port from prototype)</h4>
     <ul>
       <li><strong>Australia dashboard is now live.</strong> The full six-tab layout from <code>AU Dashboard/au-dashboard-prototype.html</code> has been ported into <code>public/index.html</code> behind the existing region toggle. Tabs: Sales by Channel (default landing), Monthly SKU Sales, Inventory SKUs, Purchase Orders, Forecasting (placeholder), Packaging (placeholder). The previous Overview / SKUs / inventory-only placeholder shell is replaced.</li>
@@ -1733,6 +1744,7 @@
     <div class="table-card">
       <div class="table-card-header">
         <div class="table-card-title">Inventory by source</div>
+        <span id="au-inv-source-chip" class="source-chip" style="display:none;" title="Source of the rows in this table"></span>
         <div class="table-hint">Carton (×48) and tray (×12) SKUs shown as separate physical items. Flag if |FBA Amazon − FBA CIN7| &gt; 10 units = CIN7 sync issue.</div>
         <button class="btn-csv" onclick="downloadAuInvCSV()">Export CSV</button>
       </div>
@@ -6047,6 +6059,58 @@ function initAuDashboard() {
 
   populateAuPoFilters();
   renderAuAll();
+
+  // Phase 2: pull live CIN7 inventory and swap it in. Static rows render
+  // immediately above; this fetch updates AU_INVENTORY_DATA in the background
+  // and re-renders just the inventory tab. On error we keep the static rows
+  // and surface a "fallback" chip so it's visible something failed.
+  loadLiveAuInventory().catch((e) => console.warn('AU inventory live fetch threw:', e));
+}
+
+// Phase 2 — live CIN7 inventory loader. Fetches /api/au/inventory (KV-cached
+// 15 min server-side), replaces AU_INVENTORY_DATA on success, re-renders the
+// Inventory tab in place. On error / non-200, keeps the static rows and tags
+// the source chip as fallback so the user knows what they're looking at.
+async function loadLiveAuInventory() {
+  const chip = document.getElementById('au-inv-source-chip');
+  const setChip = (label, dotClass, title) => {
+    if (!chip) return;
+    chip.style.display = '';
+    chip.title = title || '';
+    chip.innerHTML = `<span class="chip-dot${dotClass ? ' ' + dotClass : ''}"></span> ${label}`;
+  };
+
+  setChip('CIN7 (loading…)', 'gray', 'Fetching live inventory from /api/au/inventory');
+  try {
+    const resp = await fetch('/api/au/inventory', { credentials: 'include' });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      throw new Error(`HTTP ${resp.status}: ${body.slice(0, 200) || resp.statusText}`);
+    }
+    const data = await resp.json();
+    if (!Array.isArray(data?.inventory) || !data.inventory.length) {
+      throw new Error('Empty inventory payload');
+    }
+
+    AU_INVENTORY_DATA = data.inventory;
+    renderAuInventoryKpis();
+    renderAuInventoryTable();
+
+    if (data.staleFallback) {
+      setChip('CIN7 cached (upstream error)', 'gray',
+        'Live CIN7 fetch failed — serving last cached snapshot. ' + (data.error || ''));
+    } else if (data.cached) {
+      const ago = data.lastSync ? new Date(data.lastSync).toLocaleString('en-AU') : '';
+      setChip('CIN7 live (cached)', '', `Cached at ${ago}. Refreshes every 15 min on demand.`);
+    } else {
+      const ago = data.lastSync ? new Date(data.lastSync).toLocaleString('en-AU') : '';
+      setChip('CIN7 live', '', `Fresh from CIN7 at ${ago}. KV-cached for 15 min.`);
+    }
+  } catch (e) {
+    console.warn('AU live inventory fetch failed — keeping static rows:', e?.message || e);
+    setChip('CIN7 fallback (static)', 'gray',
+      `Live fetch failed (${e?.message || e}). Showing static rows from /au-data.js.`);
+  }
 }
 
 function renderAuAll() {
