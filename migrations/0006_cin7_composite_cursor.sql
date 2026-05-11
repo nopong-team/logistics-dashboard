@@ -1,0 +1,26 @@
+-- Migration 0006 — composite (modified_date, id) cursor for CIN7 sync.
+--
+-- Created 2026-05-11 as v2.2.8 hotfix to v2.36 Phase A.
+--
+-- Why this exists. Phase A (v2.2.7) used `WHERE ModifiedDate >= watermark`
+-- as the cron's incremental filter and advanced the watermark to
+-- `MAX(modified_date)` seen in the batch. The first cron tick on prod
+-- exposed the edge case the code comments already flagged: CIN7 has 250+
+-- sales-order rows that share the EXACT same modified_date
+-- (`2025-11-08T13:00:06Z`, likely a bulk-import or bulk-edit moment),
+-- which means MAX(modified_date) in the batch IS the watermark, so the
+-- next tick re-fetches the same 250 rows forever. Admin-backfill loop
+-- confirmed: 10 chunks in a row, identical batches, zero forward progress.
+--
+-- Fix. Add a `watermark_id` tiebreaker. The new WHERE clause becomes
+--    (ModifiedDate > 'w_mod') OR (ModifiedDate = 'w_mod' AND id > w_id)
+-- which says "give me records past this timestamp, OR records at the same
+-- timestamp with a higher id." Cursor advances monotonically through ties.
+-- The sync layer sorts the batch by (modified_date, id) at write time and
+-- takes the last record's pair as the new watermark.
+--
+-- Compatibility. Existing sync_state rows (woo CA/US, amazon CA/US,
+-- salesbinder, future xero) all get watermark_id=0 by default. Non-CIN7
+-- sync code doesn't read this column, so it's a no-op for them.
+
+ALTER TABLE sync_state ADD COLUMN watermark_id INTEGER NOT NULL DEFAULT 0;

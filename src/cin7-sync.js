@@ -170,15 +170,53 @@ async function logRun(env, {
   ).run();
 }
 
-// Read the current watermark, creating the sync_state row if absent.
+// Read the current composite watermark `(modified_date, id)`, creating the
+// sync_state row if absent. v2.2.8 adds the `watermark_id` tiebreaker; pre-
+// existing rows from v2.2.7 default to watermark_id=0 via the column DEFAULT,
+// so the first call after migration 0006 reads (stuck_timestamp, 0) and the
+// composite WHERE clause unsticks the cluster on the next fetch.
 async function readWatermark(env, source) {
   await env.DB.prepare(
     `INSERT OR IGNORE INTO sync_state (source, market, watermark) VALUES (?, 'AU', ?)`,
   ).bind(source, EPOCH_WATERMARK).run();
   const row = await env.DB.prepare(
-    `SELECT watermark FROM sync_state WHERE source = ? AND market = 'AU'`,
+    `SELECT watermark, watermark_id FROM sync_state WHERE source = ? AND market = 'AU'`,
   ).bind(source).first();
-  return row?.watermark || EPOCH_WATERMARK;
+  return {
+    watermark: row?.watermark || EPOCH_WATERMARK,
+    watermarkId: Number(row?.watermark_id ?? 0) || 0,
+  };
+}
+
+// Build the CIN7 WHERE clause for the composite cursor.
+//   • First run (watermarkId === 0): simple `ModifiedDate>='w'`. Avoids the
+//     OR/parentheses path entirely on a known-empty state, sidestepping any
+//     edge case where CIN7's where parser is fussy about parenthesised OR.
+//   • Subsequent runs: `(ModifiedDate>'w') OR (ModifiedDate='w' AND Id>w_id)`.
+//     "Records past this timestamp OR records at this same timestamp with a
+//     higher Id" — monotonic progress through ties.
+// Field-name casing: ModifiedDate matches existing where-clause usage (see
+// fetchSalesOrdersForMonth in src/cin7.js). `Id` uses the same PascalCase
+// convention; if CIN7 rejects it the sync_logs will surface the error and
+// we'll iterate.
+function buildCompositeWhere(watermark, watermarkId) {
+  if (!watermarkId) {
+    return `ModifiedDate>='${watermark}'`;
+  }
+  return `(ModifiedDate>'${watermark}') OR (ModifiedDate='${watermark}' AND Id>${watermarkId})`;
+}
+
+// Sort a CIN7 record batch by (modified_date, id) ASC. The LAST element is
+// then the composite-cursor advance point. Stable across re-fetches because
+// `id` is unique per CIN7 record, so the watermark moves forward
+// deterministically even when many records share a modified_date.
+function sortByCompositeKey(records) {
+  return [...records].sort((a, b) => {
+    const ma = pickModifiedDate(a) || '';
+    const mb = pickModifiedDate(b) || '';
+    if (ma !== mb) return ma < mb ? -1 : 1;
+    return (Number(a.id) || 0) - (Number(b.id) || 0);
+  });
 }
 
 // ─── Sales orders chunk ────────────────────────────────────────────────────
@@ -224,18 +262,18 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
     throw new Error('cin7 sync: CIN7_USERNAME / CIN7_CONNECTION_KEY not set');
   }
 
-  const watermarkBefore = await readWatermark(env, source);
+  const { watermark: watermarkBefore, watermarkId: watermarkIdBefore } = await readWatermark(env, source);
 
-  // Fetch one page (≤250 rows) of SalesOrders modified at or after the
-  // watermark, ordered ascending so the last row in the response is the
-  // freshest. Page=1 always — we walk by watermark, not by page index.
-  const where = `ModifiedDate>='${watermarkBefore}'`;
+  // Composite cursor (v2.2.8): see buildCompositeWhere() comment above.
+  // Page=1 always — we walk by watermark, not by page index. CIN7's own
+  // ordering is non-deterministic across calls, so we sort in JS by
+  // (modified_date, id) before processing.
+  const where = buildCompositeWhere(watermarkBefore, watermarkIdBefore);
   let rows;
   try {
     rows = await cin7Fetch(env, 'SalesOrders', {
       fields: SALES_FIELDS,
       where,
-      order: 'ModifiedDate ASC',
       page: 1,
       rows: PAGE_SIZE,
     });
@@ -248,9 +286,10 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
     });
     throw e;
   }
-  const orders = Array.isArray(rows) ? rows : [];
+  const orders = sortByCompositeKey(Array.isArray(rows) ? rows : []);
 
   let watermarkAfter = watermarkBefore;
+  let watermarkIdAfter = watermarkIdBefore;
   let rowsUpserted = 0;
   let itemsUpserted = 0;
 
@@ -266,7 +305,6 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
         // outliers don't justify a side-table.
         continue;
       }
-      if (modifiedDate > watermarkAfter) watermarkAfter = modifiedDate;
       rowsUpserted++;
 
       const channelAttr = attributeCin7Order(o);
@@ -332,6 +370,20 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
     for (let i = 0; i < stmts.length; i += CHUNK) {
       await env.DB.batch(stmts.slice(i, i + CHUNK));
     }
+
+    // Composite-cursor advance: the LAST element of the sorted batch carries
+    // the highest (modified_date, id) we just persisted. That tuple becomes
+    // the new watermark IFF it's strictly past the previous cursor — a guard
+    // against rare cases where CIN7 returns rows we've already passed.
+    const last = orders[orders.length - 1];
+    const lastMod = pickModifiedDate(last);
+    const lastId  = Number(last?.id) || 0;
+    if (lastMod && (
+        lastMod > watermarkBefore ||
+        (lastMod === watermarkBefore && lastId > watermarkIdBefore))) {
+      watermarkAfter   = lastMod;
+      watermarkIdAfter = lastId;
+    }
   }
 
   // Update sync_state heartbeat — always, even if zero rows came back, so
@@ -339,9 +391,9 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
   // from "when did we last persist a new row".
   await env.DB.prepare(
     `UPDATE sync_state
-        SET watermark = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        SET watermark = ?, watermark_id = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
       WHERE source = ? AND market = 'AU'`,
-  ).bind(watermarkAfter, source).run();
+  ).bind(watermarkAfter, watermarkIdAfter, source).run();
 
   const durationMs = Date.now() - startMs;
   await logRun(env, {
@@ -349,13 +401,22 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
     watermarkBefore, watermarkAfter, status: 'ok', durationMs,
   });
 
+  // `more` hint: true if (a) we got a full page AND (b) the watermark
+  // actually advanced. If we got a full page but watermark didn't move,
+  // something pathological is happening (CIN7 returning the same records
+  // despite the cursor having advanced past them) — flag as NOT more so the
+  // backfill loop bails instead of spinning forever.
+  const watermarkAdvanced = watermarkAfter > watermarkBefore ||
+    (watermarkAfter === watermarkBefore && watermarkIdAfter > watermarkIdBefore);
+
   return {
     ok: true,
     source, action,
     pagesFetched: 1,
     rowsUpserted, itemsUpserted,
     watermarkBefore, watermarkAfter,
-    more: orders.length >= PAGE_SIZE, // hint: another page likely available
+    watermarkIdBefore, watermarkIdAfter,
+    more: orders.length >= PAGE_SIZE && watermarkAdvanced,
     durationMs,
   };
 }
@@ -388,15 +449,14 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
     throw new Error('cin7 sync: CIN7_USERNAME / CIN7_CONNECTION_KEY not set');
   }
 
-  const watermarkBefore = await readWatermark(env, source);
+  const { watermark: watermarkBefore, watermarkId: watermarkIdBefore } = await readWatermark(env, source);
 
-  const where = `ModifiedDate>='${watermarkBefore}'`;
+  const where = buildCompositeWhere(watermarkBefore, watermarkIdBefore);
   let rows;
   try {
     rows = await cin7Fetch(env, 'CreditNotes', {
       fields: CREDIT_FIELDS,
       where,
-      order: 'ModifiedDate ASC',
       page: 1,
       rows: PAGE_SIZE,
     });
@@ -409,9 +469,10 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
     });
     throw e;
   }
-  const creditNotes = Array.isArray(rows) ? rows : [];
+  const creditNotes = sortByCompositeKey(Array.isArray(rows) ? rows : []);
 
   let watermarkAfter = watermarkBefore;
+  let watermarkIdAfter = watermarkIdBefore;
   let rowsUpserted = 0;
   let itemsUpserted = 0;
 
@@ -421,7 +482,6 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
       const modifiedDate = pickModifiedDate(cn);
       const createdDate  = pickCreatedDate(cn);
       if (!modifiedDate || !createdDate) continue;
-      if (modifiedDate > watermarkAfter) watermarkAfter = modifiedDate;
       rowsUpserted++;
 
       const company   = String(cn?.company   || '').slice(0, 200) || null;
@@ -483,13 +543,24 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
     for (let i = 0; i < stmts.length; i += CHUNK) {
       await env.DB.batch(stmts.slice(i, i + CHUNK));
     }
+
+    // Composite-cursor advance — same logic as sales orders.
+    const last = creditNotes[creditNotes.length - 1];
+    const lastMod = pickModifiedDate(last);
+    const lastId  = Number(last?.id) || 0;
+    if (lastMod && (
+        lastMod > watermarkBefore ||
+        (lastMod === watermarkBefore && lastId > watermarkIdBefore))) {
+      watermarkAfter   = lastMod;
+      watermarkIdAfter = lastId;
+    }
   }
 
   await env.DB.prepare(
     `UPDATE sync_state
-        SET watermark = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        SET watermark = ?, watermark_id = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
       WHERE source = ? AND market = 'AU'`,
-  ).bind(watermarkAfter, source).run();
+  ).bind(watermarkAfter, watermarkIdAfter, source).run();
 
   const durationMs = Date.now() - startMs;
   await logRun(env, {
@@ -497,13 +568,17 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
     watermarkBefore, watermarkAfter, status: 'ok', durationMs,
   });
 
+  const watermarkAdvanced = watermarkAfter > watermarkBefore ||
+    (watermarkAfter === watermarkBefore && watermarkIdAfter > watermarkIdBefore);
+
   return {
     ok: true,
     source, action,
     pagesFetched: 1,
     rowsUpserted, itemsUpserted,
     watermarkBefore, watermarkAfter,
-    more: creditNotes.length >= PAGE_SIZE,
+    watermarkIdBefore, watermarkIdAfter,
+    more: creditNotes.length >= PAGE_SIZE && watermarkAdvanced,
     durationMs,
   };
 }
