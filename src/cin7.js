@@ -783,32 +783,22 @@ async function buildAuSalesPayload(env, month) {
 
     let cnContributedAny = false;
     for (const li of lineItems) {
-      const code = String(li?.code || li?.sku || '').trim();
-      if (!code) continue;
-
+      // Defensive: skip child lines if any ever appear on a credit note. None
+      // observed in the April dump but the v2.35.4 rule is cheap to keep.
       const parentId = Number(li?.parentId ?? 0) || 0;
       if (parentId > 0) continue;
 
+      const code      = String(li?.code || li?.sku || '').trim();
       const qty       = Number(li?.qty ?? li?.quantity ?? 0) || 0;
       const uomSize   = Number(li?.uomSize ?? 0) || 0;
       const unitPrice = Number(li?.unitPrice ?? 0) || 0;
       const lineTotal = Number(li?.total ?? (qty * unitPrice)) || 0;
       const name      = String(li?.name || '').slice(0, 60);
 
-      const [base, mult] = normalizeAuSku(code);
-      const baseKey = base || code;
-
-      const tinsRaw = uomSize > 1 ? qty : qty * mult;
-      // Always store refunds as NEGATIVE, regardless of CIN7's sign on the
-      // credit note line. Static side stores them negative (tins: -110,
-      // revenue: -71317) — we mirror that so the frontend's "Less refunds"
-      // row renders consistently.
-      const tinsNeg    = -Math.abs(tinsRaw);
+      // Revenue contribution — every line contributes (including empty-code
+      // "Amount" lines for Amazon GST, shipping refunds, etc.). Always negative.
       const revenueNeg = -Math.abs(lineTotal);
-
-      refunds.tins    += tinsNeg;
       refunds.revenue += revenueNeg;
-      cnContributedAny = true;
 
 <<<<<<< Updated upstream
       const acc = refunds.sku_lines.get(baseKey) || { tins: 0, sales: 0, name: '' };
@@ -842,8 +832,6 @@ async function buildAuSalesPayload(env, month) {
       if (revenueNeg !== 0 || tinsNeg !== 0) cnContributedAny = true;
 >>>>>>> Stashed changes
     }
-    // Only count the credit note in the order count if it actually contributed
-    // a tin/revenue line (skip credit notes that were 100% fee-only or empty).
     if (cnContributedAny) refunds.orderRefs.add(cnRef);
   }
 
