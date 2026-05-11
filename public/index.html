@@ -1342,8 +1342,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.35</span> &middot; May 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.35.1</span> &middot; May 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.35.1 &mdash; 11 May 2026 (AU Phase 2b hot-fix: PO filter + ETD column + month picker back to January)</h4>
+    <ul>
+      <li><strong>Open POs filter — switched from server-side to client-side.</strong> v2.35 returned 136 POs (full history) instead of the expected 26 because CIN7 Omni's actual PO <code>Status</code> values are <em>Draft</em> / <em>Approved</em> / <em>Completed</em> / <em>Voided</em> (capitalised, not all-caps as the v2.35 <code>where</code>-clause assumed), and the <code>&lt;&gt;</code> operator may not be supported by Omni's <code>where</code> syntax anyway. Dropped the server-side filter, added <code>isOpenPo()</code> client-side which excludes POs whose status (case-insensitive) is in <em>{completed, voided, cancelled, closed}</em> or that have a <code>completedDate</code> set. Belt-and-braces against future status-name variants.</li>
+      <li><strong>ETD column added to the Purchase Orders table.</strong> Reads from <code>expected_date</code> (CIN7's <code>deliveryDate</code>) which v2.35 already piped through but didn't display. Tinted red with an <em>"Nd late"</em> sub-label if past due, amber with <em>"in Nd"</em> if within 7 days, neutral otherwise. PO table now sorts by ETD ascending (most-overdue first, then nearest, then no-date at the bottom) with PO# as the tiebreaker. Blank cell for POs with no <code>deliveryDate</code> set in CIN7.</li>
+      <li><strong>Month picker now goes back to January 2026 (and forward to the current month).</strong> Static <code>au-data.js</code> only had April. <code>_auExtendMonthsTo('2026-01')</code> client-side fills in the months Jan&ndash;current and initialises empty per-month state so renderers don't crash on missing keys. The selected month defaults to April (the only month with full Woo+Amazon data); other months populate as soon as live CIN7 sales arrive. The picker shows them all immediately so the navigation is there.</li>
+      <li><strong>Background pre-fetch fills the other months without user clicks.</strong> After the initial render, <code>initAuDashboard</code> kicks off a sequential background loop over the months that aren't already loaded, calling <code>loadLiveAuSales(month)</code> for each. Sequential (not parallel) to be polite to CIN7's 3/sec cap from the client side. Chips don't flicker on the visible tabs &mdash; <code>loadLiveAuSales</code> now guards chip updates with a <code>month === AU_SELECTED_MONTH</code> check, so background loads stay silent while the foreground chip stays steady.</li>
+      <li><strong>Heads-up:</strong> the live <em>CIN7 fallback (static)</em> chip on the Sales by Channel + Monthly SKU + Incoming-by-SKU tabs in v2.35 was caused by a <strong>CIN7 API permissions issue</strong>, not a code bug. The CIN7 connection key has read access to <code>/Stock</code>, <code>/Products</code>, <code>/Branches</code>, and <code>/PurchaseOrders</code>, but NOT to <code>/SalesOrders</code>. CIN7 admin needs to grant <em>read SalesOrders</em> on the API user / connection in CIN7 Pro &rarr; Setup &rarr; Users &rarr; the API user &rarr; Permissions &rarr; tick <strong>Read access to Sales</strong>. After that, the chips flip to <em>CIN7 live</em> on the next page load (or sooner with <code>?refresh=1</code>).</li>
+    </ul>
     <h4>v2.35 &mdash; 11 May 2026 (AU Phase 2b: live CIN7 sales / refunds / purchase orders)</h4>
     <ul>
       <li><strong>Sales by Channel + Monthly SKU + Refunds + POs all read live from CIN7.</strong> The static <code>au-data.js</code> snapshot was the only source for those four views as of v2.34.2. v2.35 adds three new endpoints &mdash; <code>GET /api/au/sales?month=YYYY-MM</code>, <code>GET /api/au/pos</code> &mdash; and the AU dashboard merges the live CIN7-channel data over the static snapshot. Woo + Amazon channel data stays static (they're source-of-truth on their own APIs &mdash; Phase 3 wires those).</li>
@@ -1855,6 +1863,7 @@
             <th title="Type of PO based on dominant line-item: Finished tins, Soap (new product), raw Tins, Packaging, or Other.">Type ⓘ</th>
             <th title="Items on the PO. Shows up to 3 SKU codes; hover the row for the full breakdown with quantities. Freight/Kitting fee lines are excluded from the summary.">Items ⓘ</th>
             <th class="num" title="Total units across all real line items on the PO (excludes Freight, KittingFee). Mixed units — tins for finished/soap/raw, packaging units for P-... lines.">Total units ⓘ</th>
+            <th title="Expected Time of Delivery — the deliveryDate field from CIN7. Tinted red if past due (negative days), amber if within 7 days, neutral otherwise. Blank if CIN7 has no delivery date set on the PO.">ETD ⓘ</th>
           </tr>
         </thead>
         <tbody id="au-po-tbody"></tbody>
@@ -1910,9 +1919,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.1</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.1 &mdash; 11 May 2026 (Phase 2b hot-fix)</h4>
+    <ul>
+      <li><strong>Open POs now correctly filtered to ~26 rows</strong> instead of 136 (full history). Filter moved client-side; CIN7's actual status values are <em>Completed</em> / <em>Voided</em>, not all-caps as v2.35 assumed.</li>
+      <li><strong>ETD column added to the Purchase Orders table</strong>, with red/amber colouring for past-due and within-7-days. PO table sorts by ETD ascending so the most urgent rows are at the top.</li>
+      <li><strong>Month picker now spans January 2026 to the current month.</strong> Static had only April; live CIN7 sales lazy-load per-month and a background pre-fetch fills the other months without user clicks. Chart will populate Jan&ndash;current with real CIN7-channel data once the SalesOrders permission below is granted.</li>
+      <li><strong>SalesOrders 403 is a CIN7 permissions issue, not a code bug.</strong> The CIN7 API user needs <em>Read access to Sales</em> granted in CIN7 Pro &rarr; Setup &rarr; Users. Once enabled, the Sales / Monthly SKU / Incoming-by-SKU chips will flip from <em>fallback (static)</em> to <em>CIN7 live</em>.</li>
+    </ul>
     <h4>v2.2 &mdash; 11 May 2026 (Phase 2b: live CIN7 sales / refunds / POs)</h4>
     <ul>
       <li><strong>Sales by Channel reads live from CIN7</strong> for Coles, Woolworths, Distributors, and Refunds. Woo + Amazon stay on the April static snapshot (Phase 3 wires those live). Per-channel source label flips to <em>CIN7 live</em> on rows that have been swapped in.</li>
@@ -6057,6 +6073,33 @@ let auChannelChart = null;
 let AU_PO_FILTER_TYPE = 'all', AU_PO_FILTER_SUPPLIER = 'all';
 let AU_INITIALIZED = false;
 
+// v2.35.1 — Extend AU_MONTHS to cover at least `start` (YYYY-MM) through
+// the current calendar month, even when static au-data.js only has April.
+// Initialises empty per-month state so the renderers don't crash on missing
+// keys; live CIN7 sales fill these in lazily as months are loaded.
+function _auExtendMonthsTo(start) {
+  const today = new Date();
+  const end = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, '0')}`;
+  const all = new Set(AU_MONTHS);
+  let cur = start;
+  while (cur <= end) {
+    all.add(cur);
+    const [y, m] = cur.split('-').map(Number);
+    cur = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+  }
+  AU_MONTHS = Array.from(all).sort();
+  for (const m of AU_MONTHS) {
+    if (!AU_SALES_BY_MONTH[m])  AU_SALES_BY_MONTH[m]  = {};
+    if (!AU_ORDERS_BY_MONTH[m]) AU_ORDERS_BY_MONTH[m] = {};
+    if (!AU_TINS_BY_MONTH[m])   AU_TINS_BY_MONTH[m]   = {};
+    if (!AU_MONTH_LABELS[m]) {
+      const [y, mo] = m.split('-').map(Number);
+      const d = new Date(Date.UTC(y, mo - 1, 1));
+      AU_MONTH_LABELS[m] = d.toLocaleDateString('en-AU', { month: 'long', year: 'numeric' });
+    }
+  }
+}
+
 function initAuDashboard() {
   if (AU_INITIALIZED) return;
   AU_INITIALIZED = true;
@@ -6083,6 +6126,13 @@ function initAuDashboard() {
     AU_POS                = window.AU_DATA.pos || [];
     AU_INCOMING_BY_SKU    = window.AU_DATA.incomingBySku || [];
     AU_SELECTED_MONTH     = window.AU_DATA.defaultMonth || AU_MONTHS[AU_MONTHS.length - 1];
+
+    // v2.35.1 — extend AU_MONTHS client-side back to 2026-01 and forward
+    // to the current calendar month, so the picker lets the user navigate
+    // historical CIN7 sales even though static au-data.js only has April.
+    // Live CIN7 sales lazy-load per month on demand (see the picker change
+    // handler + the background pre-fetch fired below).
+    _auExtendMonthsTo('2026-01');
 
     const stamp = document.getElementById('au-data-stamp');
     if (stamp && window.AU_DATA.generated) {
@@ -6140,11 +6190,23 @@ function initAuDashboard() {
 
   // Phase 2b (v2.35): pull live CIN7 sales (selected month) and POs. Same
   // pattern — render static immediately, swap in live in the background, fall
-  // back to static + fallback chip on error. Sales fires for the selected
-  // month only; the month-picker change handler triggers additional months
-  // on demand.
+  // back to static + fallback chip on error.
   loadLiveAuSales(AU_SELECTED_MONTH).catch((e) => console.warn('AU sales live fetch threw:', e));
   loadLiveAuPos().catch((e) => console.warn('AU POs live fetch threw:', e));
+
+  // v2.35.1 — background pre-fetch for the OTHER months in the picker so
+  // the chart + month-picker populate without the user clicking through
+  // each one. Sequential to avoid hammering CIN7's 3/sec rate limit from
+  // the client side (server-side cin7Fetch also retries 429s, but staying
+  // gentle is friendlier). Skips months already loaded.
+  (async () => {
+    for (const m of AU_MONTHS) {
+      if (m === AU_SELECTED_MONTH) continue;
+      if (AU_LIVE_SALES_MONTHS.has(m)) continue;
+      try { await loadLiveAuSales(m); }
+      catch (e) { console.warn(`AU sales pre-fetch failed for ${m}:`, e?.message || e); }
+    }
+  })();
 }
 
 // Phase 2 — live CIN7 inventory loader. Fetches /api/au/inventory (KV-cached
@@ -6222,8 +6284,16 @@ function _auChipFromResp(chipId, data, liveLabel) {
 // Re-renders the Sales by Channel + Monthly SKU + chart on success.
 async function loadLiveAuSales(month) {
   if (!month) return;
-  _auSetChip('au-sales-source-chip',  'CIN7 (loading…)', 'gray', `Fetching live CIN7 sales for ${month}`);
-  _auSetChip('au-monthly-source-chip','CIN7 (loading…)', 'gray', `Fetching live CIN7 sales for ${month}`);
+  // Only flip the visible chips when fetching the month the user is
+  // currently viewing — background pre-fetches for OTHER months should
+  // be silent (no flicker on the Sales / Monthly SKU tabs while Jan/Feb/Mar
+  // load in the background). Re-evaluated again at the response-handling
+  // path below since AU_SELECTED_MONTH may have changed during the await.
+  const updateChips = () => month === AU_SELECTED_MONTH;
+  if (updateChips()) {
+    _auSetChip('au-sales-source-chip',  'CIN7 (loading…)', 'gray', `Fetching live CIN7 sales for ${month}`);
+    _auSetChip('au-monthly-source-chip','CIN7 (loading…)', 'gray', `Fetching live CIN7 sales for ${month}`);
+  }
   try {
     const resp = await fetch(`/api/au/sales?month=${encodeURIComponent(month)}`, { credentials: 'include' });
     if (!resp.ok) {
@@ -6297,14 +6367,18 @@ async function loadLiveAuSales(month) {
       renderAuMonthlySkuTable();
     }
 
-    _auChipFromResp('au-sales-source-chip',   data, 'CIN7 live');
-    _auChipFromResp('au-monthly-source-chip', data, 'CIN7 live');
+    if (updateChips()) {
+      _auChipFromResp('au-sales-source-chip',   data, 'CIN7 live');
+      _auChipFromResp('au-monthly-source-chip', data, 'CIN7 live');
+    }
   } catch (e) {
     console.warn(`AU live sales fetch failed for ${month} — keeping static rows:`, e?.message || e);
-    _auSetChip('au-sales-source-chip',   'CIN7 fallback (static)', 'gray',
-      `Live fetch failed (${e?.message || e}). Showing static April snapshot for CIN7 channels.`);
-    _auSetChip('au-monthly-source-chip', 'CIN7 fallback (static)', 'gray',
-      `Live fetch failed (${e?.message || e}). Showing static April snapshot for CIN7 columns.`);
+    if (updateChips()) {
+      _auSetChip('au-sales-source-chip',   'CIN7 fallback (static)', 'gray',
+        `Live fetch failed (${e?.message || e}). Showing static April snapshot for CIN7 channels.`);
+      _auSetChip('au-monthly-source-chip', 'CIN7 fallback (static)', 'gray',
+        `Live fetch failed (${e?.message || e}). Showing static April snapshot for CIN7 columns.`);
+    }
   }
 }
 
@@ -6703,12 +6777,39 @@ function summarizeAuPoItems(lines) {
   return shown + more;
 }
 
+// Format a CIN7 ISO date (e.g. "2026-05-30T00:00:00Z") for the ETD column.
+// Returns { html, sortKey } so the table cell can be coloured + sorted.
+// Tinted red if past due (negative days), amber if within 7 days, neutral
+// otherwise. Returns blank if the PO has no expected_date set.
+function _auFormatEtd(iso) {
+  if (!iso) return { html: '<span style="color:var(--text-light);">—</span>', sortKey: 99999 };
+  const d = new Date(iso);
+  if (isNaN(d)) return { html: '<span style="color:var(--text-light);">—</span>', sortKey: 99999 };
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const dUtc = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const days = Math.round((dUtc - today) / (1000 * 60 * 60 * 24));
+  const dateLabel = d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' });
+  let colour = 'var(--text)';
+  let suffix = '';
+  if (days < 0) {
+    colour = '#A32D2D';
+    suffix = ` <span style="font-size:11px;color:${colour};">${Math.abs(days)}d late</span>`;
+  } else if (days <= 7) {
+    colour = '#B57500';
+    suffix = ` <span style="font-size:11px;color:${colour};">in ${days}d</span>`;
+  } else {
+    suffix = ` <span style="font-size:11px;color:var(--text-secondary);">in ${days}d</span>`;
+  }
+  return { html: `<span style="color:${colour};">${dateLabel}</span>${suffix}`, sortKey: days };
+}
+
 function renderAuPoTable() {
   const tb = document.getElementById('au-po-tbody');
   const tf = document.getElementById('au-po-tfoot');
   if (!tb) return;
   if (AU_POS.length === 0) {
-    tb.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-secondary);">No purchase orders loaded.</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">No purchase orders loaded.</td></tr>`;
     if (tf) tf.innerHTML = '';
     return;
   }
@@ -6718,12 +6819,22 @@ function renderAuPoTable() {
     return true;
   });
   if (filtered.length === 0) {
-    tb.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-secondary);">No POs match the current filters.</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">No POs match the current filters.</td></tr>`;
     if (tf) tf.innerHTML = '';
     return;
   }
-  tb.innerHTML = filtered.map(p => {
+  // Sort by ETD ascending (most-overdue first, then nearest, then no-date at
+  // the bottom). Filtered already preserves the original order otherwise.
+  // Falls back to the existing PO-ref sort when ETD is missing.
+  const sorted = filtered.slice().sort((a, b) => {
+    const aKey = _auFormatEtd(a.expected_date).sortKey;
+    const bKey = _auFormatEtd(b.expected_date).sortKey;
+    if (aKey !== bKey) return aKey - bKey;
+    return (b.po || '').localeCompare(a.po || ''); // tiebreaker — newest PO# first
+  });
+  tb.innerHTML = sorted.map(p => {
     const linesText = (p.lines || []).map(l => `${l.code}  ×  ${Math.round(l.qty).toLocaleString('en-AU')}`).join('\n');
+    const etd = _auFormatEtd(p.expected_date);
     return `<tr title="${linesText.replace(/"/g, '&quot;')}">
       <td><strong>${p.po}</strong></td>
       <td>
@@ -6733,6 +6844,7 @@ function renderAuPoTable() {
       <td>${AU_PO_TYPE_BADGE[p.type] || ''}</td>
       <td>${summarizeAuPoItems(p.lines)}</td>
       <td class="num"><strong>${fmtAuNum(p.total_units)}</strong></td>
+      <td>${etd.html}</td>
     </tr>`;
   }).join('');
   if (tf) {
@@ -6741,6 +6853,7 @@ function renderAuPoTable() {
     tf.innerHTML = `<tr style="background:#FFF5F7;font-weight:700;border-top:2px solid var(--border);">
       <td colspan="4" style="padding:12px;">TOTAL — ${filtered.length} POs${filterLabel}</td>
       <td class="num" style="padding:12px;">${fmtAuNum(tot)}</td>
+      <td></td>
     </tr>`;
   }
 }

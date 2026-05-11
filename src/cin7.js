@@ -704,13 +704,17 @@ function classifyPoLineCode(code) {
   return 'other';
 }
 
-// Pull all open Purchase Orders. CIN7 Omni's `/PurchaseOrders` uses the same
-// pagination pattern as everything else. We filter for OPEN status server-side
-// to keep the payload small — the dashboard only ever cares about open POs.
-// Field set captures the date + status fields the manual CSV export was
-// missing (createdDate, deliveryDate, status), unlocking days-until-arrival
-// + late-PO detection downstream.
-async function fetchOpenPurchaseOrders(env) {
+// Pull all Purchase Orders + filter to "open" client-side. Originally tried
+// a server-side `where Status<>'FULLY RECEIVED' AND Status<>'VOIDED'` filter
+// in v2.35 but that returned the full PO history (136 rows vs the static
+// CSV's 26) — root cause was twofold: (a) CIN7 Omni's actual PO `Status`
+// values are `Draft` / `Approved` / `Completed` / `Voided` (capitalised, not
+// all-caps as the v2.35 filter assumed), and (b) the `<>` SQL operator may
+// not be supported by Omni's `where` clause syntax. Filtering client-side
+// is more robust — we know exactly what statuses to drop, and the per-page
+// payload is the same size whether we pre-filter or not (200ish total POs
+// fits in 1 page at PAGE_SIZE=250).
+async function fetchAllPurchaseOrders(env) {
   const fields = [
     'id', 'reference', 'createdDate', 'deliveryDate', 'invoiceDate',
     'status', 'completedDate',
@@ -719,13 +723,19 @@ async function fetchOpenPurchaseOrders(env) {
     'total', 'subTotal',
     'lineItems',
   ].join(',');
-  // CIN7 status values for POs include DRAFT, APPROVED, AWAITING, FULLY
-  // RECEIVED, etc. "Open" in our sense = not fully received and not
-  // cancelled/voided. The simplest filter is to exclude FULLY RECEIVED +
-  // VOIDED + CANCELLED — using a positive include list would require knowing
-  // every status name. Belt-and-braces: also drop completedDate-set rows.
-  const where = `Status<>'FULLY RECEIVED' AND Status<>'VOIDED' AND Status<>'CANCELLED'`;
-  return cin7FetchAll(env, 'PurchaseOrders', { fields, where });
+  return cin7FetchAll(env, 'PurchaseOrders', { fields });
+}
+
+// Open = status not in {Completed, Voided, Cancelled} AND no completedDate
+// set. Case-insensitive — belt-and-braces against CIN7 capitalising things
+// differently across endpoints. If a new closed-status value appears later
+// (e.g. "Returned"), add it here.
+const CLOSED_PO_STATUSES = new Set(['completed', 'voided', 'cancelled', 'closed']);
+function isOpenPo(po) {
+  if (po?.completedDate) return false;
+  const s = String(po?.status || '').trim().toLowerCase();
+  if (!s) return true; // no status set → assume open (better to over-include than miss)
+  return !CLOSED_PO_STATUSES.has(s);
 }
 
 // Build the same `pos[]` shape the static au-data.js has, plus the new
@@ -955,9 +965,11 @@ async function buildAuPosPayload(env) {
     }
   }
 
-  // 3. Open POs from CIN7
-  const rawPos = await fetchOpenPurchaseOrders(env);
-  const pos = shapePoRows(rawPos);
+  // 3. POs from CIN7 — fetch ALL, filter to "open" client-side. Server-side
+  //    where-clause was unreliable (see fetchAllPurchaseOrders comment).
+  const rawPos = await fetchAllPurchaseOrders(env);
+  const openPos = rawPos.filter(isOpenPo);
+  const pos = shapePoRows(openPos);
 
   // 4. Derive incoming-by-SKU
   const incomingBySku = buildIncomingBySku(inventory, pos, monthPayloads);
