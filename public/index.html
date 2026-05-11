@@ -1919,9 +1919,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.1</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.2</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.2 &mdash; 11 May 2026 (CIN7 attribution diagnostic)</h4>
+    <ul>
+      <li><strong>Diagnostic endpoint added: <code>GET /api/au/sales/debug?month=YYYY-MM</code>.</strong> Dumps a sample of raw CIN7 SalesOrders + frequency tables of unique <code>channel</code> / <code>posRegister</code> / <code>company</code> / <code>status</code> values for the named month. Reveals where customer info actually lives in CIN7 Omni's <code>/SalesOrders</code> response so the attribution rules can be tuned to real data instead of the assumed shape.</li>
+      <li><strong>Why this exists:</strong> v2.35.1 returned only 6 attributed orders out of 10,425 fetched for April 2026 (expected ~36 per the static snapshot). All 6 were Coles, with Woolworths / Distributors / Refunds at zero. Fix follows in v2.2.3 once we see what fields CIN7 actually populates on EDI + refund orders.</li>
+      <li>No frontend changes; no production-path changes. Diagnostic-only.</li>
+    </ul>
     <h4>v2.2.1 &mdash; 11 May 2026 (Phase 2b hot-fix)</h4>
     <ul>
       <li><strong>Open POs now correctly filtered to ~26 rows</strong> instead of 136 (full history). Filter moved client-side; CIN7's actual status values are <em>Completed</em> / <em>Voided</em>, not all-caps as v2.35 assumed.</li>
