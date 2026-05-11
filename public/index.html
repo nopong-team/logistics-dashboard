@@ -1919,9 +1919,21 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.3</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.4</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.4 &mdash; 11 May 2026 (CIN7 line-item double-counting fix)</h4>
+    <ul>
+      <li><strong>Two compounding line-item bugs fixed.</strong> v2.35.3 attribution worked perfectly for Coles + Woolies (78,336 / 73,728 tins — exact static match), but distributors came back at <strong>330,913 tins / 302 orders</strong> vs static's 1,648 tins / 2 orders (200&times; over-count). Tracking the inflation back to the line-item loop revealed two CIN7 quirks the original code didn't handle:
+        <ul>
+          <li><strong>Alt UOM lines (WC- wholesale cartons).</strong> When a line has <code>uomSize &gt; 1</code> (e.g. <code>WC-AU-OG-NPO-35</code> with <code>uomSize: 54</code>), CIN7 reports <code>qty</code> already in BASE units (tins), not in alt-UOM units (cartons). The original code applied <code>normalizeAuSku</code>'s &times;54 multiplier on top, 54&times;-over-counting every wholesale carton line. Fix: <code>tins = uomSize &gt; 1 ? qty : qty * mult</code>.</li>
+          <li><strong>Bundled product children.</strong> When CIN7 sells a bundled product like <code>AU-CTN-SRT-MIX-72-V3</code> ("6-pack of trays"), it generates a parent line for the bundle PLUS auto-generated child lines for each constituent SKU. Children have <code>parentId</code> pointing at the parent. The original code summed both, double-counting tins. Fix: skip child lines (<code>parentId &gt; 0</code>) — the parent's multiplier already represents the children's tin volume.</li>
+        </ul>
+        Both bugs only affected wholesale orders with carton/Alt-UOM patterns (Priceline / Live Wise / etc.) — which is why Coles + Woolies EDI orders (which use standalone <code>AU-CTN-...-48</code> SKUs) matched static exactly even before the fix.
+      </li>
+      <li><strong>Verified arithmetic.</strong> Reproduced the Priceline order from the v2.35.2 diagnostic dump as a synthetic test: parent <code>AU-CTN-SRT-MIX-72-V3</code> (qty 1 &rarr; 72 tins) + 2 wholesale cartons (54 tins each) + 12 child lines (skipped) = 180 tins. Matches manual calculation. Woolies subset (3 carton SKUs at qty 240/144/96 with uomSize=1) = 23,040 tins, also matches.</li>
+      <li><strong>Distributor count will still be higher than static</strong> (~50&ndash;100 orders / ~10&ndash;30k tins instead of 2 orders / 1,648 tins). That gap is the broader attribution rule from v2.35.3 surfacing wholesale orders the static "Backend channel only" filter missed &mdash; no longer the line-item bug.</li>
+    </ul>
     <h4>v2.2.3 &mdash; 11 May 2026 (CIN7 attribution rewritten for real Omni v1 shape)</h4>
     <ul>
       <li><strong>Sales attribution rewritten.</strong> v2.35 / v2.35.1 attributed only 6 orders out of 10,425 because the original rules from <code>build_data.py:attribute_cin7()</code> assumed CIN7 Omni's <code>/SalesOrders</code> would expose <code>channel</code> + <code>posRegister</code> fields like the static pivot CSV does. The v2.35.2 diagnostic confirmed those fields are <strong>empty for every order</strong> on the live API. Attribution now inspects the <code>company</code> field (which holds the shipping-address company name) with substring matching against known retailer / parent-co / DC name patterns:
