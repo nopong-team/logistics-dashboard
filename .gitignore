@@ -43,3 +43,11 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# -----------------------------------------------------------------------------
+# Local-machine recovery tool. Created by `Unlock Git.command` (project root)
+# the first time Melanie runs it; cleans up stale .git/*.lock files left
+# behind by the Cowork sandbox. NOT project code — local-only, per-machine.
+# Full context: Melanie's Context/memory/sandbox_git_lock_avoidance.md.
+# -----------------------------------------------------------------------------
+Unlock Git.command

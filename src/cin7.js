@@ -92,7 +92,12 @@ const POS_TTL_SECONDS       = 15 * 60;
 // ─── CIN7 Omni client ──────────────────────────────────────────────────────
 
 const CIN7_BASE = 'https://api.cin7.com/api/v1';
-const PAGE_SIZE = 250;
+// Re-exported for src/cin7-sync.js (v2.36 Phase A) so the cron sync uses the
+// same page-size + base-URL constants as the on-demand fetch helpers below.
+// Exporting the constants rather than re-declaring keeps them DRY.
+export const CIN7_PAGE_SIZE = 250;
+export const CIN7_API_BASE  = CIN7_BASE;
+const PAGE_SIZE = CIN7_PAGE_SIZE;
 const MAX_PAGES = 200; // 50k records — soft cap
 
 // CIN7 Omni rate limits: 3 calls/sec, 60 calls/min, 5000 calls/day.
@@ -128,7 +133,9 @@ function cin7Configured(env) {
 // fatal — no point retrying a bad request or a server-side bug. We also
 // retry once on a connection-level fetch() throw, since Workers→CIN7 is over
 // the public internet and a transient blip shouldn't fail the whole build.
-async function cin7Fetch(env, endpoint, params = {}) {
+// Exported for src/cin7-sync.js so the cron sync reuses the same retry/429-
+// backoff path as on-demand fetches. Behaviour is unchanged.
+export async function cin7Fetch(env, endpoint, params = {}) {
   const auth = cin7AuthHeader(env);
   if (!auth) {
     throw new Error(
@@ -192,7 +199,9 @@ async function cin7FetchAll(env, endpoint, params = {}) {
 // Returns [base_sku, multiplier_in_tins]. Pass-through for unknown patterns.
 // Keep in sync with AU Dashboard/scripts/build_data.py:normalize_sku() — both
 // implementations need the same rules or live and static numbers won't match.
-function normalizeAuSku(sku) {
+// Exported for src/cin7-sync.js (v2.36 Phase A) so write-time derivation of
+// base_sku + multiplier uses the same rules as the on-demand read path.
+export function normalizeAuSku(sku) {
   const s = (sku || '').trim();
   if (!s) return [null, 1];
   // Wholesale carton (Woo): WC-AU-...-(NL|WC|nothing) = ×54
@@ -226,7 +235,9 @@ function normalizeAuSku(sku) {
 // treated like empty-code "Amount" lines: revenue counts, tins/sku_lines
 // don't. Keep this regex strict — adding a new prefix here is a deliberate
 // product-rule change, not an accidental relax.
-function isAuSkuCode(code) {
+// Exported for src/cin7-sync.js (v2.36 Phase A) — same pattern for write-time
+// `is_au_sku` flag on credit-note items as the on-demand read-side gating.
+export function isAuSkuCode(code) {
   return /^(?:WC-|D-)?AU-/i.test(String(code || '').trim());
 }
 
@@ -495,7 +506,10 @@ const _COLES_DC_NAMES = new Set([
   'kemps creek',           // Coles DC at Kemps Creek NSW
 ]);
 
-function attributeCin7Order(order) {
+// Exported for src/cin7-sync.js (v2.36 Phase A) — caches channel_attr on
+// `cin7_sales_orders` at write time so read-side aggregates are simple
+// GROUP BY queries without per-row attribution logic.
+export function attributeCin7Order(order) {
   // Defensive: even though the diagnostic showed channel always empty,
   // accept it if some account does populate it (e.g. Cloud refunds in
   // future Omni versions).
