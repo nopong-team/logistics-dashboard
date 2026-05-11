@@ -435,30 +435,86 @@ async function buildAuInventoryPayload(env) {
 
 // ─── Sales orders (Phase 2b) ───────────────────────────────────────────────
 //
-// CIN7 channel attribution per AU Dashboard/au-sku-rules.md. Mirrors
-// scripts/build_data.py:attribute_cin7() rule-for-rule. Returns one of:
-//   'col'    — Coles (EDI no-channel, OR Backend+Coles non-EDI)
-//   'woo2'   — Woolworths (EDI no-channel)
-//   'dist'   — Distributors (Backend, non-Coles)
-//   'refund' — Cloud channel (negative qty, returns/credits)
-//   null     — exclude (Stock Adjustments, unknown shapes)
+// CIN7 sales-order attribution. Returns one of:
+//   'col'    — Coles (EDI direct OR via Coles parent co/DC)
+//   'woo2'   — Woolworths (EDI direct OR via Woolworths warehouse)
+//   'dist'   — Distributors / wholesale (real-business orders not Coles/Woolies)
+//   'refund' — Cloud channel (defensive — Omni v1 doesn't actually populate
+//              this field; real refunds live in /CreditNotes which this PR
+//              doesn't fetch yet)
+//   null     — exclude (Stock Adjustments, VOID, Amazon mirror, Woo retail
+//              mirror, personal/single-name orders)
 //
-// CIN7 doesn't have a single "channel" field everywhere — depending on
-// endpoint, the value lives under `channel`, `posRegister`, or both.
-// We accept either; the static side uses the same field.
+// Key learning from v2.35.2 diagnostic dump (2026-05-11): on Omni v1's
+// /SalesOrders endpoint, `channel` and `posRegister` are EMPTY for ALL
+// orders. The static side's "Channel = 'Backend' / 'Cloud'" attribution
+// rules from build_data.py:attribute_cin7() can't replicate against the
+// API. Instead, attribution has to inspect the `company` field, which
+// holds the SHIPPING ADDRESS company name:
+//
+//   "WOOLWORTHS - Moorebank - NDC"          → woo2 (Woolies warehouse)
+//   "Coles"                                 → col (rare — EDI direct)
+//   "Grocery Holdings Pty Ltd - RedBank"    → col (Coles parent co)
+//   "Grocery Holdings Pty Ltd - NDC SOMERTON" → col (Coles DC)
+//   "Kemps Creek"                           → col (known Coles DC name)
+//   "Amazon Seller No Pong Natural Products" → null (Amazon mirror)
+//   "Amazon FBA"                            → null (Amazon FBA replenishment)
+//   "Stock Adjustments"                     → null
+//   "" / "[Redacted]"                       → null (Woo retail mirror)
+//   "Mr" / "Mrs" / "Ms" / "Private"         → null (personal orders)
+//   anything else with a real company name  → 'dist' (wholesale)
+//
+// VOID-status orders are filtered upstream (in buildAuSalesPayload) so they
+// never reach this function.
+const _COLES_PERSONAL_MARKERS = new Set(['mr', 'mrs', 'ms', 'private']);
+const _COLES_DC_NAMES = new Set([
+  'kemps creek',           // Coles DC at Kemps Creek NSW
+]);
+
+function attributeCin7Order(order) {
+  // Defensive: even though the diagnostic showed channel always empty,
+  // accept it if some account does populate it (e.g. Cloud refunds in
+  // future Omni versions).
+  const channel = String(order?.channel || '').trim();
+  if (channel === 'Cloud') return 'refund';
+
+  const company = String(order?.company   || '').trim();
+  const first   = String(order?.firstName || '').trim();
+  const cl      = company.toLowerCase();
+
+  // Stock Adjustments — inventory movements, not sales
+  if (company === 'Stock Adjustments' || first === 'Stock Adjustments') return null;
+
+  // Coles / Woolies pattern matching
+  if (cl.includes('woolworths'))        return 'woo2';
+  if (cl === 'coles')                   return 'col';
+  if (cl.includes('grocery holdings'))  return 'col';   // Coles parent co
+  if (_COLES_DC_NAMES.has(cl))          return 'col';
+
+  // Amazon mirror — CIN7 mirrors Amazon orders for fulfilment. They're
+  // counted on the Amazon channel via SP-API in Phase 3, not here.
+  if (cl.startsWith('amazon')) return null;
+
+  // No company OR redacted personal customer → likely Woo retail mirror.
+  // Don't count as CIN7-sourced sales (Phase 3 wires Woo direct).
+  if (!company || company === '[Redacted]') return null;
+
+  // Personal-name single tokens → individual retail orders
+  if (_COLES_PERSONAL_MARKERS.has(cl)) return null;
+
+  // Anything else with a real company name → distributor / wholesale.
+  // This is broader than the static side's "Backend channel only" filter
+  // (the API doesn't expose channel) — it'll over-count distributors vs
+  // static for months that have small wholesale orders, which is more
+  // honest than the static under-reporting them.
+  return 'dist';
+}
+
+// Backwards-compat shim — old attributeCin7Channel signature is no longer
+// used by buildAuSalesPayload but kept for any external callers (none in
+// the current codebase). New code should call attributeCin7Order(order).
 function attributeCin7Channel(channelRaw, customerRaw) {
-  const ch = String(channelRaw || '').trim();
-  const cu = String(customerRaw || '').trim();
-  if (cu === 'Stock Adjustments') return null;
-  if (ch === 'Cloud') return 'refund';
-  if (ch === 'Backend') {
-    if (cu === 'Coles') return 'col';
-    return 'dist';
-  }
-  // No channel value → EDI lane
-  if (cu === 'Coles')      return 'col';
-  if (cu === 'Woolworths') return 'woo2';
-  return null;
+  return attributeCin7Order({ channel: channelRaw, company: customerRaw });
 }
 
 // Pull SalesOrders for a single calendar month. CIN7 Omni's `/SalesOrders`
@@ -519,7 +575,16 @@ function customerLabelFromOrder(order) {
 // and the per-SKU rows only have col/woo2/dist columns populated for the
 // same reason. Frontend merges with static woo/amz on the per-channel side.
 async function buildAuSalesPayload(env, month) {
-  const orders = await fetchSalesOrdersForMonth(env, month);
+  const allOrders = await fetchSalesOrdersForMonth(env, month);
+
+  // Drop VOID/CANCELLED orders before attribution — they're not sales.
+  // CIN7 Omni v1 status values seen in the wild: APPROVED, VOID. Match
+  // case-insensitively + future-proof against VOIDED/CANCELLED variants.
+  const orders = allOrders.filter((o) => {
+    const s = String(o?.status || '').trim().toUpperCase();
+    return s !== 'VOID' && s !== 'VOIDED' && s !== 'CANCELLED';
+  });
+  const voidsDropped = allOrders.length - orders.length;
 
   // Per-channel aggregates
   const channels = {
@@ -536,11 +601,8 @@ async function buildAuSalesPayload(env, month) {
   const skuRollup = new Map();
 
   for (const order of orders) {
-    const channelAttr = attributeCin7Channel(
-      order.channel || order.posRegister,
-      customerLabelFromOrder(order),
-    );
-    if (channelAttr === null) continue; // Stock Adjustments, unknown — skip
+    const channelAttr = attributeCin7Order(order);
+    if (channelAttr === null) continue; // Stock Adjustments, mirror, retail — skip
 
     const orderRef = String(order.reference || order.id || '');
     const lineItems = Array.isArray(order.lineItems) ? order.lineItems : [];
@@ -630,7 +692,9 @@ async function buildAuSalesPayload(env, month) {
     lastSync: new Date().toISOString(),
     source:   'cin7-live',
     counts: {
-      orders: orders.length,
+      ordersFetched:  allOrders.length,
+      voidsDropped:   voidsDropped,
+      ordersConsidered: orders.length,
       attributedRefs: Object.values(channels).reduce((a, c) => a + c.orderRefs.size, 0)
                     + refunds.orderRefs.size,
       skuRows: skuSales.length,
@@ -638,6 +702,12 @@ async function buildAuSalesPayload(env, month) {
     // NOTE: woo + amz channels intentionally absent. They live on the Woo
     // and Amazon channel APIs (Phase 3). Frontend merges this with static
     // window.AU_DATA.salesByMonth[month] for those two channels.
+    //
+    // NOTE 2: refunds are EMPTY in v2.35.3 because CIN7 Omni v1's
+    // /SalesOrders endpoint doesn't include credit notes / refunds — those
+    // live on /CreditNotes (separate endpoint, separate fetch). The static
+    // side combined both via the pivot report; the API splits them. Refund
+    // attribution lands in a follow-up that adds /CreditNotes fetching.
   };
 }
 

@@ -1919,9 +1919,27 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.2</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.3</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.3 &mdash; 11 May 2026 (CIN7 attribution rewritten for real Omni v1 shape)</h4>
+    <ul>
+      <li><strong>Sales attribution rewritten.</strong> v2.35 / v2.35.1 attributed only 6 orders out of 10,425 because the original rules from <code>build_data.py:attribute_cin7()</code> assumed CIN7 Omni's <code>/SalesOrders</code> would expose <code>channel</code> + <code>posRegister</code> fields like the static pivot CSV does. The v2.35.2 diagnostic confirmed those fields are <strong>empty for every order</strong> on the live API. Attribution now inspects the <code>company</code> field (which holds the shipping-address company name) with substring matching against known retailer / parent-co / DC name patterns:
+        <ul>
+          <li>Substring <em>"woolworths"</em> &rarr; Woolworths (catches <code>"WOOLWORTHS - Moorebank - NDC"</code> and any other Woolies warehouse name)</li>
+          <li>Exact <em>"Coles"</em> OR substring <em>"grocery holdings"</em> (Coles parent company) OR known DC names like <em>"Kemps Creek"</em> &rarr; Coles</li>
+          <li>Substring <em>"amazon"</em> &rarr; null (Amazon SP-API mirror &mdash; Phase 3)</li>
+          <li>Empty company OR <em>"[Redacted]"</em> &rarr; null (likely Woo retail mirror &mdash; Phase 3)</li>
+          <li>Personal markers (<em>Mr / Mrs / Ms / Private</em>) &rarr; null (individual retail orders)</li>
+          <li>Anything else with a real company name &rarr; Distributors (broader than the static "Backend channel only" filter, but more honest &mdash; static was under-counting wholesale)</li>
+        </ul>
+      </li>
+      <li><strong>VOID-status orders are now filtered out before attribution.</strong> v2.35 was counting them as sales, including a duplicate of one of the big Woolworths orders. April 2026 had 16 VOID orders out of 10,425.</li>
+      <li><strong>Counts breakdown surfaced in the response.</strong> The <code>counts</code> field now reports <code>ordersFetched</code>, <code>voidsDropped</code>, <code>ordersConsidered</code>, <code>attributedRefs</code>, <code>skuRows</code> &mdash; so the diagnostic story is in the response itself, not just on the debug endpoint.</li>
+      <li><strong>Refunds still empty &mdash; known limitation.</strong> CIN7 Omni v1's <code>/SalesOrders</code> doesn't include credit notes / refunds. Real refunds live on <code>/CreditNotes</code> (separate endpoint). The static side combined both via the pivot report; the API splits them. <code>/CreditNotes</code> fetching lands in a follow-up &mdash; until then, the refunds row on Sales by Channel will show zero for live months (and the static April refund snapshot continues to render for April).</li>
+      <li><strong>Distributors over-count vs static is intentional.</strong> Static April had only 2 distributor orders ($7k) because it filtered to CIN7 pivot rows with <code>Channel = 'Backend'</code>. The API doesn't expose that field, so we identify dist as "any non-Coles, non-Woolies, non-Amazon, non-personal company name". This will surface more wholesale activity than static (Priceline, Live Wise Health Store, etc.) &mdash; flag for review if the inflation is misleading.</li>
+      <li><strong>27/27 unit tests pass</strong> on the new <code>attributeCin7Order()</code> covering all the company-name patterns observed in the v2.35.2 diagnostic dump (Coles + Coles DCs + Woolies warehouses + Amazon mirrors + Stock Adjustments + personal markers + distributor businesses).</li>
+    </ul>
     <h4>v2.2.2 &mdash; 11 May 2026 (CIN7 attribution diagnostic)</h4>
     <ul>
       <li><strong>Diagnostic endpoint added: <code>GET /api/au/sales/debug?month=YYYY-MM</code>.</strong> Dumps a sample of raw CIN7 SalesOrders + frequency tables of unique <code>channel</code> / <code>posRegister</code> / <code>company</code> / <code>status</code> values for the named month. Reveals where customer info actually lives in CIN7 Omni's <code>/SalesOrders</code> response so the attribution rules can be tuned to real data instead of the assumed shape.</li>
