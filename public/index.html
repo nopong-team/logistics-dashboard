@@ -1342,8 +1342,19 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.34.2</span> &middot; May 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.35</span> &middot; May 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.35 &mdash; 11 May 2026 (AU Phase 2b: live CIN7 sales / refunds / purchase orders)</h4>
+    <ul>
+      <li><strong>Sales by Channel + Monthly SKU + Refunds + POs all read live from CIN7.</strong> The static <code>au-data.js</code> snapshot was the only source for those four views as of v2.34.2. v2.35 adds three new endpoints &mdash; <code>GET /api/au/sales?month=YYYY-MM</code>, <code>GET /api/au/pos</code> &mdash; and the AU dashboard merges the live CIN7-channel data over the static snapshot. Woo + Amazon channel data stays static (they're source-of-truth on their own APIs &mdash; Phase 3 wires those).</li>
+      <li><strong>One CIN7 fetch per month services three views.</strong> <code>/api/au/sales</code> pulls one paginated <code>/SalesOrders</code> filtered by <code>CreatedDate</code> for the named month, then derives channel totals (Coles / Woolies / Distributors), refunds (Cloud channel), and a per-base-SKU rollup &mdash; all from the same data so the three views can't disagree. Channel attribution mirrors <code>scripts/build_data.py:attribute_cin7()</code>: <em>Backend + Coles</em> &rarr; Coles non-EDI, <em>Backend + other</em> &rarr; Distributors, <em>(no channel) + Coles/Woolies</em> &rarr; EDI lane, <em>Cloud</em> &rarr; refunds, <em>Stock Adjustments</em> excluded.</li>
+      <li><strong>POs gain real date + status fields.</strong> The manual CSV export the static side relied on was missing <code>createdDate</code>, <code>deliveryDate</code>, and <code>status</code>. The live <code>/api/au/pos</code> endpoint pulls them straight from CIN7's <code>/PurchaseOrders</code> with a server-side filter for non-final statuses (excludes <em>FULLY RECEIVED</em>, <em>VOIDED</em>, <em>CANCELLED</em>). The fields are populated on every PO row in the response &mdash; the days-until-arrival + late-PO column wiring is a small follow-up.</li>
+      <li><strong>Run rate for &ldquo;Incoming stock by SKU&rdquo; is now a trailing 3-complete-month average (CA-style).</strong> Static was hardcoded to <em>April 2026 &divide; 30 days</em>. Live computes <em>(tins across the last 3 complete months) &divide; (total days)</em> &mdash; smoother and less anchored to one month's EDI cadence. Computed inside <code>/api/au/pos</code> by reading the per-month sales from KV (<code>au:sales:YYYY-MM:v1</code>) when warm and fetching them otherwise. <strong>Caveat surfaced in the column tooltip:</strong> the live run-rate is CIN7-channels only (no Woo, no Amazon) until Phase 3, so it under-counts demand for SKUs that sell heavily on Woo or FBA. The chip on the table reads <em>CIN7 live (3-month avg)</em> with the actual months in the tooltip.</li>
+      <li><strong>Per-tab source chips.</strong> Sales by Channel, Monthly SKU Sales, Purchase Orders, and the Incoming-by-SKU table each get their own chip (<em>CIN7 live</em> / <em>CIN7 live (cached)</em> / <em>CIN7 cached (upstream error)</em> / <em>CIN7 fallback (static)</em>). Per-row source labels on the Sales by Channel table flip per channel: Coles / Woolies / Distributors / Refunds switch to <em>CIN7 live</em> for months that have been swapped in; Woo + Amazon stay <em>static (Phase 3)</em>. Failed live fetch keeps the static rows visible behind a <em>fallback</em> chip &mdash; same graceful-degradation pattern as v2.34's inventory loader.</li>
+      <li><strong>KV cache scheme.</strong> <code>au:sales:YYYY-MM:v1</code> per month, <code>au:pos:v1</code>, both 15-min TTL with stale-fallback on upstream error. <code>?refresh=1</code> bypasses cache on either endpoint. Cache key is versioned so a payload-shape bump invalidates cleanly.</li>
+      <li><strong>Subrequest budget &amp; rate-limit hygiene.</strong> Cold-cache <code>/api/au/pos</code> is the heaviest path: inventory + 3&times; sales + POs &asymp; 24 CIN7 subrequests, well within the 50/req limit. Every CIN7 call is serialised &mdash; never <code>Promise.all</code>'d &mdash; per the v2.34.1 lesson on the 3/sec cap. Pagination uses the existing <code>cin7FetchAll</code> helper (400ms inter-page pacing); 429s back off on the existing 1s/2s/4s schedule in <code>cin7Fetch</code>.</li>
+      <li><strong>Per-SKU revenue merge.</strong> Live revenue is the CIN7-channel revenue (Coles + Woolies + Distributors). The Woo + Amazon share is approximated by pro-rating the static row's all-channels revenue: <em>static_revenue &times; (static_woo+amz tins) &divide; (static_total_tins)</em>. Honest under the assumption that AOV per tin is roughly similar across channels; will be replaced by real per-channel revenue when Phase 3 lands.</li>
+    </ul>
     <h4>v2.34.2 &mdash; 10 May 2026 (AU Inventory: FBA branch-name fix + warehouse vs FBA split)</h4>
     <ul>
       <li><strong>FBA branch-name match was broken silently.</strong> v2.34's <code>fetchStockBySku</code> matched the FBA branch with strict equality against <code>'amazonfba'</code> (no space). CIN7's actual branch name is <code>"Amazon FBA"</code> (with a space) &mdash; confirmed from the CIN7 UI &mdash; so the equality always failed, leaving <code>fba_cin7: 0</code> for every SKU. Spot-checks: <code>AU-OG-NPO-35</code> should report 484 at FBA, <code>AU-CL-BCF-35</code> 152, <code>AU-FF-VLB-35</code> 309, all of which were reading 0. Switched to a whitespace-insensitive case-insensitive substring (<code>/amazon\s*fba/i</code>) so we tolerate <em>Amazon FBA</em>, <em>AmazonFBA</em>, <em>Amazon-FBA</em>, and any future region-tagged variants like <em>Amazon FBA AU</em>.</li>
@@ -1712,6 +1723,7 @@
     <div class="table-card">
       <div class="table-card-header">
         <div class="table-card-title">Selected month breakdown — <span id="au-sales-table-month">May 2026</span></div>
+        <span id="au-sales-source-chip" class="source-chip" style="display:none;" title="Source of CIN7-driven channels (Coles / Woolies / Distributors / Refunds)"></span>
         <button class="btn-csv" onclick="downloadAuSalesCSV()">Export CSV</button>
       </div>
       <div class="table-scroll"><table>
@@ -1742,6 +1754,7 @@
     <div class="table-card">
       <div class="table-card-header">
         <div class="table-card-title">Units sold by SKU — <span id="au-monthly-month">May 2026</span></div>
+        <span id="au-monthly-source-chip" class="source-chip" style="display:none;" title="Source of CIN7-driven columns (Coles / Woolies / Distributors)"></span>
         <button class="btn-csv" onclick="downloadAuMonthlyCSV()">Export CSV</button>
       </div>
       <div class="table-scroll"><table>
@@ -1812,7 +1825,7 @@
       <em>Packaging</em> (boxes / outer cartons / envelopes — <code>P-…</code>),
       and <em>Other</em>.
       <br><br>
-      <strong>Limitation:</strong> the current export doesn't include created-date, expected-date, or status fields. That means no late-PO detection, no on-order timeline, no "due this week" flag. Adding those fields to the next CIN7 export will unlock those views — meanwhile the table shows what's on order and from whom.
+      <strong>Live from CIN7 (v2.35).</strong> Phase 2b wires the <code>/PurchaseOrders</code> endpoint live, so created-date, expected-date, and status fields are now populated (the manual CSV export was missing those). Days-until-arrival and late-PO detection follow in the next polish pass — the data is here, just needs the column wiring on the table.
     </div>
 
     <div class="cards-grid cards-4" id="au-po-kpis"></div>
@@ -1820,6 +1833,7 @@
     <div class="table-card">
       <div class="table-card-header">
         <div class="table-card-title">Open purchase orders</div>
+        <span id="au-pos-source-chip" class="source-chip" style="display:none;" title="Source of the rows in this table"></span>
         <div style="display:flex;align-items:center;gap:10px;margin-left:auto;flex-wrap:wrap;">
           <label style="font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;">Type:</label>
           <select id="au-po-filter-type" class="month-picker" style="min-width:130px;">
@@ -1852,7 +1866,8 @@
     <div class="table-card">
       <div class="table-card-header">
         <div class="table-card-title">Incoming stock by SKU</div>
-        <div class="table-hint">Stock = base SKU SOH + carton tins (×48) · Run rate = April sales ÷ 30 days · Days left = stock ÷ run rate · Discontinued SKUs excluded</div>
+        <span id="au-incoming-source-chip" class="source-chip" style="display:none;" title="Source of the run-rate basis"></span>
+        <div class="table-hint">Stock = base SKU SOH + carton tins (×48) · Run rate = trailing 3 complete months ÷ days · Days left = stock ÷ run rate · Discontinued SKUs excluded · <em>Run rate is CIN7-channels only (Coles + Woolies + Distributors) until Phase 3 wires Woo + Amazon — under-counts demand for SKUs that sell heavily on Woo/FBA.</em></div>
         <button class="btn-csv" onclick="downloadAuIncomingCSV()">Export CSV</button>
       </div>
       <div class="table-scroll"><table>
@@ -1860,7 +1875,7 @@
           <tr>
             <th title="Base AU SKU. Cartons are rolled up to this base × 48 tins.">SKU ⓘ</th>
             <th class="num" title="Sellable tins on hand right now: base SKU SOH plus all cartons of this SKU rolled up at ×48 tins each.">Current stock ⓘ</th>
-            <th class="num" title="Average tins sold per day across all 5 channels (Woo + Amazon + Coles + Woolies + Distributors) in April 2026, divided by 30. Will sharpen with a trailing-30-day window once we have multi-month data.">Run rate (tins/day) ⓘ</th>
+            <th class="num" title="Average tins sold per day. Live (v2.35+): trailing 3 complete months from CIN7 — Coles + Woolies + Distributors only. Woo + Amazon volume not included until Phase 3 (under-counts demand for FBA-heavy SKUs). Static fallback: April 2026 ÷ 30 days, all 5 channels.">Run rate (tins/day) ⓘ</th>
             <th class="num" title="Days of stock remaining at the current run rate. Blank if no sales in the period.">Days left ⓘ</th>
             <th class="num" title="Total tins on order across all open POs for this SKU. Includes finished tins (AU-...) and any carton lines (AU-CTN-...×48). Excludes raw tins (T-AU-...) which need manufacturing first.">Incoming ⓘ</th>
             <th title="PO references where this SKU appears.">Next PO(s) ⓘ</th>
@@ -1895,9 +1910,19 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.1</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2 &mdash; 11 May 2026 (Phase 2b: live CIN7 sales / refunds / POs)</h4>
+    <ul>
+      <li><strong>Sales by Channel reads live from CIN7</strong> for Coles, Woolworths, Distributors, and Refunds. Woo + Amazon stay on the April static snapshot (Phase 3 wires those live). Per-channel source label flips to <em>CIN7 live</em> on rows that have been swapped in.</li>
+      <li><strong>Monthly SKU Sales merges live CIN7-channel columns</strong> over the static woo/amz columns. Total tins recomputes; revenue is approximated for the woo+amz portion until Phase 3.</li>
+      <li><strong>Refunds row uses the live CIN7 Cloud-channel data</strong> for the selected month.</li>
+      <li><strong>Purchase Orders tab pulls live from CIN7</strong> with the date + status fields the manual CSV export was missing. Days-until-arrival and late-PO column wiring is a small follow-up.</li>
+      <li><strong>Incoming stock by SKU run rate is now a trailing 3-month average</strong> (CA-style smoothing) instead of April&divide;30. Tooltip surfaces the months that fed the average + the CIN7-only-channels caveat.</li>
+      <li><strong>Per-tab source chips</strong> show <em>CIN7 live</em> / <em>cached</em> / <em>fallback (static)</em> on Sales, Monthly SKU, POs, and Incoming-by-SKU. Same graceful-degradation pattern as v2.1 inventory.</li>
+      <li><strong>Server-side</strong>: <code>src/cin7.js</code> gains <code>fetchSalesOrdersForMonth</code>, <code>fetchOpenPurchaseOrders</code>, <code>buildAuSalesPayload</code>, <code>buildAuPosPayload</code>, plus a KV-cached <code>getMonthSales</code> helper. Cache keys: <code>au:sales:YYYY-MM:v1</code> per month, <code>au:pos:v1</code>; both 15-min TTL with stale-fallback. All CIN7 calls serialised &mdash; never <code>Promise.all</code>'d &mdash; per the v2.1 rate-limit lesson.</li>
+    </ul>
     <h4>v2.1 &mdash; 10 May 2026</h4>
     <ul>
       <li>AU dashboard goes live with the prototype's full six-tab layout: Sales by Channel, Monthly SKU Sales, Inventory SKUs, Purchase Orders, Forecasting, Packaging.</li>
@@ -6003,6 +6028,14 @@ function switchAuTab(t) {
   if (t === 'au-sales' && typeof renderAuChart === 'function' && AU_HAS_REAL) renderAuChart();
 }
 
+// Tracks which months have had their CIN7 channels (col/woo2/dist + refunds)
+// swapped in from /api/au/sales. Used by the Sales table source-chip + the
+// per-row source labels so we know whether to show "CIN7 live" or "static
+// (April snapshot)" for the CIN7 channels. Woo + Amazon stay static
+// regardless until Phase 3.
+const AU_LIVE_SALES_MONTHS = new Set();
+let AU_LIVE_POS_LOADED = false;
+
 // ── AU data shape: window.AU_DATA from /au-data.js (built by AU Dashboard/scripts/build_data.py) ──
 const AU_CHANNELS = [
   { key: 'woo',  label: 'WooCommerce',  badge: 'woo',  cssVar: '--woo-chart'  },
@@ -6081,6 +6114,10 @@ function initAuDashboard() {
     sel.addEventListener('change', e => {
       AU_SELECTED_MONTH = e.target.value;
       renderAuAll();
+      // If we haven't yet loaded live sales for this month, fire it now.
+      // Idempotent — the loader checks AU_LIVE_SALES_MONTHS.
+      loadLiveAuSales(AU_SELECTED_MONTH).catch((err) =>
+        console.warn('AU sales live fetch (month change) threw:', err));
     });
   }
   // Wire chart toggle
@@ -6095,11 +6132,19 @@ function initAuDashboard() {
   populateAuPoFilters();
   renderAuAll();
 
-  // Phase 2: pull live CIN7 inventory and swap it in. Static rows render
-  // immediately above; this fetch updates AU_INVENTORY_DATA in the background
-  // and re-renders just the inventory tab. On error we keep the static rows
-  // and surface a "fallback" chip so it's visible something failed.
+  // Phase 2a (v2.34): pull live CIN7 inventory and swap it in. Static rows
+  // render immediately above; this fetch updates AU_INVENTORY_DATA in the
+  // background and re-renders just the inventory tab. On error we keep the
+  // static rows and surface a "fallback" chip so it's visible something failed.
   loadLiveAuInventory().catch((e) => console.warn('AU inventory live fetch threw:', e));
+
+  // Phase 2b (v2.35): pull live CIN7 sales (selected month) and POs. Same
+  // pattern — render static immediately, swap in live in the background, fall
+  // back to static + fallback chip on error. Sales fires for the selected
+  // month only; the month-picker change handler triggers additional months
+  // on demand.
+  loadLiveAuSales(AU_SELECTED_MONTH).catch((e) => console.warn('AU sales live fetch threw:', e));
+  loadLiveAuPos().catch((e) => console.warn('AU POs live fetch threw:', e));
 }
 
 // Phase 2 — live CIN7 inventory loader. Fetches /api/au/inventory (KV-cached
@@ -6145,6 +6190,166 @@ async function loadLiveAuInventory() {
     console.warn('AU live inventory fetch failed — keeping static rows:', e?.message || e);
     setChip('CIN7 fallback (static)', 'gray',
       `Live fetch failed (${e?.message || e}). Showing static rows from /au-data.js.`);
+  }
+}
+
+// Phase 2b helpers — set/render the small chip on a card header. Same
+// pattern as the inventory chip but factored out so sales + POs share it.
+function _auSetChip(chipId, label, dotClass, title) {
+  const chip = document.getElementById(chipId);
+  if (!chip) return;
+  chip.style.display = '';
+  chip.title = title || '';
+  chip.innerHTML = `<span class="chip-dot${dotClass ? ' ' + dotClass : ''}"></span> ${label}`;
+}
+function _auChipFromResp(chipId, data, liveLabel) {
+  if (data?.staleFallback) {
+    _auSetChip(chipId, 'CIN7 cached (upstream error)', 'gray',
+      'Live CIN7 fetch failed — serving last cached snapshot. ' + (data.error || ''));
+  } else if (data?.cached) {
+    const ago = data.lastSync ? new Date(data.lastSync).toLocaleString('en-AU') : '';
+    _auSetChip(chipId, `${liveLabel} (cached)`, '', `Cached at ${ago}. Refreshes every 15 min on demand.`);
+  } else {
+    const ago = data?.lastSync ? new Date(data.lastSync).toLocaleString('en-AU') : '';
+    _auSetChip(chipId, liveLabel, '', `Fresh from CIN7 at ${ago}. KV-cached for 15 min.`);
+  }
+}
+
+// Phase 2b — live CIN7 sales loader. Fetches /api/au/sales?month=YYYY-MM
+// (KV-cached 15 min server-side), MERGES the CIN7-sourced channels
+// (col/woo2/dist + refunds + skuSales) into AU_SALES_BY_MONTH for the
+// requested month. Woo + Amazon channel data stays static (Phase 3 work).
+// Re-renders the Sales by Channel + Monthly SKU + chart on success.
+async function loadLiveAuSales(month) {
+  if (!month) return;
+  _auSetChip('au-sales-source-chip',  'CIN7 (loading…)', 'gray', `Fetching live CIN7 sales for ${month}`);
+  _auSetChip('au-monthly-source-chip','CIN7 (loading…)', 'gray', `Fetching live CIN7 sales for ${month}`);
+  try {
+    const resp = await fetch(`/api/au/sales?month=${encodeURIComponent(month)}`, { credentials: 'include' });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      throw new Error(`HTTP ${resp.status}: ${body.slice(0, 200) || resp.statusText}`);
+    }
+    const data = await resp.json();
+    if (!data?.channels) throw new Error('Empty sales payload');
+
+    // Merge live CIN7 channels into AU_SALES_BY_MONTH for the named month.
+    // Leave woo + amz alone (those came from static au-data.js and stay
+    // there until Phase 3 wires Woo + Amazon source-of-truth APIs).
+    AU_SALES_BY_MONTH[month]  = AU_SALES_BY_MONTH[month]  || {};
+    AU_ORDERS_BY_MONTH[month] = AU_ORDERS_BY_MONTH[month] || {};
+    AU_TINS_BY_MONTH[month]   = AU_TINS_BY_MONTH[month]   || {};
+    for (const ch of ['col', 'woo2', 'dist']) {
+      const v = data.channels[ch] || {};
+      AU_SALES_BY_MONTH[month][ch]  = +(v.revenue || 0);
+      AU_ORDERS_BY_MONTH[month][ch] = +(v.orders  || 0);
+      AU_TINS_BY_MONTH[month][ch]   = +(v.tins    || 0);
+    }
+    // Replace refunds row for the month
+    if (data.refunds) AU_REFUNDS_BY_MONTH[month] = data.refunds;
+
+    // Per-SKU monthly: merge col/woo2/dist columns from live, keep woo/amz
+    // from static. The merge is by base SKU. Revenue is apportioned: live
+    // CIN7 revenue (col+woo2+dist) is used directly; the woo+amz share of
+    // the static row's all-channels revenue is approximated by
+    //   static_revenue × static_woo_amz_tins / static_total_tins
+    // under the assumption that AOV per tin is roughly similar across
+    // channels. Phase 3 (Woo + Amazon source-of-truth) will replace this
+    // approximation with real per-channel revenue.
+    const liveBySku = new Map();
+    for (const r of (data.skuSales || [])) liveBySku.set(r.sku, r);
+    const staticRows = (window.AU_DATA?.skuSalesByMonth?.[month] || []);
+    const merged = new Map();
+    // Seed with static rows (preserves woo/amz columns + name for SKUs that
+    // have no live CIN7 sales in this month).
+    for (const r of staticRows) merged.set(r.sku, { ...r });
+    for (const [sku, live] of liveBySku.entries()) {
+      const stat = merged.get(sku) || { sku, name: live.name || '', woo: 0, amz: 0, revenue: 0, total_tins: 0 };
+      const wooAmzTins   = (stat.woo || 0) + (stat.amz || 0);
+      const staticAllChs = stat.total_tins || (wooAmzTins + (stat.col || 0) + (stat.woo2 || 0) + (stat.dist || 0));
+      const wooAmzRevApprox = (stat.revenue && staticAllChs > 0)
+        ? stat.revenue * (wooAmzTins / staticAllChs)
+        : 0;
+      const acc = {
+        sku,
+        name:       stat.name || live.name || '',
+        woo:        stat.woo  || 0,
+        amz:        stat.amz  || 0,
+        col:        live.col  || 0,
+        woo2:       live.woo2 || 0,
+        dist:       live.dist || 0,
+        total_tins: (stat.woo || 0) + (stat.amz || 0) + (live.col || 0) + (live.woo2 || 0) + (live.dist || 0),
+        revenue:    (live.revenue || 0) + wooAmzRevApprox,
+      };
+      merged.set(sku, acc);
+    }
+    AU_SKU_SALES_BY_MONTH[month] = Array.from(merged.values())
+      .filter(r => (r.total_tins || 0) > 0 || (r.revenue || 0) > 0)
+      .sort((a, b) => b.total_tins - a.total_tins);
+
+    AU_LIVE_SALES_MONTHS.add(month);
+
+    // Re-render only if the user is still looking at this month
+    if (AU_SELECTED_MONTH === month) {
+      renderAuChannelCards();
+      renderAuChart();
+      renderAuSalesTable();
+      renderAuMonthlySkuTable();
+    }
+
+    _auChipFromResp('au-sales-source-chip',   data, 'CIN7 live');
+    _auChipFromResp('au-monthly-source-chip', data, 'CIN7 live');
+  } catch (e) {
+    console.warn(`AU live sales fetch failed for ${month} — keeping static rows:`, e?.message || e);
+    _auSetChip('au-sales-source-chip',   'CIN7 fallback (static)', 'gray',
+      `Live fetch failed (${e?.message || e}). Showing static April snapshot for CIN7 channels.`);
+    _auSetChip('au-monthly-source-chip', 'CIN7 fallback (static)', 'gray',
+      `Live fetch failed (${e?.message || e}). Showing static April snapshot for CIN7 columns.`);
+  }
+}
+
+// Phase 2b — live CIN7 POs loader. Fetches /api/au/pos (KV-cached 15 min),
+// replaces AU_POS + AU_INCOMING_BY_SKU on success, re-renders the POs tab
+// in place. On error keeps static + flips the chip to fallback.
+async function loadLiveAuPos() {
+  _auSetChip('au-pos-source-chip',      'CIN7 (loading…)', 'gray', 'Fetching live POs from /api/au/pos');
+  _auSetChip('au-incoming-source-chip', 'CIN7 (loading…)', 'gray', 'Fetching trailing 3-month run-rate basis');
+  try {
+    const resp = await fetch('/api/au/pos', { credentials: 'include' });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      throw new Error(`HTTP ${resp.status}: ${body.slice(0, 200) || resp.statusText}`);
+    }
+    const data = await resp.json();
+    if (!Array.isArray(data?.pos)) throw new Error('Empty POs payload');
+
+    AU_POS = data.pos;
+    AU_INCOMING_BY_SKU = Array.isArray(data.incomingBySku) ? data.incomingBySku : [];
+    AU_LIVE_POS_LOADED = true;
+
+    populateAuPoFilters();
+    renderAuPoKpis();
+    renderAuPoTable();
+    renderAuIncomingBySku();
+
+    _auChipFromResp('au-pos-source-chip', data, 'CIN7 live');
+
+    // Run-rate chip uses a more specific label since it depends on the
+    // months that fed the trailing average, not just one CIN7 fetch.
+    const months = data?.runRateBasis?.months || [];
+    const missing = data?.runRateBasis?.missingMonths || [];
+    const monthsLabel = months.length ? months.slice().reverse().join(', ') : 'no months loaded';
+    const note = data?.runRateBasis?.note || '';
+    const missNote = missing.length ? ` (missing: ${missing.join(', ')})` : '';
+    _auSetChip('au-incoming-source-chip',
+      `CIN7 live (${months.length}-month avg)${missNote}`, '',
+      `Trailing run-rate basis: ${monthsLabel}.${missNote ? ' Some months unavailable.' : ''} ${note}`);
+  } catch (e) {
+    console.warn('AU live POs fetch failed — keeping static rows:', e?.message || e);
+    _auSetChip('au-pos-source-chip',      'CIN7 fallback (static)', 'gray',
+      `Live fetch failed (${e?.message || e}). Showing static POs from /au-data.js.`);
+    _auSetChip('au-incoming-source-chip', 'CIN7 fallback (static)', 'gray',
+      `Live fetch failed (${e?.message || e}). Showing static run-rate (April ÷ 30 days).`);
   }
 }
 
@@ -6270,12 +6475,17 @@ function renderAuSalesTable() {
   const tins   = AU_TINS_BY_MONTH[AU_SELECTED_MONTH]   || {};
   const prev   = auPrevMonthKey(AU_SELECTED_MONTH);
   const prevData = prev ? AU_SALES_BY_MONTH[prev] : null;
+  // Per-channel source label. Woo + Amazon are always static (Phase 3
+  // wires those live). Coles / Woolies / Distributors flip to "CIN7 live"
+  // once /api/au/sales has populated AU_LIVE_SALES_MONTHS for this month;
+  // otherwise the static April snapshot is the fallback.
+  const liveCin7 = AU_LIVE_SALES_MONTHS.has(AU_SELECTED_MONTH);
   const sourceMap = {
-    woo:'Metorik / Woo · truth',
-    amz:'Amazon SP-API · truth',
-    col:'CIN7 EDI + backend · Coles',
-    woo2:'CIN7 EDI · Woolworths',
-    dist:'CIN7 sales orders · non-EDI',
+    woo: 'Metorik / Woo · static (Phase 3)',
+    amz: 'Amazon SP-API · static (Phase 3)',
+    col:  liveCin7 ? 'CIN7 live · Coles (EDI + backend)'  : 'CIN7 static (April snapshot)',
+    woo2: liveCin7 ? 'CIN7 live · Woolworths (EDI)'        : 'CIN7 static (April snapshot)',
+    dist: liveCin7 ? 'CIN7 live · Distributors (non-EDI)'  : 'CIN7 static (April snapshot)',
   };
   tb.innerHTML = AU_CHANNELS.map(c => {
     const rev = data[c.key] || 0;
@@ -6303,7 +6513,7 @@ function renderAuSalesTable() {
       <td class="num" style="color:#A32D2D;">${fmtAud(ref.revenue)}</td>
       <td class="num">—</td>
       <td class="num">—</td>
-      <td style="color:var(--text-secondary);font-size:11px;">CIN7 · Cloud channel (returns/credits)</td>
+      <td style="color:var(--text-secondary);font-size:11px;">${liveCin7 ? 'CIN7 live' : 'CIN7 static (April snapshot)'} · Cloud channel (returns/credits)</td>
     </tr>`;
     const totRev  = AU_CHANNELS.reduce((a,c) => a + (data[c.key]   || 0), 0) + (ref.revenue || 0);
     const totTins = AU_CHANNELS.reduce((a,c) => a + (tins[c.key]   || 0), 0) + (ref.tins    || 0);
