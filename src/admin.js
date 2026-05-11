@@ -39,6 +39,7 @@
 import { Hono } from 'hono';
 import { redactSecrets } from './redact.js';
 import { runAmazonOrdersChunk, runAmazonReportsTick, spApiRequest, invalidateAmazonSalesCache } from './amazon.js';
+import { runCin7SalesOrdersChunk, runCin7CreditNotesChunk, runCin7BackfillLoop } from './cin7-sync.js';
 
 export const adminRoutes = new Hono();
 
@@ -644,4 +645,59 @@ adminRoutes.get('/reconcile', async (c) => {
       'A countMatch:true on every bucket means the backfill is complete and correctly windowed.',
     ],
   });
+});
+
+// ─── CIN7 backfill driver (v2.36 Phase A) ──────────────────────────────────
+//
+// POST /api/admin/cin7-backfill?source=sales-orders|credit-notes|both
+//
+// One-shot accelerator over the 15-min cron cadence. Runs the same chunk
+// functions cron does, in a loop, until either the upstream is caught up or
+// the wall-clock budget (~25s) is reached. Re-invoke to resume from where
+// the previous call stopped — watermark state lives on the sync_state row
+// so progress is durable across calls.
+//
+// Use cases:
+//   • Initial backfill on first Phase A deploy (faster than waiting ~3h of
+//     cron ticks to ingest CIN7 history from epoch).
+//   • Recovery if D1 is ever rebuilt (e.g. accidental data loss, future
+//     migration that requires re-ingest).
+//   • Catching up after a long CIN7 outage where the cron failed for hours.
+//
+// Auth: Cloudflare Access SSO on logistics.apps.nopong.com — same as every
+// other /api/admin/* route since v2.31 (no application-layer ADMIN_KEY).
+//
+// Optional query params:
+//   maxChunks            — hard cap on chunks per call (default 60).
+//   wallClockBudgetMs    — return when elapsed exceeds this (default 25000,
+//                          leaves a few seconds for the response).
+adminRoutes.post('/cin7-backfill', async (c) => {
+  if (!c.env.DB) {
+    return c.json({ error: 'D1 binding DB not configured' }, 500);
+  }
+  if (!(c.env.CIN7_USERNAME && c.env.CIN7_CONNECTION_KEY)) {
+    return c.json({ error: 'CIN7 not configured (CIN7_USERNAME / CIN7_CONNECTION_KEY)' }, 401);
+  }
+
+  const source = String(c.req.query('source') || 'both').toLowerCase();
+  if (!['sales-orders', 'credit-notes', 'both'].includes(source)) {
+    return c.json({ error: 'source must be sales-orders | credit-notes | both' }, 400);
+  }
+
+  const maxChunks = Number(c.req.query('maxChunks')) || undefined;
+  const wallClockBudgetMs = Number(c.req.query('wallClockBudgetMs')) || undefined;
+  const opts = { maxChunks, wallClockBudgetMs };
+
+  try {
+    const out = { source };
+    if (source === 'sales-orders' || source === 'both') {
+      out.salesOrders = await runCin7BackfillLoop(c.env, runCin7SalesOrdersChunk, opts);
+    }
+    if (source === 'credit-notes' || source === 'both') {
+      out.creditNotes = await runCin7BackfillLoop(c.env, runCin7CreditNotesChunk, opts);
+    }
+    return c.json(out);
+  } catch (e) {
+    return c.json({ error: redactSecrets(e?.message || String(e)) }, 500);
+  }
 });

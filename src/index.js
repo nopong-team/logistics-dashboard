@@ -19,6 +19,7 @@ import { diagnosticsRoutes } from './diagnostics.js';
 import { xeroRoutes, xeroAuthRoutes, readXeroStatus } from './xero.js';
 import { logiwaRoutes, readLogiwaStatus } from './logiwa.js';
 import { auRoutes } from './cin7.js';
+import { runCin7SalesOrdersChunk, runCin7CreditNotesChunk } from './cin7-sync.js';
 import buyingToolHistory from './buying-tool-history.js';
 import { redactSecrets } from './redact.js';
 
@@ -218,25 +219,70 @@ async function runAmazonCronSync(env) {
   await Promise.allSettled([syncOne('CA'), syncOne('US')]);
 }
 
+// CIN7 cron (v2.36 Phase A): one SalesOrders chunk + one CreditNotes chunk per
+// tick. Each chunk is one CIN7 page (≤250 rows) since the per-source watermark
+// in sync_state. 8 CIN7 calls/hour at the steady state — well under all three
+// of CIN7's limits (3/sec, 60/min, 5000/day). Phase A is invisible to the
+// dashboard — the AU read endpoints (/api/au/sales etc.) still call CIN7
+// directly. The data accumulating in D1 powers the Phase C read-side rewrite.
+async function runCin7CronSync(env) {
+  if (!(env.CIN7_USERNAME && env.CIN7_CONNECTION_KEY)) {
+    console.log('CIN7 cron sync skipped: secrets not configured');
+    return;
+  }
+  // Sales orders chunk
+  try {
+    const so = await runCin7SalesOrdersChunk(env);
+    if (so.rowsUpserted > 0) {
+      console.log(
+        `CIN7 cron sales: +${so.rowsUpserted} orders, +${so.itemsUpserted} items, ` +
+        `watermark ${so.watermarkBefore} → ${so.watermarkAfter} (${so.durationMs}ms)` +
+        (so.more ? ' [more available]' : ''),
+      );
+    } else {
+      console.log(`CIN7 cron sales: caught up (${so.durationMs}ms)`);
+    }
+  } catch (e) {
+    console.error('CIN7 cron sales failed:', redactSecrets(e?.message || String(e)));
+  }
+  // Credit notes chunk — serialised after sales so we never trip CIN7's
+  // per-second rate limit by running both concurrently.
+  try {
+    const cn = await runCin7CreditNotesChunk(env);
+    if (cn.rowsUpserted > 0) {
+      console.log(
+        `CIN7 cron credits: +${cn.rowsUpserted} credit notes, +${cn.itemsUpserted} items, ` +
+        `watermark ${cn.watermarkBefore} → ${cn.watermarkAfter} (${cn.durationMs}ms)` +
+        (cn.more ? ' [more available]' : ''),
+      );
+    } else {
+      console.log(`CIN7 cron credits: caught up (${cn.durationMs}ms)`);
+    }
+  } catch (e) {
+    console.error('CIN7 cron credits failed:', redactSecrets(e?.message || String(e)));
+  }
+}
+
 async function runCronSync(env) {
   if (!env.DB) {
     console.log('cron sync skipped: DB binding not configured');
     return;
   }
-  // All four jobs are independent — run in parallel so neither blocks the
-  // others. The two new ones (FBA inventory, SalesBinder) self-gate on
-  // staleness inside their respective sync functions, so on most ticks
-  // they're free no-ops; only when the cached snapshot has aged past the
-  // freshness threshold do they actually hit upstream.
-  //   • Woo Orders         — every 15 min (cron cadence)
-  //   • Amazon Orders+Reports — every 15 min (cron cadence)
-  //   • Amazon FBA Inventory — refresh if >1h old
-  //   • SalesBinder         — refresh if >4h old
+  // All five jobs are independent — run in parallel so none blocks the
+  // others. The staleness-gated ones (FBA inventory, SalesBinder) are
+  // free no-ops on most ticks; only when the cached snapshot has aged past
+  // the freshness threshold do they actually hit upstream.
+  //   • Woo Orders              — every 15 min (cron cadence)
+  //   • Amazon Orders+Reports   — every 15 min (cron cadence)
+  //   • Amazon FBA Inventory    — refresh if >1h old
+  //   • SalesBinder             — refresh if >4h old
+  //   • CIN7 SalesOrders+CreditNotes — every 15 min (cron cadence, v2.36 Phase A)
   await Promise.allSettled([
     runWooCronSync(env),
     runAmazonCronSync(env),
     runAmazonInventoryCronSync(env),
     runSalesBinderCronSync(env),
+    runCin7CronSync(env),
   ]);
 }
 
