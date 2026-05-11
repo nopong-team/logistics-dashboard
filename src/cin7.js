@@ -2,9 +2,8 @@
  * CIN7 Omni connector + AU dashboard data routes.
  *
  * Phase 2 of the AU rollout — replaces the static `/au-data.js` snapshot for
- * the Inventory tab with a live read from CIN7 Omni. Sales / POs / refunds
- * still ship from the static `window.AU_DATA` for now (those endpoints come
- * in the next PRs).
+ * Inventory (Phase 2a, v2.34) and Sales / Refunds / POs (Phase 2b, v2.35)
+ * with live reads from CIN7 Omni.
  *
  *   GET /api/au/cin7/status
  *     Smallest possible proof-of-life. Hits /Branches with rows=1 and reports
@@ -14,10 +13,34 @@
  *   GET /api/au/inventory
  *     Live inventory rows in the same shape as window.AU_DATA.inventory:
  *       { sku, name, category, kind, mult, soh, avail, incoming,
+ *         warehouse_soh, warehouse_avail, warehouse_incoming,
  *         fba_cin7, fba_amz: null, discontinued }
  *     Built from CIN7 /Products + /Stock with the AU SKU normalisation rules
- *     codified in `AU Dashboard/au-sku-rules.md`. KV-cached at `au:inventory`
- *     (15-min TTL); pass ?refresh=1 to bypass.
+ *     codified in `AU Dashboard/au-sku-rules.md`. KV-cached at
+ *     `au:inventory:v1` (15-min TTL); pass ?refresh=1 to bypass.
+ *
+ *   GET /api/au/sales?month=YYYY-MM
+ *     One CIN7 /SalesOrders fetch services three views for the named month:
+ *       channels  — Coles / Woolies / Distributors (Backend non-Coles).
+ *                   Woo + Amazon channels are NOT here — those stay static
+ *                   until Phase 3 wires the per-channel APIs (Woo + Amazon
+ *                   are source-of-truth for their own sales; CIN7 is a
+ *                   sync-mirror per the 2026-05-10 decision).
+ *       refunds   — CIN7 'Cloud' channel rows, surfaced as a single negative
+ *                   row at the bottom of Sales by Channel.
+ *       skuSales  — per-base-SKU rollup of the CIN7-sourced channels (col,
+ *                   woo2, dist columns only — woo + amz columns stay static).
+ *     KV-cached at `au:sales:YYYY-MM:v1` (15-min TTL); ?refresh=1 to bypass.
+ *
+ *   GET /api/au/pos
+ *     CIN7 /PurchaseOrders + derived `incomingBySku`. Adds the date + status
+ *     fields the manual CSV export was missing (createdDate, deliveryDate,
+ *     status), unlocking days-until-arrival + late-PO detection. Run rate
+ *     for incomingBySku is a trailing 3-complete-month average per Melanie's
+ *     pick (CA-style), computed by summing tins across the three most recent
+ *     completed months and dividing by total days. Reads cached month-sales
+ *     payloads from KV when available so PO refresh doesn't re-fetch sales.
+ *     KV-cached at `au:pos:v1` (15-min TTL); ?refresh=1 to bypass.
  *
  * Auth model. CIN7 Omni uses HTTP Basic — API username + connection key — set
  * up in CIN7 → Integrations → API. Both go in as Wrangler secrets:
@@ -30,9 +53,15 @@
  * stop when a page returns fewer rows than requested. We cap at 200 pages
  * (50,000 records) as a safety belt against a misbehaving upstream.
  *
+ * Rate limits. CIN7 Omni is 3/sec, 60/min, 5,000/day. `cin7FetchAll` paces at
+ * 400ms between pages; `cin7Fetch` retries 429s with backoff. **Never run
+ * multiple endpoints concurrently via Promise.all** — Stock+Products in
+ * parallel reliably trips the per-second cap. Always serialise.
+ *
  * No `Buffer` on Workers — base64 the credential pair with `btoa()` instead.
  * Parked Express version of this client lives at `backend/server.js` in the
- * Drive project folder; this is the Workers port + extension to inventory.
+ * Drive project folder (Inventory only — SalesOrders/PurchaseOrders were
+ * never wired there, this is the first implementation of those).
  */
 
 import { Hono } from 'hono';
@@ -42,10 +71,17 @@ export const auRoutes = new Hono();
 // ─── KV cache ───────────────────────────────────────────────────────────────
 
 const KV_INVENTORY_KEY = 'au:inventory:v1';
+const KV_POS_KEY       = 'au:pos:v1';
+// Per-month sales: `au:sales:YYYY-MM:v1`. Helper below to build the key —
+// kept versioned so a payload-shape bump (v1 → v2) invalidates cleanly.
+function kvSalesKey(month) { return `au:sales:${month}:v1`; }
+
 // 15 min TTL — short enough that drift is bounded but long enough to absorb
 // dashboard refreshes on the same minute. Bump the key suffix (v1 → v2) on
 // any schema change so we don't return mismatched-shape cached payloads.
 const INVENTORY_TTL_SECONDS = 15 * 60;
+const SALES_TTL_SECONDS     = 15 * 60;
+const POS_TTL_SECONDS       = 15 * 60;
 
 // ─── CIN7 Omni client ──────────────────────────────────────────────────────
 
@@ -397,6 +433,555 @@ async function buildAuInventoryPayload(env) {
   };
 }
 
+// ─── Sales orders (Phase 2b) ───────────────────────────────────────────────
+//
+// CIN7 channel attribution per AU Dashboard/au-sku-rules.md. Mirrors
+// scripts/build_data.py:attribute_cin7() rule-for-rule. Returns one of:
+//   'col'    — Coles (EDI no-channel, OR Backend+Coles non-EDI)
+//   'woo2'   — Woolworths (EDI no-channel)
+//   'dist'   — Distributors (Backend, non-Coles)
+//   'refund' — Cloud channel (negative qty, returns/credits)
+//   null     — exclude (Stock Adjustments, unknown shapes)
+//
+// CIN7 doesn't have a single "channel" field everywhere — depending on
+// endpoint, the value lives under `channel`, `posRegister`, or both.
+// We accept either; the static side uses the same field.
+function attributeCin7Channel(channelRaw, customerRaw) {
+  const ch = String(channelRaw || '').trim();
+  const cu = String(customerRaw || '').trim();
+  if (cu === 'Stock Adjustments') return null;
+  if (ch === 'Cloud') return 'refund';
+  if (ch === 'Backend') {
+    if (cu === 'Coles') return 'col';
+    return 'dist';
+  }
+  // No channel value → EDI lane
+  if (cu === 'Coles')      return 'col';
+  if (cu === 'Woolworths') return 'woo2';
+  return null;
+}
+
+// Pull SalesOrders for a single calendar month. CIN7 Omni's `/SalesOrders`
+// supports a `where` clause filter; we use createdDate so an order created
+// on the last day of the month but dispatched in the next month still
+// belongs to its origination month (matches what the static CSV pivot does).
+//
+// Returns the raw rows, NOT aggregated — `buildAuSalesPayload` does the
+// channel attribution + SKU rollup. Field selection is conservative; we
+// capture line items via `lineItems` (default expansion in Omni), and pull
+// the channel/POS register fields under both names since some Omni accounts
+// expose them differently.
+async function fetchSalesOrdersForMonth(env, month /* 'YYYY-MM' */) {
+  const [y, m] = month.split('-').map(Number);
+  // First day of month (inclusive) → first day of next month (exclusive).
+  // CIN7 createdDate is an ISO-8601 timestamp; range comparisons work.
+  const dateFrom = `${month}-01T00:00:00Z`;
+  const nextY = m === 12 ? y + 1 : y;
+  const nextM = m === 12 ? 1 : m + 1;
+  const dateTo = `${nextY}-${String(nextM).padStart(2, '0')}-01T00:00:00Z`;
+  const where = `CreatedDate>='${dateFrom}' AND CreatedDate<'${dateTo}'`;
+
+  // Omni `fields` selection. Includes channel + posRegister (one or both
+  // populated depending on account config), customer fields, and lineItems
+  // for the per-SKU breakdown.
+  const fields = [
+    'id', 'reference', 'createdDate', 'dispatchedDate',
+    'channel', 'posRegister', 'branchName',
+    'memberId', 'memberEmail', 'firstName', 'lastName', 'company',
+    'status', 'invoiceStatus',
+    'total', 'subTotal', 'productTotal',
+    'lineItems',
+  ].join(',');
+
+  return cin7FetchAll(env, 'SalesOrders', { fields, where });
+}
+
+// Customer label — the Python script uses a single `customer` column from
+// the pivot. The Omni API exposes it across `company` (B2B) and
+// firstName+lastName (individuals). For attribution we only need to detect
+// 'Coles', 'Woolworths', 'Stock Adjustments', so company is the field that
+// matters for channel logic; the personName fallback is for refund-row
+// display only.
+function customerLabelFromOrder(order) {
+  const company = (order?.company || '').trim();
+  if (company) return company;
+  const first = (order?.firstName || '').trim();
+  const last  = (order?.lastName  || '').trim();
+  return [first, last].filter(Boolean).join(' ') || '';
+}
+
+// Build the AU sales payload for one month. Aggregates raw SalesOrders into:
+//   • channels  — { col, woo2, dist }: { tins, revenue, orders }
+//   • refunds   — { tins, revenue, orders, sku_lines }
+//   • skuSales  — [{ sku (base), name, col, woo2, dist, total_tins, revenue }]
+// Same shape as the matching slices of static AU_DATA, with two intentional
+// gaps: woo + amz channels are NOT here (they stay static until Phase 3),
+// and the per-SKU rows only have col/woo2/dist columns populated for the
+// same reason. Frontend merges with static woo/amz on the per-channel side.
+async function buildAuSalesPayload(env, month) {
+  const orders = await fetchSalesOrdersForMonth(env, month);
+
+  // Per-channel aggregates
+  const channels = {
+    col:  { tins: 0, revenue: 0, orderRefs: new Set() },
+    woo2: { tins: 0, revenue: 0, orderRefs: new Set() },
+    dist: { tins: 0, revenue: 0, orderRefs: new Set() },
+  };
+  const refunds = {
+    tins: 0, revenue: 0, orderRefs: new Set(),
+    sku_lines: new Map(),    // baseSku → { tins, sales, name }
+  };
+  // Per-base-SKU rollup, keyed by base SKU. Each value tracks tins per
+  // CIN7 channel (col/woo2/dist) plus a running revenue + name.
+  const skuRollup = new Map();
+
+  for (const order of orders) {
+    const channelAttr = attributeCin7Channel(
+      order.channel || order.posRegister,
+      customerLabelFromOrder(order),
+    );
+    if (channelAttr === null) continue; // Stock Adjustments, unknown — skip
+
+    const orderRef = String(order.reference || order.id || '');
+    const lineItems = Array.isArray(order.lineItems) ? order.lineItems : [];
+
+    for (const li of lineItems) {
+      const code = String(li?.code || li?.sku || '').trim();
+      if (!code) continue;
+      const qty = Number(li?.qty ?? li?.quantity ?? 0) || 0;
+      // Omni line item totals: prefer `total` (qty × unitPrice net),
+      // fall back to qty × unitPrice if `total` not provided.
+      const unitPrice = Number(li?.unitPrice ?? 0) || 0;
+      const lineTotal = Number(li?.total ?? (qty * unitPrice)) || 0;
+      const name      = String(li?.name || '').slice(0, 60);
+
+      const [base, mult] = normalizeAuSku(code);
+      const baseKey = base || code;
+      const tins = qty * mult;
+
+      if (channelAttr === 'refund') {
+        refunds.tins    += tins;
+        refunds.revenue += lineTotal;
+        refunds.orderRefs.add(orderRef);
+        const acc = refunds.sku_lines.get(baseKey) || { tins: 0, sales: 0, name: '' };
+        acc.tins  += tins;
+        acc.sales += lineTotal;
+        if (!acc.name && name) acc.name = name;
+        refunds.sku_lines.set(baseKey, acc);
+        continue;
+      }
+
+      const ch = channels[channelAttr];
+      ch.tins    += tins;
+      ch.revenue += lineTotal;
+      ch.orderRefs.add(orderRef);
+
+      // Per-SKU rollup row
+      const row = skuRollup.get(baseKey) || {
+        sku: baseKey, name: '',
+        col: 0, woo2: 0, dist: 0,
+        revenue: 0,
+      };
+      row[channelAttr] += tins;
+      row.revenue      += lineTotal;
+      if (!row.name && name) row.name = name;
+      skuRollup.set(baseKey, row);
+    }
+  }
+
+  // Materialise — sets → counts, maps → arrays/objects
+  const channelsOut = {};
+  for (const [k, v] of Object.entries(channels)) {
+    channelsOut[k] = {
+      tins:    v.tins,
+      revenue: v.revenue,
+      orders:  v.orderRefs.size,
+    };
+  }
+  const refundsOut = {
+    tins:    refunds.tins,
+    revenue: refunds.revenue,
+    orders:  refunds.orderRefs.size,
+    sku_lines: Object.fromEntries(refunds.sku_lines),
+  };
+  // Per-SKU rows: compute total_tins (CIN7-channels-only sum), drop empties,
+  // sort high → low.
+  const skuSales = [];
+  for (const row of skuRollup.values()) {
+    const total = row.col + row.woo2 + row.dist;
+    if (total === 0 && row.revenue === 0) continue;
+    skuSales.push({
+      sku: row.sku,
+      name: row.name,
+      col: row.col,
+      woo2: row.woo2,
+      dist: row.dist,
+      total_tins: total,
+      revenue: row.revenue,
+    });
+  }
+  skuSales.sort((a, b) => b.total_tins - a.total_tins);
+
+  return {
+    month,
+    channels: channelsOut,
+    refunds:  refundsOut,
+    skuSales,
+    lastSync: new Date().toISOString(),
+    source:   'cin7-live',
+    counts: {
+      orders: orders.length,
+      attributedRefs: Object.values(channels).reduce((a, c) => a + c.orderRefs.size, 0)
+                    + refunds.orderRefs.size,
+      skuRows: skuSales.length,
+    },
+    // NOTE: woo + amz channels intentionally absent. They live on the Woo
+    // and Amazon channel APIs (Phase 3). Frontend merges this with static
+    // window.AU_DATA.salesByMonth[month] for those two channels.
+  };
+}
+
+// KV-cache wrapper for monthly sales. Used both by the /sales route and by
+// the /pos route's run-rate derivation (which needs the trailing 3 complete
+// months). Behaviour:
+//   • Cache hit → return cached payload tagged { cached: true }.
+//   • Cache miss / forceRefresh → fetch fresh, write to KV, return tagged
+//     { cached: false }.
+//   • Upstream throw with usable cache → return cached payload tagged
+//     { cached: true, staleFallback: true, error }.
+async function getMonthSales(env, month, { forceRefresh = false } = {}) {
+  const cache = env.CACHE;
+  const key = kvSalesKey(month);
+
+  if (!forceRefresh && cache) {
+    const cached = await cache.get(key, 'json');
+    if (cached?.channels) return { ...cached, cached: true };
+  }
+
+  try {
+    const payload = await buildAuSalesPayload(env, month);
+    if (cache) {
+      await cache.put(key, JSON.stringify(payload), { expirationTtl: SALES_TTL_SECONDS });
+    }
+    return { ...payload, cached: false };
+  } catch (e) {
+    if (cache) {
+      const cached = await cache.get(key, 'json');
+      if (cached?.channels) {
+        return {
+          ...cached,
+          cached: true,
+          staleFallback: true,
+          error: 'Upstream CIN7 error — serving cached snapshot.',
+        };
+      }
+    }
+    throw e;
+  }
+}
+
+// ─── Purchase orders (Phase 2b) ────────────────────────────────────────────
+//
+// Mirrors scripts/build_data.py:parse_cin7_pos() + classify_line() rules:
+//   freight/shipping/postage/kittingfee → 'fees'
+//   T-AU-... or T-...                   → 'raw_tin'
+//   AU-BD-...                           → 'soap'
+//   AU-CTN-... or AU-SRT-...            → 'carton_tray' (rolled into finished
+//                                          via SKU normalisation downstream)
+//   AU-...                              → 'finished'
+//   P-..., P-OC-..., P-BOX-..., P-ENV-..→ 'packaging'
+//   else                                → 'other'
+function classifyPoLineCode(code) {
+  if (!code) return 'other';
+  const c = String(code).trim();
+  const cl = c.toLowerCase();
+  if (cl === 'freight' || cl === 'shipping' || cl === 'postage' || cl === 'kittingfee') return 'fees';
+  if (c.startsWith('T-AU-') || c.startsWith('T-')) return 'raw_tin';
+  if (c.startsWith('AU-BD-')) return 'soap';
+  if (c.startsWith('AU-CTN-') || c.startsWith('AU-SRT-')) return 'carton_tray';
+  if (c.startsWith('AU-')) return 'finished';
+  if (c.startsWith('P-') || c.startsWith('P-OC-') || c.startsWith('P-BOX-') || c.startsWith('P-ENV-')) return 'packaging';
+  return 'other';
+}
+
+// Pull all open Purchase Orders. CIN7 Omni's `/PurchaseOrders` uses the same
+// pagination pattern as everything else. We filter for OPEN status server-side
+// to keep the payload small — the dashboard only ever cares about open POs.
+// Field set captures the date + status fields the manual CSV export was
+// missing (createdDate, deliveryDate, status), unlocking days-until-arrival
+// + late-PO detection downstream.
+async function fetchOpenPurchaseOrders(env) {
+  const fields = [
+    'id', 'reference', 'createdDate', 'deliveryDate', 'invoiceDate',
+    'status', 'completedDate',
+    'company', 'firstName', 'lastName', 'memberEmail',
+    'branchName',
+    'total', 'subTotal',
+    'lineItems',
+  ].join(',');
+  // CIN7 status values for POs include DRAFT, APPROVED, AWAITING, FULLY
+  // RECEIVED, etc. "Open" in our sense = not fully received and not
+  // cancelled/voided. The simplest filter is to exclude FULLY RECEIVED +
+  // VOIDED + CANCELLED — using a positive include list would require knowing
+  // every status name. Belt-and-braces: also drop completedDate-set rows.
+  const where = `Status<>'FULLY RECEIVED' AND Status<>'VOIDED' AND Status<>'CANCELLED'`;
+  return cin7FetchAll(env, 'PurchaseOrders', { fields, where });
+}
+
+// Build the same `pos[]` shape the static au-data.js has, plus the new
+// date/status fields. Each PO gets a derived `type` based on dominant bucket
+// (matches build_data.py logic).
+function shapePoRows(rawPos) {
+  const out = [];
+  for (const po of rawPos) {
+    const company = String(po?.company || '').trim();
+    const contact = [(po?.firstName || '').trim(), (po?.lastName || '').trim()]
+      .filter(Boolean).join(' ');
+    const lineItems = Array.isArray(po?.lineItems) ? po.lineItems : [];
+
+    const buckets = { finished: 0, soap: 0, raw_tin: 0, packaging: 0, carton_tray: 0, fees: 0, other: 0 };
+    const lines = [];
+    for (const li of lineItems) {
+      const code = String(li?.code || li?.sku || '').trim();
+      const qty  = Number(li?.qty ?? li?.quantity ?? 0) || 0;
+      const cls  = classifyPoLineCode(code);
+      buckets[cls] = (buckets[cls] || 0) + qty;
+      lines.push({ code, qty });
+    }
+
+    // PO type — soap takes precedence over packaging when a finished soap
+    // unit is present (matches Python).
+    let type;
+    if (buckets.finished > 0) type = 'finished';
+    else if (buckets.soap > 0) type = 'soap';
+    else if (buckets.raw_tin > buckets.packaging) type = 'tins';
+    else if (buckets.packaging > 0) type = 'packaging';
+    else if (buckets.carton_tray > 0) type = 'finished'; // standalone carton-only PO
+    else type = 'other';
+
+    out.push({
+      po:              String(po?.reference || po?.id || ''),
+      company,
+      contact,
+      // New in v2.35 — these were null in the static export.
+      created_date:    po?.createdDate || null,
+      expected_date:   po?.deliveryDate || null,
+      status:          po?.status || null,
+      // Existing static-shape fields
+      line_count:      lines.length,
+      finished_units:  buckets.finished + buckets.carton_tray, // carton-only POs count as finished
+      soap_units:      buckets.soap,
+      raw_tin_units:   buckets.raw_tin,
+      packaging_units: buckets.packaging,
+      fee_lines:       buckets.fees < 10 ? Math.round(buckets.fees) : 0,
+      total_units:     buckets.finished + buckets.soap + buckets.raw_tin
+                     + buckets.packaging + buckets.carton_tray + buckets.other,
+      type,
+      lines,
+    });
+  }
+  // Newest PO# first — matches the static side's sort.
+  out.sort((a, b) => (b.po || '').localeCompare(a.po || ''));
+  return out;
+}
+
+// Derive the `incomingBySku` view — per-base-SKU current stock + run rate +
+// days left + incoming qty + risk badge. Matches static build_data.py:
+// build_incoming_stock_by_sku() rule-for-rule, with one substantive change
+// per Melanie's pick: run rate is now a TRAILING 3-COMPLETE-MONTH average
+// instead of single-month-divided-by-30 (CA-style smoothing).
+function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
+  // monthSalesPayloads is an array (newest → oldest) of { skuSales, month }
+  // objects from getMonthSales(). Each skuSales row already has total_tins
+  // (CIN7-channels only — col/woo2/dist) — but that's a problem for the
+  // run rate, because it MISSES Woo + Amazon volume, and those are real
+  // sales that draw from the same warehouse. Until Phase 3 wires Woo + Amz,
+  // we have to either (a) accept that the live run rate undercounts (only
+  // sees ~80% of the volume — supermarket EDI dwarfs Woo+Amz so this is
+  // small for most SKUs but big for FBA-only SKUs like the small-pack
+  // Originals), or (b) bridge in static window.AU_DATA's woo+amz columns
+  // for the same months. (a) is honest and self-corrects when Phase 3 lands;
+  // (b) is more accurate today but bakes the static snapshot into the live
+  // path. We pick (a) and surface this in the column tooltip on the front
+  // end. The under-count is documented in the response `notes` field.
+
+  // Sum tins per base SKU across the trailing window
+  const tinsByBase = new Map();
+  let totalDays = 0;
+  for (const payload of monthSalesPayloads) {
+    if (!payload?.month || !Array.isArray(payload.skuSales)) continue;
+    const [y, m] = payload.month.split('-').map(Number);
+    // Days in month
+    const daysInMonth = new Date(y, m, 0).getDate();
+    totalDays += daysInMonth;
+    for (const row of payload.skuSales) {
+      const cur = tinsByBase.get(row.sku) || 0;
+      tinsByBase.set(row.sku, cur + (row.total_tins || 0));
+    }
+  }
+
+  // Roll up carton stock into base-SKU tin equivalents (cartons of 48 each
+  // contribute 48 tins to the base; SRTs are already folded into base in
+  // buildInventory upstream).
+  const baseStock = new Map();
+  for (const r of inventory) {
+    if (r?.discontinued) continue;
+    if (r.kind === 'base' || r.kind === 'base-b') {
+      baseStock.set(r.sku, (baseStock.get(r.sku) || 0) + (r.warehouse_soh ?? r.soh ?? 0));
+    } else if (r.kind === 'carton') {
+      const m = /^AU-CTN-(.+)-48$/.exec(r.sku);
+      if (m) {
+        const base = `AU-${m[1]}-35`;
+        baseStock.set(base, (baseStock.get(base) || 0) + ((r.warehouse_soh ?? r.soh ?? 0) * 48));
+      }
+    }
+  }
+
+  // Sum incoming finished tins per base SKU (raw tins + packaging excluded
+  // — they're not ready-to-sell stock).
+  const incoming = new Map(); // base → { qty, pos: [] }
+  for (const p of posRows) {
+    for (const line of p.lines) {
+      const code = String(line?.code || '').trim();
+      if (!code.startsWith('AU-')) continue;
+      let base, qtyTins;
+      if (code.startsWith('AU-CTN-') || code.startsWith('AU-SRT-')) {
+        const [b, mult] = normalizeAuSku(code);
+        if (!b) continue;
+        base = b;
+        qtyTins = (line.qty || 0) * mult;
+      } else {
+        base = code;
+        qtyTins = line.qty || 0;
+      }
+      const acc = incoming.get(base) || { qty: 0, pos: [] };
+      acc.qty += qtyTins;
+      if (!acc.pos.includes(p.po)) acc.pos.push(p.po);
+      incoming.set(base, acc);
+    }
+  }
+
+  // Eligible universe: only finished-tin base SKUs that exist in inventory
+  // (not packaging, not discontinued, not the mixed mega-tray).
+  const allowed = new Set();
+  for (const r of inventory) {
+    if (r?.discontinued) continue;
+    if (r.kind === 'base' || r.kind === 'base-b') allowed.add(r.sku);
+  }
+  const universe = new Set();
+  for (const k of baseStock.keys())  if (allowed.has(k)) universe.add(k);
+  for (const k of incoming.keys())   if (allowed.has(k)) universe.add(k);
+  for (const k of tinsByBase.keys()) if (allowed.has(k)) universe.add(k);
+
+  const out = [];
+  for (const sku of universe) {
+    const stock = baseStock.get(sku) || 0;
+    const tins  = tinsByBase.get(sku) || 0;
+    const rate  = totalDays > 0 ? tins / totalDays : 0;
+    const daysLeft = rate > 0 ? stock / rate : null;
+    const inc = incoming.get(sku) || { qty: 0, pos: [] };
+
+    let risk;
+    if (rate === 0 && stock === 0) risk = 'inactive';
+    else if (rate === 0) risk = 'no-sales';
+    else if (daysLeft !== null && daysLeft < 14) risk = inc.qty === 0 ? 'critical' : 'critical-incoming';
+    else if (daysLeft !== null && daysLeft < 30) risk = inc.qty === 0 ? 'low'      : 'low-incoming';
+    else if (daysLeft !== null && daysLeft < 60) risk = 'monitor';
+    else risk = 'stable';
+
+    out.push({
+      sku,
+      current_stock:    Math.round(stock),
+      run_rate_per_day: Math.round(rate * 10) / 10,
+      days_left:        daysLeft !== null ? Math.round(daysLeft * 10) / 10 : null,
+      incoming_qty:     Math.round(inc.qty),
+      next_po_refs:     inc.pos.slice(0, 3),
+      risk,
+    });
+  }
+  const RISK_ORDER = {
+    critical: 0, 'critical-incoming': 1, low: 2, 'low-incoming': 3,
+    monitor: 4, stable: 5, 'no-sales': 6, inactive: 7,
+  };
+  out.sort((a, b) => {
+    const r = (RISK_ORDER[a.risk] ?? 9) - (RISK_ORDER[b.risk] ?? 9);
+    if (r) return r;
+    return (a.days_left ?? 99999) - (b.days_left ?? 99999);
+  });
+  return out;
+}
+
+// Build the AU POs payload. Pulls inventory + 3 trailing months of sales
+// (using cached month-sales when available) + open POs, then derives the
+// incomingBySku view. All CIN7 calls are SERIAL — never Promise.all (per
+// the rate-limit guidance in the file header).
+//
+// Subrequest budget: cold-cache worst case ≈ inventory(~6) + 3×sales(~5
+// each) + POs(~3) = ~24 subrequests. Within Worker free-tier 50/req limit.
+// Warm cache (15-min TTL on each piece) brings most subsequent loads down
+// to a single PO fetch.
+async function buildAuPosPayload(env) {
+  // 1. Inventory — reuse the buildAuInventoryPayload path for shape parity
+  //    with /api/au/inventory. We don't go through the cache wrapper here
+  //    because we need the inventory rows even if /api/au/inventory hasn't
+  //    been hit yet this TTL. (Could refactor to share the cached result;
+  //    not worth the complexity for one extra Stock+Products fetch.)
+  const inventoryPayload = await buildAuInventoryPayload(env);
+  const inventory = inventoryPayload.inventory || [];
+
+  // 2. Trailing 3 complete calendar months for run rate. "Complete" means
+  //    we exclude the current month (which is partial). E.g. on May 11,
+  //    the trailing window is Feb / Mar / Apr.
+  const now = new Date();
+  // Step back to the first day of the current month, then back 1 month —
+  // that's the most recent COMPLETE month. From there, two more months back.
+  const monthList = [];
+  for (let i = 1; i <= 3; i++) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    const yyyy = d.getUTCFullYear();
+    const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+    monthList.push(`${yyyy}-${mm}`);
+  }
+  const monthPayloads = [];
+  for (const month of monthList) {
+    try {
+      const payload = await getMonthSales(env, month);
+      monthPayloads.push(payload);
+    } catch (e) {
+      // Don't fail the whole PO build because one month's sales are
+      // unavailable — just log and continue with what we have. Run rate
+      // will be lower than reality if a month is missing.
+      console.warn(`AU POs: month-sales fetch failed for ${month}:`, e?.message || e);
+    }
+  }
+
+  // 3. Open POs from CIN7
+  const rawPos = await fetchOpenPurchaseOrders(env);
+  const pos = shapePoRows(rawPos);
+
+  // 4. Derive incoming-by-SKU
+  const incomingBySku = buildIncomingBySku(inventory, pos, monthPayloads);
+
+  return {
+    pos,
+    incomingBySku,
+    runRateBasis: {
+      // Documents which months fed the run-rate average so the frontend
+      // tooltip can show "trailing 3 months: Feb / Mar / Apr 2026".
+      months: monthPayloads.map((p) => p.month),
+      missingMonths: monthList.filter((m) => !monthPayloads.some((p) => p.month === m)),
+      note: 'CIN7-channels only (Coles + Woolies + Distributors). Woo + Amazon volume not included until Phase 3.',
+    },
+    lastSync: new Date().toISOString(),
+    source:   'cin7-live',
+    counts: {
+      pos: pos.length,
+      incomingBySku: incomingBySku.length,
+      inventoryRows: inventory.length,
+    },
+  };
+}
+
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
 // Smallest proof-of-life. Hits /Branches with rows=1 — cheapest call we can
@@ -417,6 +1002,63 @@ auRoutes.get('/cin7/status', async (c) => {
     });
   } catch (e) {
     return c.json({ connected: false, reason: String(e?.message || e) });
+  }
+});
+
+// Live monthly sales — CIN7-sourced channels (Coles + Woolies + Distributors)
+// + refunds + per-SKU rollup, all from one /SalesOrders fetch. Woo + Amazon
+// channels stay static until Phase 3; the frontend merges per channel.
+//
+// Query: ?month=YYYY-MM (required), ?refresh=1 (optional — bypass cache).
+// Cache key: `au:sales:YYYY-MM:v1`, 15-min TTL, stale-fallback on error.
+auRoutes.get('/sales', async (c) => {
+  const month = c.req.query('month');
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+    return c.json({ error: 'month query param required, format YYYY-MM' }, 400);
+  }
+  const forceRefresh = c.req.query('refresh') === '1' || c.req.query('refresh') === 'true';
+  try {
+    const payload = await getMonthSales(c.env, month, { forceRefresh });
+    return c.json(payload);
+  } catch (e) {
+    throw e; // global onError sanitises + returns 500
+  }
+});
+
+// Live POs + derived incoming-by-SKU. Cache key `au:pos:v1`, 15-min TTL,
+// stale-fallback on error. Cold-cache cost ≈ 24 CIN7 subrequests (inventory
+// + 3 months of sales + POs); warm-cache hits go straight to the cached
+// payload. ?refresh=1 to bypass.
+auRoutes.get('/pos', async (c) => {
+  const forceRefresh = c.req.query('refresh') === '1' || c.req.query('refresh') === 'true';
+  const cache = c.env.CACHE;
+
+  if (!forceRefresh && cache) {
+    const cached = await cache.get(KV_POS_KEY, 'json');
+    if (cached?.pos?.length) {
+      return c.json({ ...cached, cached: true });
+    }
+  }
+
+  try {
+    const payload = await buildAuPosPayload(c.env);
+    if (cache) {
+      await cache.put(KV_POS_KEY, JSON.stringify(payload), { expirationTtl: POS_TTL_SECONDS });
+    }
+    return c.json({ ...payload, cached: false });
+  } catch (e) {
+    if (cache) {
+      const cached = await cache.get(KV_POS_KEY, 'json');
+      if (cached?.pos?.length) {
+        return c.json({
+          ...cached,
+          cached: true,
+          staleFallback: true,
+          error: 'Upstream CIN7 error — serving cached snapshot.',
+        });
+      }
+    }
+    throw e;
   }
 });
 
