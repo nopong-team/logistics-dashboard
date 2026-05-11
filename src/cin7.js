@@ -1017,6 +1017,81 @@ auRoutes.get('/cin7/status', async (c) => {
   }
 });
 
+// Diagnostic-only endpoint — dumps a sample of raw CIN7 SalesOrders for the
+// named month plus the set of unique values found in the channel-attribution
+// fields (channel, posRegister, company). Lets us see what CIN7 actually
+// returns on the wire so the attribution rules in attributeCin7Channel can
+// be tuned to real data instead of assumptions about the field shape.
+//
+// Added 2026-05-11 because v2.35.1 returned only 6/36 expected attributions
+// for April 2026 — the `company` field on most EDI/refund orders is
+// apparently NOT populated with "Coles" / "Woolworths" / "Stock Adjustments"
+// the way the static CIN7 pivot CSV's "Customer" column is. This endpoint
+// will reveal where the customer info actually lives.
+//
+// PII note: order responses include customer name + email. Endpoint is gated
+// behind the dashboard's Cloudflare Access SSO same as everything else under
+// /api/au, so only Google-Workspace-authenticated team members can hit it.
+auRoutes.get('/sales/debug', async (c) => {
+  const month = c.req.query('month') || '2026-04';
+  const sampleSize = Math.min(20, Number(c.req.query('sample')) || 10);
+
+  const orders = await fetchSalesOrdersForMonth(c.env, month);
+
+  // Collect unique values in the fields we use for attribution
+  const uniqChannels    = new Map(); // value → count
+  const uniqPosRegister = new Map();
+  const uniqCompanies   = new Map();
+  const uniqStatuses    = new Map();
+  // Cross-tab: channel × company combinations (top 30)
+  const channelByCompany = new Map(); // `${channel}|${company}` → count
+  for (const o of orders) {
+    const ch  = String(o.channel     || '');
+    const pos = String(o.posRegister || '');
+    const co  = String(o.company     || '');
+    const st  = String(o.status      || '');
+    uniqChannels.set(ch,    (uniqChannels.get(ch)    || 0) + 1);
+    uniqPosRegister.set(pos,(uniqPosRegister.get(pos)|| 0) + 1);
+    uniqCompanies.set(co,   (uniqCompanies.get(co)   || 0) + 1);
+    uniqStatuses.set(st,    (uniqStatuses.get(st)    || 0) + 1);
+    const key = `${ch || '(none)'} | ${co || '(none)'}`;
+    channelByCompany.set(key, (channelByCompany.get(key) || 0) + 1);
+  }
+
+  // Find a few candidate orders that look like they MIGHT be Coles / Woolies
+  // / refunds, in case the customer name lives in a field we're not reading
+  // (e.g. member.* sub-object). Check by SKU pattern — Coles + Woolies orders
+  // all line items are AU-CTN-...-48 cartons.
+  const looksLikeBulkOrder = (o) => {
+    const lines = Array.isArray(o.lineItems) ? o.lineItems : [];
+    if (lines.length === 0) return false;
+    return lines.some(li => String(li?.code || '').startsWith('AU-CTN-'));
+  };
+  const bulkOrders = orders.filter(looksLikeBulkOrder).slice(0, sampleSize);
+  // Also: orders with negative-qty line items — those should be refunds
+  const looksLikeRefund = (o) => {
+    const lines = Array.isArray(o.lineItems) ? o.lineItems : [];
+    return lines.some(li => Number(li?.qty ?? li?.quantity ?? 0) < 0);
+  };
+  const refundOrders = orders.filter(looksLikeRefund).slice(0, sampleSize);
+
+  // Top-N tables, sorted by count desc
+  const topN = (m, n) => Array.from(m.entries()).sort((a,b) => b[1]-a[1]).slice(0, n);
+
+  return c.json({
+    month,
+    totalOrders: orders.length,
+    uniqueChannels:    topN(uniqChannels,    20),
+    uniquePosRegister: topN(uniqPosRegister, 20),
+    uniqueStatuses:    topN(uniqStatuses,    20),
+    uniqueCompanies:   topN(uniqCompanies,   30),
+    channelByCompany:  topN(channelByCompany,30),
+    bulkOrderSample:   bulkOrders,    // raw — shows full field shape
+    refundOrderSample: refundOrders,
+    note: 'Diagnostic endpoint. Dumps raw CIN7 SalesOrders fields so attribution rules can be tuned to real data. Safe to leave deployed — gated behind Cloudflare Access SSO.',
+  });
+});
+
 // Live monthly sales — CIN7-sourced channels (Coles + Woolies + Distributors)
 // + refunds + per-SKU rollup, all from one /SalesOrders fetch. Woo + Amazon
 // channels stay static until Phase 3; the frontend merges per channel.
