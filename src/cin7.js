@@ -610,7 +610,19 @@ async function buildAuSalesPayload(env, month) {
     for (const li of lineItems) {
       const code = String(li?.code || li?.sku || '').trim();
       if (!code) continue;
-      const qty = Number(li?.qty ?? li?.quantity ?? 0) || 0;
+
+      // v2.35.4 — skip CHILD line items. CIN7 explodes bundled products
+      // (e.g. AU-CTN-SRT-MIX-72-V3 "6-pack of trays") into a parent line
+      // for the bundle + auto-generated child lines for each constituent
+      // SKU. Children have parentId pointing at the parent's line ID;
+      // standalone or parent lines have parentId === 0. Counting both
+      // double-counts (the parent's mult already represents the children's
+      // tin volume).
+      const parentId = Number(li?.parentId ?? 0) || 0;
+      if (parentId > 0) continue;
+
+      const qty       = Number(li?.qty ?? li?.quantity ?? 0) || 0;
+      const uomSize   = Number(li?.uomSize ?? 0) || 0;
       // Omni line item totals: prefer `total` (qty × unitPrice net),
       // fall back to qty × unitPrice if `total` not provided.
       const unitPrice = Number(li?.unitPrice ?? 0) || 0;
@@ -619,7 +631,14 @@ async function buildAuSalesPayload(env, month) {
 
       const [base, mult] = normalizeAuSku(code);
       const baseKey = base || code;
-      const tins = qty * mult;
+
+      // v2.35.4 — Alt UOM lines (e.g. WC-AU-OG-NPO-35 wholesale cartons)
+      // have `uomSize > 1` and report qty already in BASE units (tins).
+      // Standalone SKUs like AU-CTN-OG-NPO-48 have uomSize === 1 and
+      // report qty in product units (cartons). Apply the SKU-pattern
+      // multiplier only in the latter case — otherwise we'd 54x-over-count
+      // every wholesale carton line.
+      const tins = uomSize > 1 ? qty : qty * mult;
 
       if (channelAttr === 'refund') {
         refunds.tins    += tins;
