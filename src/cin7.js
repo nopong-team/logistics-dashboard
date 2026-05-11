@@ -72,9 +72,12 @@ export const auRoutes = new Hono();
 
 const KV_INVENTORY_KEY = 'au:inventory:v1';
 const KV_POS_KEY       = 'au:pos:v1';
-// Per-month sales: `au:sales:YYYY-MM:v1`. Helper below to build the key —
-// kept versioned so a payload-shape bump (v1 → v2) invalidates cleanly.
-function kvSalesKey(month) { return `au:sales:${month}:v1`; }
+// Per-month sales: `au:sales:YYYY-MM:v2`. Helper below to build the key —
+// kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
+// `refunds` is now populated from /CreditNotes (was always 0 in v1 because
+// /SalesOrders doesn't include credit notes); bump invalidates v1 caches that
+// still have empty refunds for live months.
+function kvSalesKey(month) { return `au:sales:${month}:v2`; }
 
 // 15 min TTL — short enough that drift is bounded but long enough to absorb
 // dashboard refreshes on the same minute. Bump the key suffix (v1 → v2) on
@@ -552,6 +555,37 @@ async function fetchSalesOrdersForMonth(env, month /* 'YYYY-MM' */) {
   return cin7FetchAll(env, 'SalesOrders', { fields, where });
 }
 
+// Pull CreditNotes for a single calendar month. CIN7 Omni v1 splits credit
+// notes onto a separate endpoint from SalesOrders — the static pivot CSV
+// combined them but the API doesn't, so v2.35.3 attribution returned 0
+// refunds for live months. Same pagination + where-clause shape as
+// fetchSalesOrdersForMonth so the line-item handling in buildAuSalesPayload
+// can reuse the v2.35.4 rules unchanged.
+//
+// Field selection mirrors the SalesOrders shape — credit notes have the
+// same lineItems schema (code, qty, uomSize, parentId, total) so the
+// parent/child + Alt UOM rules apply identically. We don't need
+// channel/posRegister here (those were empty anyway and refunds are
+// aggregated as a single global pool, not per-channel).
+async function fetchCreditNotesForMonth(env, month /* 'YYYY-MM' */) {
+  const [y, m] = month.split('-').map(Number);
+  const dateFrom = `${month}-01T00:00:00Z`;
+  const nextY = m === 12 ? y + 1 : y;
+  const nextM = m === 12 ? 1 : m + 1;
+  const dateTo = `${nextY}-${String(nextM).padStart(2, '0')}-01T00:00:00Z`;
+  const where = `CreatedDate>='${dateFrom}' AND CreatedDate<'${dateTo}'`;
+
+  const fields = [
+    'id', 'reference', 'createdDate',
+    'memberId', 'memberEmail', 'firstName', 'lastName', 'company',
+    'status', 'invoiceStatus',
+    'total', 'subTotal', 'productTotal',
+    'lineItems',
+  ].join(',');
+
+  return cin7FetchAll(env, 'CreditNotes', { fields, where });
+}
+
 // Customer label — the Python script uses a single `customer` column from
 // the pivot. The Omni API exposes it across `company` (B2B) and
 // firstName+lastName (individuals). For attribution we only need to detect
@@ -575,7 +609,11 @@ function customerLabelFromOrder(order) {
 // and the per-SKU rows only have col/woo2/dist columns populated for the
 // same reason. Frontend merges with static woo/amz on the per-channel side.
 async function buildAuSalesPayload(env, month) {
+  // Serial fetch — never Promise.all'd, per CIN7's 3/sec rate-limit rule
+  // (also documented in project_cin7_omni_constraints.md). SalesOrders
+  // first, then CreditNotes; both share the cin7FetchAll pacing.
   const allOrders = await fetchSalesOrdersForMonth(env, month);
+  const allCreditNotes = await fetchCreditNotesForMonth(env, month);
 
   // Drop VOID/CANCELLED orders before attribution — they're not sales.
   // CIN7 Omni v1 status values seen in the wild: APPROVED, VOID. Match
@@ -585,6 +623,13 @@ async function buildAuSalesPayload(env, month) {
     return s !== 'VOID' && s !== 'VOIDED' && s !== 'CANCELLED';
   });
   const voidsDropped = allOrders.length - orders.length;
+
+  // Same VOID filter for credit notes — a voided credit note isn't a refund.
+  const creditNotes = allCreditNotes.filter((cn) => {
+    const s = String(cn?.status || '').trim().toUpperCase();
+    return s !== 'VOID' && s !== 'VOIDED' && s !== 'CANCELLED';
+  });
+  const creditVoidsDropped = allCreditNotes.length - creditNotes.length;
 
   // Per-channel aggregates
   const channels = {
@@ -670,6 +715,58 @@ async function buildAuSalesPayload(env, month) {
     }
   }
 
+  // Credit notes — aggregate as a single global refund pool, ALWAYS negative.
+  // Same line-item rules as v2.35.4: skip children (parentId > 0), conditional
+  // multiplier (uomSize > 1 ? qty : qty * mult), normalizeAuSku for rollup.
+  // We don't attribute credit notes per-channel (matches the static side's
+  // single negative refunds row); per-channel refund attribution is a Phase 3
+  // polish item once Cloud-channel data lands. We use Math.abs() + negation
+  // to be robust to CIN7's sign convention (whether qty/total come back
+  // positive on a credit-note document or pre-negated).
+  for (const cn of creditNotes) {
+    const cnRef = String(cn.reference || cn.id || '');
+    const lineItems = Array.isArray(cn.lineItems) ? cn.lineItems : [];
+
+    let cnContributedAny = false;
+    for (const li of lineItems) {
+      const code = String(li?.code || li?.sku || '').trim();
+      if (!code) continue;
+
+      const parentId = Number(li?.parentId ?? 0) || 0;
+      if (parentId > 0) continue;
+
+      const qty       = Number(li?.qty ?? li?.quantity ?? 0) || 0;
+      const uomSize   = Number(li?.uomSize ?? 0) || 0;
+      const unitPrice = Number(li?.unitPrice ?? 0) || 0;
+      const lineTotal = Number(li?.total ?? (qty * unitPrice)) || 0;
+      const name      = String(li?.name || '').slice(0, 60);
+
+      const [base, mult] = normalizeAuSku(code);
+      const baseKey = base || code;
+
+      const tinsRaw = uomSize > 1 ? qty : qty * mult;
+      // Always store refunds as NEGATIVE, regardless of CIN7's sign on the
+      // credit note line. Static side stores them negative (tins: -110,
+      // revenue: -71317) — we mirror that so the frontend's "Less refunds"
+      // row renders consistently.
+      const tinsNeg    = -Math.abs(tinsRaw);
+      const revenueNeg = -Math.abs(lineTotal);
+
+      refunds.tins    += tinsNeg;
+      refunds.revenue += revenueNeg;
+      cnContributedAny = true;
+
+      const acc = refunds.sku_lines.get(baseKey) || { tins: 0, sales: 0, name: '' };
+      acc.tins  += tinsNeg;
+      acc.sales += revenueNeg;
+      if (!acc.name && name) acc.name = name;
+      refunds.sku_lines.set(baseKey, acc);
+    }
+    // Only count the credit note in the order count if it actually contributed
+    // a tin/revenue line (skip credit notes that were 100% fee-only or empty).
+    if (cnContributedAny) refunds.orderRefs.add(cnRef);
+  }
+
   // Materialise — sets → counts, maps → arrays/objects
   const channelsOut = {};
   for (const [k, v] of Object.entries(channels)) {
@@ -716,17 +813,21 @@ async function buildAuSalesPayload(env, month) {
       ordersConsidered: orders.length,
       attributedRefs: Object.values(channels).reduce((a, c) => a + c.orderRefs.size, 0)
                     + refunds.orderRefs.size,
+      creditNotesFetched: allCreditNotes.length,
+      creditNotesVoidsDropped: creditVoidsDropped,
+      creditNotesConsidered: creditNotes.length,
       skuRows: skuSales.length,
     },
     // NOTE: woo + amz channels intentionally absent. They live on the Woo
     // and Amazon channel APIs (Phase 3). Frontend merges this with static
     // window.AU_DATA.salesByMonth[month] for those two channels.
     //
-    // NOTE 2: refunds are EMPTY in v2.35.3 because CIN7 Omni v1's
-    // /SalesOrders endpoint doesn't include credit notes / refunds — those
-    // live on /CreditNotes (separate endpoint, separate fetch). The static
-    // side combined both via the pivot report; the API splits them. Refund
-    // attribution lands in a follow-up that adds /CreditNotes fetching.
+    // NOTE 2: refunds are populated as a SINGLE GLOBAL POOL from /CreditNotes
+    // (v2.35.5+). CIN7 Omni v1 splits sales and credit notes across two
+    // endpoints — we fetch both serially and merge here. Per-channel refund
+    // attribution (Coles refund / Woolies refund / dist refund) is a Phase 3
+    // polish item once Cloud-channel data lands; the static side also kept
+    // refunds as a single negative row, so frontend behaviour is unchanged.
   };
 }
 
@@ -1124,6 +1225,51 @@ auRoutes.get('/cin7/status', async (c) => {
 auRoutes.get('/sales/debug', async (c) => {
   const month = c.req.query('month') || '2026-04';
   const sampleSize = Math.min(20, Number(c.req.query('sample')) || 10);
+  const type = String(c.req.query('type') || 'sales-orders');
+
+  // v2.35.5 — type=credit-notes variant. Same diagnostic shape as the default
+  // sales-orders dump, scoped to /CreditNotes. Use this after granting the
+  // CreditNotes Read permission in CIN7 to confirm the connection key picked
+  // up the new permission. If this returns 401/403 ("CIN7 CreditNotes: 401
+  // Forbidden"), the key needs to be regenerated in CIN7 and the new value
+  // pasted into the Cloudflare CIN7_CONNECTION_KEY secret — granting the
+  // permission alone doesn't propagate to existing keys.
+  if (type === 'credit-notes') {
+    const creditNotes = await fetchCreditNotesForMonth(c.env, month);
+    const uniqStatuses  = new Map();
+    const uniqCompanies = new Map();
+    let lineItemsTotal = 0;
+    let parentLines    = 0;
+    let childLines     = 0;
+    let altUomLines    = 0;
+    for (const cn of creditNotes) {
+      const st = String(cn.status  || '');
+      const co = String(cn.company || '');
+      uniqStatuses.set(st,  (uniqStatuses.get(st)  || 0) + 1);
+      uniqCompanies.set(co, (uniqCompanies.get(co) || 0) + 1);
+      const lines = Array.isArray(cn.lineItems) ? cn.lineItems : [];
+      lineItemsTotal += lines.length;
+      for (const li of lines) {
+        if ((Number(li?.parentId) || 0) > 0) childLines++;
+        else parentLines++;
+        if ((Number(li?.uomSize)  || 0) > 1) altUomLines++;
+      }
+    }
+    const topN = (m, n) => Array.from(m.entries()).sort((a,b) => b[1]-a[1]).slice(0, n);
+    return c.json({
+      month,
+      type: 'credit-notes',
+      totalCreditNotes: creditNotes.length,
+      lineItemsTotal,
+      parentLines,
+      childLines,
+      altUomLines,
+      uniqueStatuses:  topN(uniqStatuses,  20),
+      uniqueCompanies: topN(uniqCompanies, 30),
+      sample: creditNotes.slice(0, sampleSize),  // raw — full field shape
+      note: 'Diagnostic — /CreditNotes raw dump. If this 401/403s, regenerate CIN7 connection key and paste into the Cloudflare CIN7_CONNECTION_KEY secret.',
+    });
+  }
 
   const orders = await fetchSalesOrdersForMonth(c.env, month);
 
