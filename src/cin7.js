@@ -72,12 +72,15 @@ export const auRoutes = new Hono();
 
 const KV_INVENTORY_KEY = 'au:inventory:v1';
 const KV_POS_KEY       = 'au:pos:v1';
-// Per-month sales: `au:sales:YYYY-MM:v2`. Helper below to build the key —
+// Per-month sales: `au:sales:YYYY-MM:v3`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because
 // /SalesOrders doesn't include credit notes); bump invalidates v1 caches that
-// still have empty refunds for live months.
-function kvSalesKey(month) { return `au:sales:${month}:v2`; }
+// still have empty refunds for live months. v3 (2026-05-11): tightened SKU
+// validation in credit-notes loop (excludes non-AU codes like CIN7's internal
+// "196" placeholder) + dropped DRAFT credit notes from refund aggregation.
+// Both changes shift refund tins/revenue numbers, so v2 caches are stale.
+function kvSalesKey(month) { return `au:sales:${month}:v3`; }
 
 // 15 min TTL — short enough that drift is bounded but long enough to absorb
 // dashboard refreshes on the same minute. Bump the key suffix (v1 → v2) on
@@ -207,6 +210,24 @@ function normalizeAuSku(sku) {
   m = s.match(/^(AU-.+)M$/);
   if (m) return [m[1], 1];
   return [s, 1];
+}
+
+// Cheap shape check — does `code` look like a real AU SKU? Real AU SKUs all
+// start with `AU-`, `D-AU-` (rescue/discontinued mirrors), or `WC-AU-`
+// (wholesale carton variants). Used to gate credit-note line aggregation:
+// CIN7 occasionally puts internal placeholders in the `code` field of
+// credit-note lines (e.g. `code: "196", name: "Credit Note"` on the
+// Woolworths reconciliation credit notes — confirmed 2026-05-11 in the
+// /CreditNotes diagnostic dump for CRN-72795 + CRN-72796). Those placeholder
+// codes shouldn't get rolled up as if they were real product SKUs because
+// their `qty` (e.g. -0.1775) is a fractional ratio, not a tin count, and
+// `unitPrice` is enormous (e.g. $152,528.64). They DO contribute revenue
+// (the credit note's `total` is the actual refund amount), so they're
+// treated like empty-code "Amount" lines: revenue counts, tins/sku_lines
+// don't. Keep this regex strict — adding a new prefix here is a deliberate
+// product-rule change, not an accidental relax.
+function isAuSkuCode(code) {
+  return /^(?:WC-|D-)?AU-/i.test(String(code || '').trim());
 }
 
 // Discontinued lines per Melanie 2026-05-10. Spicy Chai (SC) is end-of-life
@@ -624,10 +645,17 @@ async function buildAuSalesPayload(env, month) {
   });
   const voidsDropped = allOrders.length - orders.length;
 
-  // Same VOID filter for credit notes — a voided credit note isn't a refund.
+  // Drop VOID/CANCELLED AND DRAFT credit notes. v2.35.5 only filtered VOID
+  // variants which let DRAFT slip through — and the April 2026 diagnostic
+  // surfaced a single DRAFT Woolworths reconciliation credit note (CRN-72795,
+  // -$29,781) that alone explained nearly all of the revenue overage vs the
+  // static April snapshot. DRAFT means "not yet finalized in CIN7" — pending,
+  // not booked — so it shouldn't count toward refund totals on the dashboard.
+  // The static side excluded DRAFT implicitly (the pivot CSV only contained
+  // posted documents). Match that.
   const creditNotes = allCreditNotes.filter((cn) => {
     const s = String(cn?.status || '').trim().toUpperCase();
-    return s !== 'VOID' && s !== 'VOIDED' && s !== 'CANCELLED';
+    return s !== 'VOID' && s !== 'VOIDED' && s !== 'CANCELLED' && s !== 'DRAFT';
   });
   const creditVoidsDropped = allCreditNotes.length - creditNotes.length;
 
@@ -716,6 +744,7 @@ async function buildAuSalesPayload(env, month) {
   }
 
   // Credit notes — aggregate as a single global refund pool, ALWAYS negative.
+<<<<<<< Updated upstream
   // Same line-item rules as v2.35.4: skip children (parentId > 0), conditional
   // multiplier (uomSize > 1 ? qty : qty * mult), normalizeAuSku for rollup.
   // We don't attribute credit notes per-channel (matches the static side's
@@ -723,6 +752,31 @@ async function buildAuSalesPayload(env, month) {
   // polish item once Cloud-channel data lands. We use Math.abs() + negation
   // to be robust to CIN7's sign convention (whether qty/total come back
   // positive on a credit-note document or pre-negated).
+=======
+  // We don't attribute per-channel (matches the static side's single negative
+  // refunds row); per-channel refund attribution is a Phase 3 polish item once
+  // Cloud-channel data lands. Math.abs() + negation makes us robust to CIN7's
+  // sign convention regardless of whether qty/total come back positive on the
+  // credit-note document or already-negated.
+  //
+  // Three line shapes seen in /CreditNotes (confirmed via the debug dump
+  // 2026-05-11):
+  //   • Real-SKU line (code matches isAuSkuCode, e.g. "AU-CL-VLB-35", qty: -2,
+  //     unitPrice: 6.895) — actual product return. Contributes both tins and
+  //     revenue. Skip-children + Alt UOM rules apply same as sales orders.
+  //   • Empty-code "Amount" line (code: "", qty: -1, unitPrice: 5.82,
+  //     name: "Amount" or a long descriptive note) — $-only adjustment for
+  //     things like Amazon GST, shipping refunds, MOTO discount, etc.
+  //     Contributes revenue but NOT tins (no SKU = no tin movement).
+  //     ~62 of 73 April credit notes were entirely or partially empty-code
+  //     "Amount" refunds.
+  //   • Non-AU placeholder line (e.g. code: "196", name: "Credit Note",
+  //     qty: -0.1775, unitPrice: $13,866.24 — Woolworths reconciliation
+  //     credit notes CRN-72795, CRN-72796, etc.). Treated like empty-code
+  //     "Amount" lines: revenue contributes, but tins/sku_lines do NOT
+  //     (the qty is a fractional ratio, not a tin count, and the code
+  //     isn't a real product). Gate via isAuSkuCode below.
+>>>>>>> Stashed changes
   for (const cn of creditNotes) {
     const cnRef = String(cn.reference || cn.id || '');
     const lineItems = Array.isArray(cn.lineItems) ? cn.lineItems : [];
@@ -756,11 +810,37 @@ async function buildAuSalesPayload(env, month) {
       refunds.revenue += revenueNeg;
       cnContributedAny = true;
 
+<<<<<<< Updated upstream
       const acc = refunds.sku_lines.get(baseKey) || { tins: 0, sales: 0, name: '' };
       acc.tins  += tinsNeg;
       acc.sales += revenueNeg;
       if (!acc.name && name) acc.name = name;
       refunds.sku_lines.set(baseKey, acc);
+=======
+      // Tin contribution + sku_lines rollup — only REAL AU SKU lines.
+      // Empty-code "Amount" lines AND non-AU placeholder codes (like CIN7's
+      // "196" Woolworths reconciliation) are $-only adjustments and shouldn't
+      // move the tin counter (no product was returned).
+      let tinsNeg = 0;
+      if (isAuSkuCode(code)) {
+        const [base, mult] = normalizeAuSku(code);
+        const baseKey = base || code;
+        const tinsRaw = uomSize > 1 ? qty : qty * mult;
+        tinsNeg = -Math.abs(tinsRaw);
+        refunds.tins += tinsNeg;
+
+        const acc = refunds.sku_lines.get(baseKey) || { tins: 0, sales: 0, name: '' };
+        acc.tins  += tinsNeg;
+        acc.sales += revenueNeg;
+        if (!acc.name && name) acc.name = name;
+        refunds.sku_lines.set(baseKey, acc);
+      }
+
+      // Count the credit note in orderRefs if any line contributed either
+      // revenue or tin movement. Empty-revenue + empty-tin lines are weird
+      // CIN7 placeholders and don't justify a refund order count.
+      if (revenueNeg !== 0 || tinsNeg !== 0) cnContributedAny = true;
+>>>>>>> Stashed changes
     }
     // Only count the credit note in the order count if it actually contributed
     // a tin/revenue line (skip credit notes that were 100% fee-only or empty).
@@ -814,7 +894,7 @@ async function buildAuSalesPayload(env, month) {
       attributedRefs: Object.values(channels).reduce((a, c) => a + c.orderRefs.size, 0)
                     + refunds.orderRefs.size,
       creditNotesFetched: allCreditNotes.length,
-      creditNotesVoidsDropped: creditVoidsDropped,
+      creditNotesNonFinalDropped: creditVoidsDropped,  // VOID/VOIDED/CANCELLED/DRAFT
       creditNotesConsidered: creditNotes.length,
       skuRows: skuSales.length,
     },
