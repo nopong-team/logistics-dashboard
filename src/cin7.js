@@ -744,15 +744,6 @@ async function buildAuSalesPayload(env, month) {
   }
 
   // Credit notes — aggregate as a single global refund pool, ALWAYS negative.
-<<<<<<< Updated upstream
-  // Same line-item rules as v2.35.4: skip children (parentId > 0), conditional
-  // multiplier (uomSize > 1 ? qty : qty * mult), normalizeAuSku for rollup.
-  // We don't attribute credit notes per-channel (matches the static side's
-  // single negative refunds row); per-channel refund attribution is a Phase 3
-  // polish item once Cloud-channel data lands. We use Math.abs() + negation
-  // to be robust to CIN7's sign convention (whether qty/total come back
-  // positive on a credit-note document or pre-negated).
-=======
   // We don't attribute per-channel (matches the static side's single negative
   // refunds row); per-channel refund attribution is a Phase 3 polish item once
   // Cloud-channel data lands. Math.abs() + negation makes us robust to CIN7's
@@ -776,7 +767,6 @@ async function buildAuSalesPayload(env, month) {
   //     "Amount" lines: revenue contributes, but tins/sku_lines do NOT
   //     (the qty is a fractional ratio, not a tin count, and the code
   //     isn't a real product). Gate via isAuSkuCode below.
->>>>>>> Stashed changes
   for (const cn of creditNotes) {
     const cnRef = String(cn.reference || cn.id || '');
     const lineItems = Array.isArray(cn.lineItems) ? cn.lineItems : [];
@@ -800,13 +790,6 @@ async function buildAuSalesPayload(env, month) {
       const revenueNeg = -Math.abs(lineTotal);
       refunds.revenue += revenueNeg;
 
-<<<<<<< Updated upstream
-      const acc = refunds.sku_lines.get(baseKey) || { tins: 0, sales: 0, name: '' };
-      acc.tins  += tinsNeg;
-      acc.sales += revenueNeg;
-      if (!acc.name && name) acc.name = name;
-      refunds.sku_lines.set(baseKey, acc);
-=======
       // Tin contribution + sku_lines rollup — only REAL AU SKU lines.
       // Empty-code "Amount" lines AND non-AU placeholder codes (like CIN7's
       // "196" Woolworths reconciliation) are $-only adjustments and shouldn't
@@ -830,7 +813,6 @@ async function buildAuSalesPayload(env, month) {
       // revenue or tin movement. Empty-revenue + empty-tin lines are weird
       // CIN7 placeholders and don't justify a refund order count.
       if (revenueNeg !== 0 || tinsNeg !== 0) cnContributedAny = true;
->>>>>>> Stashed changes
     }
     if (cnContributedAny) refunds.orderRefs.add(cnRef);
   }
