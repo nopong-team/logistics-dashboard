@@ -1904,9 +1904,21 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.5</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.6</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.6 &mdash; 11 May 2026 (Refund-data correction: exclude code:196 placeholder + DRAFT credit notes)</h4>
+    <ul>
+      <li><strong>Two CIN7 quirks were inflating April refunds.</strong> The first live <code>/api/au/sales</code> response with refunds populated came back at <strong>&minus;181.71 tins / &minus;$100,519 / 73 orders</strong> vs the static April snapshot of <strong>&minus;110 tins / &minus;$71,317 / 18 orders</strong>. Two issues, both fixed here:
+        <ul>
+          <li><strong>Non-AU placeholder line code <code>"196"</code> was being treated as a real SKU.</strong> Two Woolworths reconciliation credit notes (CRN-72795 + CRN-72796, member 21 / Luke Driver / Better Brands Group) carry a line with <code>code: "196"</code>, <code>name: "Credit Note"</code>, <code>styleCode: "Credit Note"</code>, <code>qty: -0.1775</code> (a fractional ratio, not a tin count), and <code>unitPrice</code> in the $13K&ndash;$152K range. v2.35.5's loop accepted any non-empty <code>code</code> as a SKU and rolled it up under the literal key <code>"196"</code>, contributing <strong>&minus;$98,450 of phantom &ldquo;SKU&rdquo; sales</strong> + <strong>&minus;0.71 fractional tins</strong>. New <code>isAuSkuCode(code)</code> helper enforces the real AU pattern (<code>/^(?:WC-|D-)?AU-/i</code>); credit-note lines that don't match are now treated like empty-code &ldquo;Amount&rdquo; lines &mdash; revenue contributes (the <code>total</code> is still a real refund amount), tins and per-SKU rollup do not.</li>
+          <li><strong>DRAFT credit notes were being aggregated alongside APPROVED ones.</strong> The April dump contained one DRAFT credit note (CRN-72795, the larger of the two Woolworths reconciliations at <strong>&minus;$29,781</strong>) which alone explains nearly all of the revenue overage vs static. DRAFT means &ldquo;not yet finalized in CIN7&rdquo; &mdash; pending, not booked. The static side excluded DRAFT implicitly (the pivot CSV only contained posted documents). Status filter now drops DRAFT alongside the existing VOID/VOIDED/CANCELLED.</li>
+        </ul>
+      </li>
+      <li><strong>Counts field renamed for accuracy.</strong> <code>creditNotesVoidsDropped</code> is now <code>creditNotesNonFinalDropped</code> since it covers DRAFT too.</li>
+      <li><strong>KV cache key bumped <code>au:sales:YYYY-MM:v2</code> &rarr; <code>:v3</code>.</strong> Refund tins and revenue numbers shift with this fix, so v2 caches with inflated refunds get invalidated automatically. <code>?refresh=1</code> not needed.</li>
+      <li><strong>Verify after deploy:</strong> hit <code>https://logistics.apps.nopong.com/api/au/sales?month=2026-04&amp;refresh=1</code>. Expected April refunds: ~&minus;110 tins (clean integer, no fractional decimal) / ~&minus;$71K revenue / ~17&ndash;18 orders. The <code>refunds.sku_lines</code> object should NOT contain a key called <code>"196"</code>.</li>
+    </ul>
     <h4>v2.2.5 &mdash; 11 May 2026 (Refunds via /CreditNotes + NA changelog cleanup)</h4>
     <ul>
       <li><strong>Refunds row now populated from CIN7 /CreditNotes.</strong> v2.35.3 attribution returned 0 refunds for live months because CIN7 Omni v1 splits credit notes onto a separate <code>/CreditNotes</code> endpoint that we weren't fetching. The static side combined sales + credit notes via the pivot CSV; the API splits them. New <code>fetchCreditNotesForMonth(env, month)</code> helper in <code>src/cin7.js</code> mirrors the <code>fetchSalesOrdersForMonth</code> shape (paginated via <code>cin7FetchAll</code>, <code>where=CreatedDate&hellip;</code> filter for the named month). <code>buildAuSalesPayload</code> now fetches both endpoints serially &mdash; never <code>Promise.all</code>'d, per the 3/sec rate-limit rule &mdash; and aggregates credit-note line items into the existing <code>refunds</code> object as a single global negative pool.</li>
