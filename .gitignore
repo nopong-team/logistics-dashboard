@@ -51,3 +51,10 @@ Thumbs.db
 # Full context: Melanie's Context/memory/sandbox_git_lock_avoidance.md.
 # -----------------------------------------------------------------------------
 Unlock Git.command
+
+# -----------------------------------------------------------------------------
+# Generated SQL from scripts/import-cin7-csv.py (CIN7 CSV bulk import).
+# Regenerated on every run, ~60-90 KB depending on CSV size. Preserved on
+# failure for debugging, otherwise transient. Not source code.
+# -----------------------------------------------------------------------------
+scripts/.tmp-cin7-import.sql
