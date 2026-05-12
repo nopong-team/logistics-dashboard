@@ -264,16 +264,19 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
 
   const { watermark: watermarkBefore, watermarkId: watermarkIdBefore } = await readWatermark(env, source);
 
-  // Composite cursor (v2.2.8): see buildCompositeWhere() comment above.
-  // Page=1 always — we walk by watermark, not by page index. CIN7's own
-  // ordering is non-deterministic across calls, so we sort in JS by
-  // (modified_date, id) before processing.
+  // Composite cursor (v2.2.8) + ascending ModifiedDate order (v2.2.9). Page=1
+  // always; we walk by composite cursor, not by page index. Critical: we MUST
+  // ask CIN7 to order by ModifiedDate ASC, otherwise the 250-row batch comes
+  // back in CIN7's default (id-based) order with a wide modified_date spread,
+  // and `MAX(modified_date)` as the advance point would skip everything in
+  // between. v2.2.8 shipped without this and skipped ~58K records in one tick.
   const where = buildCompositeWhere(watermarkBefore, watermarkIdBefore);
   let rows;
   try {
     rows = await cin7Fetch(env, 'SalesOrders', {
       fields: SALES_FIELDS,
       where,
+      order: 'ModifiedDate ASC',
       page: 1,
       rows: PAGE_SIZE,
     });
@@ -451,12 +454,15 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
 
   const { watermark: watermarkBefore, watermarkId: watermarkIdBefore } = await readWatermark(env, source);
 
+  // Composite cursor + ascending ModifiedDate order — see sales-orders chunk
+  // for the rationale (v2.2.9 fix).
   const where = buildCompositeWhere(watermarkBefore, watermarkIdBefore);
   let rows;
   try {
     rows = await cin7Fetch(env, 'CreditNotes', {
       fields: CREDIT_FIELDS,
       where,
+      order: 'ModifiedDate ASC',
       page: 1,
       rows: PAGE_SIZE,
     });
