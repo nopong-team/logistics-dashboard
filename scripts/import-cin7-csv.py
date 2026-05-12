@@ -288,10 +288,13 @@ def main():
             # ── Line item ─────────────────────────────────────────────────
             code = (row["Item Code"] or "").strip() or None
             base_sku, multiplier = normalize_au_sku(code) if code else (None, 1)
-            # Item Qty Moved (dispatched) preferred; fall back to Item Qty.
-            qty_moved = sql_num(row["Item Qty Moved"], None)
-            qty_ordered = sql_num(row["Item Qty"], 0)
-            qty = qty_moved if qty_moved is not None else qty_ordered
+            # Use Item Qty (ordered) — matches what the cron writes. CIN7's
+            # LineItem.qty in the API is the order quantity, not the dispatched
+            # quantity. Using Item Qty Moved would zero out any not-yet-shipped
+            # orders (CIN7 leaves Qty Moved at 0 until the order is dispatched),
+            # losing tins for in-flight orders at export time. The dashboard's
+            # "tins sold" metric is committed inventory, not shipped inventory.
+            qty = sql_num(row["Item Qty"], 0)
             unit_price = sql_num(row["Item Price"], None)
             line_total = (qty or 0) * (unit_price or 0)
             is_au = 1 if (code and is_au_sku(code)) else 0
