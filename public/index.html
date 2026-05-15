@@ -1904,9 +1904,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.11</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.12</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.12 &mdash; 15 May 2026 (Sales tab &mdash; chart shows fixed trailing-6-month window; matches NA pattern)</h4>
+    <ul>
+      <li><strong>Bug.</strong> Clicking January in the AU sales month picker collapsed the "Revenue by channel" chart to a single bar (just January) instead of showing 6 months. Two interacting causes: <code>auTrailingSixMonths()</code> anchored to the SELECTED month, and <code>AU_MONTHS</code> only extended back to January 2026 &mdash; so trailing-6-from-January walked off the start of the array and returned just <code>['2026-01']</code>.</li>
+      <li><strong>Fix.</strong> Chart now always shows the trailing 6 months ending at "now" (the latest entry in <code>AU_MONTHS</code>), regardless of which month is selected in the picker. Matches the NA dashboard's fixed-window behaviour. Selecting a historical month still updates the table and per-channel KPI cards (those remain anchored to the selected month for drill-down), but the chart is a fixed reference frame.</li>
+      <li><strong>AU_MONTHS now extends back to November 2025</strong> (was January 2026) so the trailing-6 window has runway. D1 has the full Nov 2025 &rarr; now history after the v2.36 CSV import + cron, so the picker can navigate through any of those months.</li>
+      <li><strong>Chart title reads "6 months ending [latest month]"</strong> always &mdash; doesn't change as you click around the picker. Previously the title rewrote to match the selected month, which was misleading once the chart's anchor stopped tracking the selection.</li>
+    </ul>
     <h4>v2.2.11 &mdash; 15 May 2026 (Phase C &mdash; <code>/api/au/sales</code> reads from D1; full historical months unblocked)</h4>
     <ul>
       <li><strong>Read-side cutover.</strong> <code>/api/au/sales</code> now serves from D1 instead of fetching CIN7 directly on every cold-cache miss. New builder <code>buildAuSalesPayloadFromD1</code> in <code>src/cin7.js</code> runs 4 indexed SQL queries (sales channels aggregate + per-SKU rollup + refunds aggregate + refunds per-SKU) and produces the same payload shape the previous CIN7-driven builder returned. Source field changes from <code>'cin7-live'</code> to <code>'cin7-d1'</code>.</li>
@@ -6221,12 +6228,17 @@ function initAuDashboard() {
     AU_INCOMING_BY_SKU    = window.AU_DATA.incomingBySku || [];
     AU_SELECTED_MONTH     = window.AU_DATA.defaultMonth || AU_MONTHS[AU_MONTHS.length - 1];
 
-    // v2.35.1 — extend AU_MONTHS client-side back to 2026-01 and forward
+    // v2.35.1 — extend AU_MONTHS client-side back to 2025-11 and forward
     // to the current calendar month, so the picker lets the user navigate
     // historical CIN7 sales even though static au-data.js only has April.
     // Live CIN7 sales lazy-load per month on demand (see the picker change
     // handler + the background pre-fetch fired below).
-    _auExtendMonthsTo('2026-01');
+    //
+    // v2.2.12 (2026-05-15): start extended back to 2025-11 (was 2026-01).
+    // D1 has the full history Nov 2025 → now after the v2.36 CSV import,
+    // and the chart needs at least 6 months of runway to render its
+    // trailing-6-month window without hitting the start of the array.
+    _auExtendMonthsTo('2025-11');
 
     const stamp = document.getElementById('au-data-stamp');
     if (stamp && window.AU_DATA.generated) {
@@ -6535,7 +6547,12 @@ function renderAuAll() {
   const setText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
   setText('au-sales-table-month', lbl);
   setText('au-monthly-month',     lbl);
-  setText('au-chart-end-month',   lbl);
+  // v2.2.12 — chart title always reads the LATEST month (not the selected
+  // one) since the chart itself is a fixed trailing window — see the
+  // matching anchor change in renderAuChart.
+  const latestMonth = AU_MONTHS[AU_MONTHS.length - 1];
+  const latestLbl = AU_MONTH_LABELS[latestMonth] || latestMonth;
+  setText('au-chart-end-month',   latestLbl);
 }
 
 // ── AU formatting helpers ──
@@ -6594,7 +6611,12 @@ function renderAuChart() {
   if (!cv) return;
   const ctx = cv.getContext('2d');
   const source = AU_CHART_MODE === 'revenue' ? AU_SALES_BY_MONTH : AU_ORDERS_BY_MONTH;
-  const months = auTrailingSixMonths(AU_SELECTED_MONTH);
+  // v2.2.12 — chart always shows the trailing 6 months ending at "now"
+  // (the latest entry in AU_MONTHS), regardless of which month the user
+  // has selected from the picker. Matches NA's fixed-window behaviour.
+  // Selecting a historical month still updates the table and per-channel
+  // KPI cards, but the chart is a fixed reference frame.
+  const months = auTrailingSixMonths(AU_MONTHS[AU_MONTHS.length - 1]);
   const crossesYear = new Set(months.map(m => m.slice(0, 4))).size > 1;
   const labels = months.map(m => {
     const d = new Date(m + '-01T00:00:00');
