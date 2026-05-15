@@ -1279,11 +1279,21 @@ async function fetchAllPurchaseOrders(env) {
   return cin7FetchAll(env, 'PurchaseOrders', { fields });
 }
 
-// Open = status not in {Completed, Voided, Cancelled} AND no completedDate
-// set. Case-insensitive — belt-and-braces against CIN7 capitalising things
-// differently across endpoints. If a new closed-status value appears later
-// (e.g. "Returned"), add it here.
-const CLOSED_PO_STATUSES = new Set(['completed', 'voided', 'cancelled', 'closed']);
+// Open = status not in the closed set AND no completedDate set.
+// Case-insensitive — belt-and-braces against CIN7 capitalising things
+// differently across endpoints.
+//
+// v2.2.14 (2026-05-15): added 'void'. CIN7 Omni's /PurchaseOrders endpoint
+// returns the status string as 'VOID' (4 chars), not 'Voided' / 'VOIDED'
+// (6 chars) as the original v2.35 comment in fetchAllPurchaseOrders
+// assumed. After .toLowerCase() this is 'void', which wasn't in the set
+// — so VOID POs leaked through the open filter and surfaced on the
+// dashboard's PO list. Keep BOTH 'void' and 'voided' so the filter is
+// resilient to CIN7 ever switching back. If a new closed-status value
+// appears later (e.g. "Returned"), add it here.
+const CLOSED_PO_STATUSES = new Set([
+  'completed', 'void', 'voided', 'cancelled', 'closed',
+]);
 function isOpenPo(po) {
   if (po?.completedDate) return false;
   const s = String(po?.status || '').trim().toLowerCase();
