@@ -72,7 +72,7 @@ export const auRoutes = new Hono();
 
 const KV_INVENTORY_KEY = 'au:inventory:v1';
 const KV_POS_KEY       = 'au:pos:v1';
-// Per-month sales: `au:sales:YYYY-MM:v3`. Helper below to build the key —
+// Per-month sales: `au:sales:YYYY-MM:v4`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because
 // /SalesOrders doesn't include credit notes); bump invalidates v1 caches that
@@ -80,7 +80,11 @@ const KV_POS_KEY       = 'au:pos:v1';
 // validation in credit-notes loop (excludes non-AU codes like CIN7's internal
 // "196" placeholder) + dropped DRAFT credit notes from refund aggregation.
 // Both changes shift refund tins/revenue numbers, so v2 caches are stale.
-function kvSalesKey(month) { return `au:sales:${month}:v3`; }
+// v4 (v2.2.11, 2026-05-15): Phase C cutover — payload is now built from D1
+// (`buildAuSalesPayloadFromD1`) instead of by fetching CIN7 directly per
+// request. Shape is identical except `source` is `'cin7-d1'` and `counts`
+// drops the upstream-fetch fields that no longer apply. v3 caches are stale.
+function kvSalesKey(month) { return `au:sales:${month}:v4`; }
 
 // 15 min TTL — short enough that drift is bounded but long enough to absorb
 // dashboard refreshes on the same minute. Bump the key suffix (v1 → v2) on
@@ -895,6 +899,195 @@ async function buildAuSalesPayload(env, month) {
   };
 }
 
+// Build the AU sales payload from D1 (Phase C — v2.2.11). Same payload shape
+// as `buildAuSalesPayload` (which fetched /SalesOrders + /CreditNotes
+// directly from CIN7 on every cold-cache miss), but reads the
+// already-classified rows the cron has been writing to D1 since v2.2.7
+// + the historical CSV-imported rows from v2.36 Phase A.
+//
+// Why the cutover. Live CIN7 fetches were ~50 paginated calls per cold-cache
+// miss × 5 concurrent month tabs on the front-end pre-fetch = bursts that
+// hit CIN7's 3-call/sec rate limit. Reads from D1 are 4 SQL queries on
+// indexed columns — unconditional sub-second.
+//
+// What's pre-computed at write time (matches buildAuSalesPayload's logic):
+//   • orders.channel_attr      ← attributeCin7Order(order)
+//   • items.tins (signed)       ← uomSize>1 ? qty : qty*multiplier
+//                                  (negative for credit-note AU SKUs)
+//   • items.is_au_sku           ← isAuSkuCode(code)
+//   • items.base_sku, mult      ← normalizeAuSku(code)
+//   • credit-note items.revenue_signed ← -ABS(total)
+// So the read path is mostly SUM + GROUP BY rather than line-by-line
+// classification.
+//
+// Caveat on dist for current-month data (May 2026 onward). Cron-imported
+// rows classify dist purely by company substring (CIN7's API doesn't expose
+// the channel field). The CSV-import path applies the additional
+// channel='Backend' filter, which excludes WooCommerce wholesale stockists
+// from dist. So historical months (Nov 2025 → 2026-05-12, all CSV) are
+// clean — exact April parity. Months past the CSV cutoff include some
+// over-counted dist rows. Per next-session-brief-v2.36-csv-pivot.md:
+// "Phase C parity test should target Coles/Woolies exactly + accept the
+// higher distributor number as the new truth."
+async function buildAuSalesPayloadFromD1(env, month) {
+  if (!env.DB) {
+    throw new Error('Phase C: env.DB binding not configured (logistics-db)');
+  }
+
+  // Sales channels aggregate. parent_id = 0 to skip CIN7's auto-generated
+  // bundle-child line items (otherwise we double-count — the parent row's
+  // multiplier already represents the children's tin volume). Status filter
+  // matches the CIN7 build's drop of VOID/VOIDED/CANCELLED orders.
+  const channelsRows = await env.DB.prepare(
+    `SELECT
+        o.channel_attr       AS channel,
+        SUM(i.tins)          AS tins,
+        SUM(i.total)         AS revenue,
+        COUNT(DISTINCT o.id) AS orders
+       FROM cin7_sales_orders o
+       JOIN cin7_sales_order_items i ON i.order_id = o.id
+      WHERE o.market = 'AU'
+        AND o.status NOT IN ('VOID','VOIDED','CANCELLED')
+        AND o.channel_attr IN ('col','woo2','dist')
+        AND substr(o.created_date, 1, 7) = ?
+        AND i.parent_id = 0
+      GROUP BY o.channel_attr`,
+  ).bind(month).all();
+
+  // Sales per-SKU rollup. Drop rows with no base_sku — CIN7 occasionally
+  // ships items with non-AU codes (placeholders, freight, etc.) that don't
+  // belong in the per-SKU view, mirroring the CIN7 build's behaviour.
+  const skuRows = await env.DB.prepare(
+    `SELECT
+        i.base_sku                                                     AS sku,
+        MAX(i.name)                                                    AS name,
+        SUM(CASE WHEN o.channel_attr = 'col'  THEN i.tins ELSE 0 END)  AS col,
+        SUM(CASE WHEN o.channel_attr = 'woo2' THEN i.tins ELSE 0 END)  AS woo2,
+        SUM(CASE WHEN o.channel_attr = 'dist' THEN i.tins ELSE 0 END)  AS dist,
+        SUM(i.total)                                                   AS revenue
+       FROM cin7_sales_orders o
+       JOIN cin7_sales_order_items i ON i.order_id = o.id
+      WHERE o.market = 'AU'
+        AND o.status NOT IN ('VOID','VOIDED','CANCELLED')
+        AND o.channel_attr IN ('col','woo2','dist')
+        AND substr(o.created_date, 1, 7) = ?
+        AND i.parent_id = 0
+        AND i.base_sku IS NOT NULL
+      GROUP BY i.base_sku`,
+  ).bind(month).all();
+
+  // Refunds aggregate — single global pool, ALWAYS negative. tins is
+  // pre-signed (negative for AU SKUs, 0 for empty-code "Amount" lines and
+  // non-AU placeholder codes like CIN7's "196" Woolies reconciliation lines).
+  // revenue_signed is always -ABS(total). Drop VOID/VOIDED/CANCELLED + DRAFT
+  // (DRAFT means "not yet finalized in CIN7" — pending, not booked).
+  // The orders count uses CASE-conditional COUNT DISTINCT to mirror the
+  // CIN7 build's rule: only count credit notes that contributed something.
+  const refundsAgg = await env.DB.prepare(
+    `SELECT
+        COALESCE(SUM(i.tins), 0)            AS tins,
+        COALESCE(SUM(i.revenue_signed), 0)  AS revenue,
+        COUNT(DISTINCT CASE WHEN i.tins != 0 OR i.revenue_signed != 0
+                            THEN cn.id END) AS orders
+       FROM cin7_credit_notes cn
+       JOIN cin7_credit_note_items i ON i.credit_note_id = cn.id
+      WHERE cn.market = 'AU'
+        AND cn.status NOT IN ('VOID','VOIDED','CANCELLED','DRAFT')
+        AND substr(cn.created_date, 1, 7) = ?
+        AND i.parent_id = 0`,
+  ).bind(month).first();
+
+  // Refunds per-SKU lines — only AU-SKU lines contribute (empty-code +
+  // non-AU placeholder lines are revenue-only, no tin movement).
+  const refundSkuRows = await env.DB.prepare(
+    `SELECT
+        i.base_sku             AS sku,
+        SUM(i.tins)            AS tins,
+        SUM(i.revenue_signed)  AS sales,
+        MAX(i.name)            AS name
+       FROM cin7_credit_notes cn
+       JOIN cin7_credit_note_items i ON i.credit_note_id = cn.id
+      WHERE cn.market = 'AU'
+        AND cn.status NOT IN ('VOID','VOIDED','CANCELLED','DRAFT')
+        AND substr(cn.created_date, 1, 7) = ?
+        AND i.parent_id = 0
+        AND i.is_au_sku = 1
+        AND i.base_sku IS NOT NULL
+      GROUP BY i.base_sku`,
+  ).bind(month).all();
+
+  // Materialise — match the shape buildAuSalesPayload produces so the
+  // frontend doesn't need to know which path served the data.
+  const channelsOut = {
+    col:  { tins: 0, revenue: 0, orders: 0 },
+    woo2: { tins: 0, revenue: 0, orders: 0 },
+    dist: { tins: 0, revenue: 0, orders: 0 },
+  };
+  for (const r of (channelsRows.results || [])) {
+    if (!channelsOut[r.channel]) continue;
+    channelsOut[r.channel] = {
+      tins:    Number(r.tins)    || 0,
+      revenue: Number(r.revenue) || 0,
+      orders:  Number(r.orders)  || 0,
+    };
+  }
+
+  const refundsOut = {
+    tins:      Number(refundsAgg?.tins)    || 0,
+    revenue:   Number(refundsAgg?.revenue) || 0,
+    orders:    Number(refundsAgg?.orders)  || 0,
+    sku_lines: {},
+  };
+  for (const r of (refundSkuRows.results || [])) {
+    refundsOut.sku_lines[r.sku] = {
+      tins:  Number(r.tins)  || 0,
+      sales: Number(r.sales) || 0,
+      name:  r.name || '',
+    };
+  }
+
+  const skuSales = [];
+  for (const r of (skuRows.results || [])) {
+    const col  = Number(r.col)  || 0;
+    const woo2 = Number(r.woo2) || 0;
+    const dist = Number(r.dist) || 0;
+    const revenue = Number(r.revenue) || 0;
+    const total = col + woo2 + dist;
+    if (total === 0 && revenue === 0) continue;
+    skuSales.push({
+      sku: r.sku,
+      name: r.name || '',
+      col, woo2, dist,
+      total_tins: total,
+      revenue,
+    });
+  }
+  skuSales.sort((a, b) => b.total_tins - a.total_tins);
+
+  const channelOrders = channelsOut.col.orders + channelsOut.woo2.orders + channelsOut.dist.orders;
+  return {
+    month,
+    channels: channelsOut,
+    refunds:  refundsOut,
+    skuSales,
+    lastSync: new Date().toISOString(),
+    source:   'cin7-d1',
+    counts: {
+      // ordersConsidered + attributedRefs + skuRows match the keys
+      // buildAuSalesPayload returned. ordersFetched / voidsDropped /
+      // creditNotesFetched are upstream-fetch metrics that no longer
+      // apply — D1 only stores the post-cron set.
+      ordersConsidered:      channelOrders,
+      attributedRefs:        channelOrders + refundsOut.orders,
+      creditNotesConsidered: refundsOut.orders,
+      skuRows:               skuSales.length,
+    },
+    // NOTE: woo + amz channels intentionally absent. They live on the Woo
+    // and Amazon channel APIs (Phase 3). Frontend merges this with static
+    // window.AU_DATA.salesByMonth[month] for those two channels.
+  };
+}
+
 // KV-cache wrapper for monthly sales. Used both by the /sales route and by
 // the /pos route's run-rate derivation (which needs the trailing 3 complete
 // months). Behaviour:
@@ -913,7 +1106,11 @@ async function getMonthSales(env, month, { forceRefresh = false } = {}) {
   }
 
   try {
-    const payload = await buildAuSalesPayload(env, month);
+    // v2.2.11: Phase C cutover — read from D1 instead of fetching CIN7
+    // directly. The cron + the v2.36 CSV import keep D1 current. The
+    // legacy buildAuSalesPayload (CIN7 path) is left in place for now
+    // as a reference; will be removed in a future cleanup.
+    const payload = await buildAuSalesPayloadFromD1(env, month);
     if (cache) {
       await cache.put(key, JSON.stringify(payload), { expirationTtl: SALES_TTL_SECONDS });
     }
