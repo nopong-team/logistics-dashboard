@@ -27,18 +27,29 @@
  * Watermark strategy. We watermark on `ModifiedDate` (not `CreatedDate`) so
  * retroactive edits — e.g. a DRAFT credit note flipping to APPROVED days
  * after creation, or a VOID landing on an old order — propagate through to
- * D1 on the next tick. The brief flags a hidden gotcha (§8): CIN7 may not
- * populate ModifiedDate on every record type. Mitigation: we fall back to
- * createdDate per-record when modifiedDate is missing, and we run the
- * WHERE-clause filter against `ModifiedDate>=watermark`. If a deployment
- * later finds ModifiedDate truly absent for credit notes, swap the filter
- * to CreatedDate and arrange a periodic full re-sync.
+ * D1 on the next tick. We fall back to createdDate per-record when
+ * modifiedDate is missing.
  *
- * Boundary handling. We use `ModifiedDate >= watermark` (not strict `>`), so
- * the last row of the previous chunk gets re-fetched. The upsert is
- * idempotent (INSERT OR REPLACE), so duplicate fetches are harmless. Strict
- * `>` would miss any record whose modified_date exactly equals the
- * watermark, which can happen at the boundary of large batches.
+ * Boundary handling (v2.2.10). Strict `ModifiedDate > '${watermark}'` on the
+ * WHERE clause + advance to `MAX(modifiedDate) seen`. Why strict `>`: v2.2.7
+ * shipped with `>=` and stalled forever on a 250-record cluster all sharing
+ * `2025-11-08T13:00:06Z` (`MAX = watermark`, no forward progress). v2.2.8/9
+ * tried a composite `(modified_date, id)` cursor to walk through the
+ * cluster, but CIN7's `where` clause silently drops `Id` filters — see the
+ * 2026-05-12 transcript for the diagnosis — so the composite reduces to
+ * `ModifiedDate >= watermark` at the API layer and the same stall returns.
+ *
+ * The accepted trade-off: if a future cluster of >250 records ever shares
+ * a single modifiedDate, the cluster members that don't fit on the first
+ * page get skipped. In AU steady state (a few new records per day) clusters
+ * are vanishingly rare; the recovery path when it happens is a CSV
+ * reconcile via `scripts/import-cin7-csv.py` for the affected date range.
+ * INSERT OR REPLACE makes any reconcile idempotent.
+ *
+ * Schema note. `sync_state.watermark_id` was added by migration 0006 for the
+ * v2.2.8 composite cursor; v2.2.10 stops reading or writing it. The column
+ * stays in the schema (cheap to leave) and can be dropped in a future
+ * cleanup migration.
  *
  * Soft-delete VOID. VOID/CANCELLED rows are stored in D1 with `status='VOID'`
  * (or as-returned) rather than deleted, so their line items remain auditable.
@@ -170,53 +181,18 @@ async function logRun(env, {
   ).run();
 }
 
-// Read the current composite watermark `(modified_date, id)`, creating the
-// sync_state row if absent. v2.2.8 adds the `watermark_id` tiebreaker; pre-
-// existing rows from v2.2.7 default to watermark_id=0 via the column DEFAULT,
-// so the first call after migration 0006 reads (stuck_timestamp, 0) and the
-// composite WHERE clause unsticks the cluster on the next fetch.
+// Read the current watermark, creating the sync_state row if absent.
+// v2.2.10: stops reading watermark_id (composite cursor was retired — see
+// file docstring). The column still exists in the schema; we leave whatever
+// value is there untouched.
 async function readWatermark(env, source) {
   await env.DB.prepare(
     `INSERT OR IGNORE INTO sync_state (source, market, watermark) VALUES (?, 'AU', ?)`,
   ).bind(source, EPOCH_WATERMARK).run();
   const row = await env.DB.prepare(
-    `SELECT watermark, watermark_id FROM sync_state WHERE source = ? AND market = 'AU'`,
+    `SELECT watermark FROM sync_state WHERE source = ? AND market = 'AU'`,
   ).bind(source).first();
-  return {
-    watermark: row?.watermark || EPOCH_WATERMARK,
-    watermarkId: Number(row?.watermark_id ?? 0) || 0,
-  };
-}
-
-// Build the CIN7 WHERE clause for the composite cursor.
-//   • First run (watermarkId === 0): simple `ModifiedDate>='w'`. Avoids the
-//     OR/parentheses path entirely on a known-empty state, sidestepping any
-//     edge case where CIN7's where parser is fussy about parenthesised OR.
-//   • Subsequent runs: `(ModifiedDate>'w') OR (ModifiedDate='w' AND Id>w_id)`.
-//     "Records past this timestamp OR records at this same timestamp with a
-//     higher Id" — monotonic progress through ties.
-// Field-name casing: ModifiedDate matches existing where-clause usage (see
-// fetchSalesOrdersForMonth in src/cin7.js). `Id` uses the same PascalCase
-// convention; if CIN7 rejects it the sync_logs will surface the error and
-// we'll iterate.
-function buildCompositeWhere(watermark, watermarkId) {
-  if (!watermarkId) {
-    return `ModifiedDate>='${watermark}'`;
-  }
-  return `(ModifiedDate>'${watermark}') OR (ModifiedDate='${watermark}' AND Id>${watermarkId})`;
-}
-
-// Sort a CIN7 record batch by (modified_date, id) ASC. The LAST element is
-// then the composite-cursor advance point. Stable across re-fetches because
-// `id` is unique per CIN7 record, so the watermark moves forward
-// deterministically even when many records share a modified_date.
-function sortByCompositeKey(records) {
-  return [...records].sort((a, b) => {
-    const ma = pickModifiedDate(a) || '';
-    const mb = pickModifiedDate(b) || '';
-    if (ma !== mb) return ma < mb ? -1 : 1;
-    return (Number(a.id) || 0) - (Number(b.id) || 0);
-  });
+  return row?.watermark || EPOCH_WATERMARK;
 }
 
 // ─── Sales orders chunk ────────────────────────────────────────────────────
@@ -262,15 +238,14 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
     throw new Error('cin7 sync: CIN7_USERNAME / CIN7_CONNECTION_KEY not set');
   }
 
-  const { watermark: watermarkBefore, watermarkId: watermarkIdBefore } = await readWatermark(env, source);
+  const watermarkBefore = await readWatermark(env, source);
 
-  // Composite cursor (v2.2.8) + ascending ModifiedDate order (v2.2.9). Page=1
-  // always; we walk by composite cursor, not by page index. Critical: we MUST
-  // ask CIN7 to order by ModifiedDate ASC, otherwise the 250-row batch comes
-  // back in CIN7's default (id-based) order with a wide modified_date spread,
-  // and `MAX(modified_date)` as the advance point would skip everything in
-  // between. v2.2.8 shipped without this and skipped ~58K records in one tick.
-  const where = buildCompositeWhere(watermarkBefore, watermarkIdBefore);
+  // v2.2.10: strict `>` on the WHERE clause + ascending ModifiedDate order.
+  // The order param is essential — without it CIN7 returns batches in id
+  // order with a wide modified_date spread, and MAX(modified_date) as the
+  // advance point would skip records in between (v2.2.8's regression).
+  // Page=1 always; the watermark itself is the cursor.
+  const where = `ModifiedDate>'${watermarkBefore}'`;
   let rows;
   try {
     rows = await cin7Fetch(env, 'SalesOrders', {
@@ -289,10 +264,9 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
     });
     throw e;
   }
-  const orders = sortByCompositeKey(Array.isArray(rows) ? rows : []);
+  const orders = Array.isArray(rows) ? rows : [];
 
   let watermarkAfter = watermarkBefore;
-  let watermarkIdAfter = watermarkIdBefore;
   let rowsUpserted = 0;
   let itemsUpserted = 0;
 
@@ -374,29 +348,25 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
       await env.DB.batch(stmts.slice(i, i + CHUNK));
     }
 
-    // Composite-cursor advance: the LAST element of the sorted batch carries
-    // the highest (modified_date, id) we just persisted. That tuple becomes
-    // the new watermark IFF it's strictly past the previous cursor — a guard
-    // against rare cases where CIN7 returns rows we've already passed.
-    const last = orders[orders.length - 1];
-    const lastMod = pickModifiedDate(last);
-    const lastId  = Number(last?.id) || 0;
-    if (lastMod && (
-        lastMod > watermarkBefore ||
-        (lastMod === watermarkBefore && lastId > watermarkIdBefore))) {
-      watermarkAfter   = lastMod;
-      watermarkIdAfter = lastId;
+    // v2.2.10 watermark advance: MAX(modifiedDate) over the persisted rows.
+    // The strict `>` WHERE clause guarantees every row's modifiedDate is past
+    // the old watermark, so MAX is always a forward step (or stays equal if
+    // orders is empty, in which case this branch doesn't run).
+    for (const o of orders) {
+      const m = pickModifiedDate(o);
+      if (m && m > watermarkAfter) watermarkAfter = m;
     }
   }
 
   // Update sync_state heartbeat — always, even if zero rows came back, so
   // the dashboard can answer "when did we last hear from CIN7" separately
-  // from "when did we last persist a new row".
+  // from "when did we last persist a new row". Note: watermark_id is
+  // intentionally NOT touched here — see file docstring.
   await env.DB.prepare(
     `UPDATE sync_state
-        SET watermark = ?, watermark_id = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        SET watermark = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
       WHERE source = ? AND market = 'AU'`,
-  ).bind(watermarkAfter, watermarkIdAfter, source).run();
+  ).bind(watermarkAfter, source).run();
 
   const durationMs = Date.now() - startMs;
   await logRun(env, {
@@ -404,22 +374,17 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
     watermarkBefore, watermarkAfter, status: 'ok', durationMs,
   });
 
-  // `more` hint: true if (a) we got a full page AND (b) the watermark
-  // actually advanced. If we got a full page but watermark didn't move,
-  // something pathological is happening (CIN7 returning the same records
-  // despite the cursor having advanced past them) — flag as NOT more so the
-  // backfill loop bails instead of spinning forever.
-  const watermarkAdvanced = watermarkAfter > watermarkBefore ||
-    (watermarkAfter === watermarkBefore && watermarkIdAfter > watermarkIdBefore);
-
+  // `more` hint: full page implies more records may be available. Strict `>`
+  // means we can't have the v2.2.8-style "same records returned forever"
+  // failure mode, so no separate watermarkAdvanced guard is needed — if
+  // orders.length > 0, the watermark moved.
   return {
     ok: true,
     source, action,
     pagesFetched: 1,
     rowsUpserted, itemsUpserted,
     watermarkBefore, watermarkAfter,
-    watermarkIdBefore, watermarkIdAfter,
-    more: orders.length >= PAGE_SIZE && watermarkAdvanced,
+    more: orders.length >= PAGE_SIZE,
     durationMs,
   };
 }
@@ -452,11 +417,12 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
     throw new Error('cin7 sync: CIN7_USERNAME / CIN7_CONNECTION_KEY not set');
   }
 
-  const { watermark: watermarkBefore, watermarkId: watermarkIdBefore } = await readWatermark(env, source);
+  const watermarkBefore = await readWatermark(env, source);
 
-  // Composite cursor + ascending ModifiedDate order — see sales-orders chunk
-  // for the rationale (v2.2.9 fix).
-  const where = buildCompositeWhere(watermarkBefore, watermarkIdBefore);
+  // v2.2.10: strict `>` + ascending ModifiedDate order. See sales-orders
+  // chunk for full rationale (and the file docstring for the cluster
+  // trade-off this design accepts).
+  const where = `ModifiedDate>'${watermarkBefore}'`;
   let rows;
   try {
     rows = await cin7Fetch(env, 'CreditNotes', {
@@ -475,10 +441,9 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
     });
     throw e;
   }
-  const creditNotes = sortByCompositeKey(Array.isArray(rows) ? rows : []);
+  const creditNotes = Array.isArray(rows) ? rows : [];
 
   let watermarkAfter = watermarkBefore;
-  let watermarkIdAfter = watermarkIdBefore;
   let rowsUpserted = 0;
   let itemsUpserted = 0;
 
@@ -550,23 +515,19 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
       await env.DB.batch(stmts.slice(i, i + CHUNK));
     }
 
-    // Composite-cursor advance — same logic as sales orders.
-    const last = creditNotes[creditNotes.length - 1];
-    const lastMod = pickModifiedDate(last);
-    const lastId  = Number(last?.id) || 0;
-    if (lastMod && (
-        lastMod > watermarkBefore ||
-        (lastMod === watermarkBefore && lastId > watermarkIdBefore))) {
-      watermarkAfter   = lastMod;
-      watermarkIdAfter = lastId;
+    // v2.2.10 watermark advance — same logic as sales orders: MAX over the
+    // batch, no id tracking.
+    for (const cn of creditNotes) {
+      const m = pickModifiedDate(cn);
+      if (m && m > watermarkAfter) watermarkAfter = m;
     }
   }
 
   await env.DB.prepare(
     `UPDATE sync_state
-        SET watermark = ?, watermark_id = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        SET watermark = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
       WHERE source = ? AND market = 'AU'`,
-  ).bind(watermarkAfter, watermarkIdAfter, source).run();
+  ).bind(watermarkAfter, source).run();
 
   const durationMs = Date.now() - startMs;
   await logRun(env, {
@@ -574,17 +535,13 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
     watermarkBefore, watermarkAfter, status: 'ok', durationMs,
   });
 
-  const watermarkAdvanced = watermarkAfter > watermarkBefore ||
-    (watermarkAfter === watermarkBefore && watermarkIdAfter > watermarkIdBefore);
-
   return {
     ok: true,
     source, action,
     pagesFetched: 1,
     rowsUpserted, itemsUpserted,
     watermarkBefore, watermarkAfter,
-    watermarkIdBefore, watermarkIdAfter,
-    more: creditNotes.length >= PAGE_SIZE && watermarkAdvanced,
+    more: creditNotes.length >= PAGE_SIZE,
     durationMs,
   };
 }
