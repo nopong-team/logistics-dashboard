@@ -58,6 +58,12 @@ function storeFromEnv(env, market) {
   const lookup = {
     CA: { market: 'CA', url: env.WOO_CA_URL, key: env.WOO_CA_KEY, secret: env.WOO_CA_SECRET, currency: 'CAD' },
     US: { market: 'US', url: env.WOO_US_URL, key: env.WOO_US_KEY, secret: env.WOO_US_SECRET, currency: 'USD' },
+    // AU added v2.2.13 — Phase 3a of v2.36. Backfill seeded via Metorik CSV
+    // import (scripts/import-woo-au-csv.py); this cron path picks up new
+    // orders modified after the CSV cutoff watermark of 2026-05-12T13:02:35.
+    // Secrets gated in runWooCronSync — without WOO_AU_* set, the cron
+    // silently skips AU.
+    AU: { market: 'AU', url: env.WOO_AU_URL, key: env.WOO_AU_KEY, secret: env.WOO_AU_SECRET, currency: 'AUD' },
   };
   return lookup[key];
 }
@@ -285,8 +291,11 @@ export async function runBackfillChunk(env, market, pages, action = 'backfill') 
 adminRoutes.post('/backfill', async (c) => {
   const market = (c.req.query('market') || '').toUpperCase();
   const source = (c.req.query('source') || 'woo').toLowerCase();
-  if (!market || !['CA', 'US'].includes(market)) {
-    return c.json({ error: 'market must be CA or US' }, 400);
+  // Source-dependent valid markets: Woo supports CA/US/AU (v2.2.13 adds AU);
+  // Amazon still NA-only (FE region not yet wired — Phase 3b).
+  const validMarkets = source === 'amazon' ? ['CA', 'US'] : ['CA', 'US', 'AU'];
+  if (!market || !validMarkets.includes(market)) {
+    return c.json({ error: `market must be one of ${validMarkets.join(', ')}` }, 400);
   }
   if (!c.env.DB) {
     return c.json({ error: 'D1 binding DB not configured' }, 500);
@@ -495,8 +504,10 @@ adminRoutes.post('/amazon/dedupe-items', async (c) => {
 adminRoutes.get('/reconcile', async (c) => {
   const market = (c.req.query('market') || '').toUpperCase();
   const source = (c.req.query('source') || 'woo').toLowerCase();
-  if (!market || !['CA', 'US'].includes(market)) {
-    return c.json({ error: 'market must be CA or US' }, 400);
+  // v2.2.13: Woo reconcile supports CA/US/AU; Amazon still NA-only.
+  const validMarkets = source === 'amazon' ? ['CA', 'US'] : ['CA', 'US', 'AU'];
+  if (!market || !validMarkets.includes(market)) {
+    return c.json({ error: `market must be one of ${validMarkets.join(', ')}` }, 400);
   }
   if (!c.env.DB) {
     return c.json({ error: 'D1 binding DB not configured' }, 500);

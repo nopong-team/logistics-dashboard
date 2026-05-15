@@ -157,6 +157,11 @@ async function runWooCronSync(env) {
   const markets = [];
   if (env.WOO_CA_URL && env.WOO_CA_KEY && env.WOO_CA_SECRET) markets.push('CA');
   if (env.WOO_US_URL && env.WOO_US_KEY && env.WOO_US_SECRET) markets.push('US');
+  // v2.2.13 (Phase 3a): AU joins the cron once WOO_AU_* secrets are set.
+  // Without those secrets the AU branch silently skips, mirroring CA/US.
+  // Backfill seeding for AU is one-shot via scripts/import-woo-au-csv.py
+  // (Metorik export — see Melanie's Context/DECISIONS.md 2026-05-15).
+  if (env.WOO_AU_URL && env.WOO_AU_KEY && env.WOO_AU_SECRET) markets.push('AU');
   if (markets.length === 0) {
     console.log('Woo cron sync skipped: no markets configured');
     return;

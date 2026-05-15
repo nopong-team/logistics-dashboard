@@ -53,8 +53,10 @@ Thumbs.db
 Unlock Git.command
 
 # -----------------------------------------------------------------------------
-# Generated SQL from scripts/import-cin7-csv.py (CIN7 CSV bulk import).
-# Regenerated on every run, ~60-90 KB depending on CSV size. Preserved on
-# failure for debugging, otherwise transient. Not source code.
+# Generated SQL from scripts/import-*-csv.py — CSV bulk imports for CIN7 (AU
+# sales orders) and Woo AU (Metorik). Regenerated on every run, sizes vary
+# with CSV scale (~30 KB for CIN7, ~28 MB for Woo AU). Preserved on failure
+# for debugging, otherwise transient. Not source code.
 # -----------------------------------------------------------------------------
 scripts/.tmp-cin7-import.sql
+scripts/.tmp-woo-au-import.sql
