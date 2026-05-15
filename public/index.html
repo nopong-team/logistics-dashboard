@@ -1904,9 +1904,19 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.13</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.14</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.14 &mdash; 15 May 2026 (PO cache bust + Woo channel read-side cutover from D1)</h4>
+    <ul>
+      <li><strong>POs stale-cache fix.</strong> Right after the v2.2.13 deploy the AU Purchase Orders tab showed every PO instead of just open ones &mdash; turned out to be a stale <code>au:pos:v1</code> KV snapshot serving the previous cache content for up to 15 min. Bumped the KV key to <code>au:pos:v2</code> to force a fresh fetch which re-applies the current <code>isOpenPo</code> filter (drops <code>completed</code>/<code>voided</code>/<code>cancelled</code>/<code>closed</code> + any row with a <code>completedDate</code>). The server-side filter logic is unchanged from v2.2.5 &mdash; this is purely a cache-version bump.</li>
+      <li><strong>Woo channel now reads from D1.</strong> Phase 3a's read-side cutover lands the second half of the work v2.2.13 set up: D1 had the data, but <code>/api/au/sales</code> wasn't reading from it for the Woo channel. New helper <code>getAuWooSalesFromD1</code> in <code>src/cin7.js</code> queries <code>orders</code> + <code>order_items</code> for <code>market='AU'</code>, <code>status IN ('completed','processing')</code> in the named month, applies AU SKU normalisation in JS (<code>WC-AU-...-WC</code> &times; 54, <code>AU-CTN-...-48</code> &times; 48, <code>AU-SRT-...x12</code> &times; 12, etc.) to compute tins, and rolls up to channel totals + per-base-SKU.</li>
+      <li><strong>Payload shape change.</strong> <code>/api/au/sales</code>'s <code>channels</code> object now includes a <code>woo</code> key with <code>{ units, tins, revenue, orders }</code> alongside the existing col / woo2 / dist. The Amazon channel (<code>amz</code>) is still absent &mdash; that's Phase 3b. KV cache key bumped <code>au:sales:YYYY-MM:v4</code> &rarr; <code>:v5</code> so v4 caches (no <code>woo</code> key) get invalidated cleanly.</li>
+      <li><strong>Frontend now picks Woo from API instead of static.</strong> <code>loadLiveAuSales</code> in <code>public/index.html</code> extends its channel-merge loop from <code>['col', 'woo2', 'dist']</code> to include <code>'woo'</code>, so AU_SALES_BY_MONTH / AU_ORDERS_BY_MONTH / AU_TINS_BY_MONTH all pull Woo from D1 once the live fetch lands. Until the fetch completes for a given month the chart and channel cards still render from static au-data.js (which now only covers April 2026), same lazy-load pattern as the CIN7 channels.</li>
+      <li><strong>April 2026 numbers will shift visibly.</strong> Static au-data.js Woo row for April: 18,562 "orders" / $313,417 revenue / 28,375 units / 38,223 tins. D1 returns: 8,980 distinct orders / $398,201 revenue / units + tins per the live normalisation. The 2x "orders" gap appears to be the static counting line items as orders (8,980 &times; 2.07 line-items-per-order &asymp; 18,600); the ~$85K revenue gap is likely the static's refund-netting via Metorik's "Total After Refunds" column where this ship uses raw "Total" to match NA Woo's gross semantics. D1 numbers are the new truth post-ship.</li>
+      <li><strong>Per-SKU Woo breakdown deferred to v2.2.15.</strong> The per-SKU table on the AU Monthly SKU tab still merges Woo per-SKU from static au-data.js (only April 2026 has those rows). Channel-level woo total won't exactly sum to the per-SKU woo column until v2.2.15 wires Woo per-SKU from D1 too &mdash; chosen split because the per-SKU merge in <code>loadLiveAuSales</code> has approximation logic (woo+amz revenue apportioned by tin share) that needs careful rework when Woo lands a real per-channel revenue number.</li>
+      <li><strong>Verify after deploy.</strong> Hit <code>/api/au/pos?refresh=1</code> &mdash; should return open POs only (zero rows where <code>completedDate</code> is set). Then hit <code>/api/au/sales?month=2026-04&amp;refresh=1</code> &mdash; <code>channels.woo</code> should now be present with non-zero <code>tins</code> + <code>revenue</code> + <code>orders</code>. On the AU dashboard, the Woo channel card and chart bar should reflect the higher revenue number once the live fetch lands.</li>
+    </ul>
     <h4>v2.2.13 &mdash; 15 May 2026 (Phase 3a &mdash; Woo AU Metorik backfill imported + cron extended to AU)</h4>
     <ul>
       <li><strong>D1 now holds the full AU WooCommerce history Nov 2025 &rarr; May 2026.</strong> Same shape as the CIN7 v2.36 CSV pivot: one-shot Metorik export &rarr; <code>scripts/import-woo-au-csv.py</code> &rarr; chunked <code>--command</code> apply (bypasses the <code>--file</code> OAuth quirk). 70,525 orders + 166,268 line items landed in the existing <code>orders</code> + <code>order_items</code> tables with <code>market='AU'</code> &mdash; no new migration needed (migration 0001 designed for it; 0003 added the <code>(market, local_date)</code> indexes). Idempotent; INSERT OR REPLACE on orders + DELETE-then-INSERT scoped per <code>order_id</code> on items.</li>
@@ -6419,17 +6429,18 @@ async function loadLiveAuSales(month) {
     const data = await resp.json();
     if (!data?.channels) throw new Error('Empty sales payload');
 
-    // Merge live CIN7 channels into AU_SALES_BY_MONTH for the named month.
-    // Leave woo + amz alone (those came from static au-data.js and stay
-    // there until Phase 3 wires Woo + Amazon source-of-truth APIs).
+    // Merge live channels into AU_SALES_BY_MONTH for the named month.
+    // v2.2.14 (Phase 3a read-side cutover): `woo` now comes from D1 too,
+    // alongside col/woo2/dist (CIN7). `amz` still comes from static
+    // au-data.js until Phase 3b wires Amazon AU SP-API.
     AU_SALES_BY_MONTH[month]  = AU_SALES_BY_MONTH[month]  || {};
     AU_ORDERS_BY_MONTH[month] = AU_ORDERS_BY_MONTH[month] || {};
     AU_TINS_BY_MONTH[month]   = AU_TINS_BY_MONTH[month]   || {};
-    for (const ch of ['col', 'woo2', 'dist']) {
+    for (const ch of ['col', 'woo2', 'dist', 'woo']) {
       const v = data.channels[ch] || {};
       AU_SALES_BY_MONTH[month][ch]  = +(v.revenue || 0);
       AU_ORDERS_BY_MONTH[month][ch] = +(v.orders  || 0);
-      AU_TINS_BY_MONTH[month][ch]   = +(v.tins    || 0);
+      AU_TINS_BY_MONTH[month][ch]   = +(v.tins    || v.units || 0);
     }
     // Replace refunds row for the month
     if (data.refunds) AU_REFUNDS_BY_MONTH[month] = data.refunds;

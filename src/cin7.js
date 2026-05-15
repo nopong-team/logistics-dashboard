@@ -71,7 +71,12 @@ export const auRoutes = new Hono();
 // ─── KV cache ───────────────────────────────────────────────────────────────
 
 const KV_INVENTORY_KEY = 'au:inventory:v1';
-const KV_POS_KEY       = 'au:pos:v1';
+// au:pos:v2 (v2.2.14, 2026-05-15) — bumped from v1 to bust a stale snapshot
+// observed showing all POs instead of just open ones. The server-side filter
+// (isOpenPo + CLOSED_PO_STATUSES) hasn't changed; bumping the key forces a
+// fresh fetch on the next hit which re-applies the current filter cleanly.
+// Future bumps: any time the response shape or filter logic changes.
+const KV_POS_KEY       = 'au:pos:v2';
 // Per-month sales: `au:sales:YYYY-MM:v4`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because
@@ -84,7 +89,11 @@ const KV_POS_KEY       = 'au:pos:v1';
 // (`buildAuSalesPayloadFromD1`) instead of by fetching CIN7 directly per
 // request. Shape is identical except `source` is `'cin7-d1'` and `counts`
 // drops the upstream-fetch fields that no longer apply. v3 caches are stale.
-function kvSalesKey(month) { return `au:sales:${month}:v4`; }
+// au:sales:YYYY-MM:v5 (v2.2.14, 2026-05-15) — bumped from v4 because the
+// channels payload now includes a `woo` key sourced from D1's `orders` table
+// (market='AU'), in addition to the existing col/woo2/dist (CIN7). Bumping
+// invalidates v4 caches that don't have the woo channel populated.
+function kvSalesKey(month) { return `au:sales:${month}:v5`; }
 
 // 15 min TTL — short enough that drift is bounded but long enough to absorb
 // dashboard refreshes on the same minute. Bump the key suffix (v1 → v2) on
@@ -929,6 +938,88 @@ async function buildAuSalesPayload(env, month) {
 // over-counted dist rows. Per next-session-brief-v2.36-csv-pivot.md:
 // "Phase C parity test should target Coles/Woolies exactly + accept the
 // higher distributor number as the new truth."
+// Woo AU channel from D1 (Phase 3a read-side cutover, v2.2.14).
+//
+// Sources `orders` + `order_items` for market='AU', status IN
+// ('completed','processing'), in the named month. Applies AU SKU
+// normalisation in JS (rather than at write time like the CIN7 cron does)
+// because the Metorik import deliberately stores the raw SKU — there's no
+// `base_sku`/`multiplier` column on order_items the way there is on
+// cin7_sales_order_items. The runtime cost is modest (~10K rows per active
+// month, single SUM-and-rollup pass).
+//
+// Returns the channel total + a per-base-SKU rollup of {units, tins,
+// revenue}. `tins` = qty × normaliseAuSku-multiplier when the SKU matches
+// the AU pattern, otherwise 0 (e.g. shipping line items don't contribute
+// tins). `units` = raw quantity, unmodified.
+//
+// Status filter matches NA Woo's reads ('completed' + 'processing'). Failed
+// / cancelled / refunded / pending / on-hold / duplicated orders sit in D1
+// but never count toward the channel total — the v2.2.13 import preserved
+// them for auditability + future refund reconciliation (Phase 3c).
+async function getAuWooSalesFromD1(env, month) {
+  const rows = await env.DB.prepare(
+    `SELECT
+        o.id           AS order_id,
+        i.sku          AS sku,
+        i.quantity     AS quantity,
+        i.total        AS line_total,
+        i.name         AS name
+       FROM orders o
+       JOIN order_items i ON i.order_id = o.id
+      WHERE o.market = 'AU'
+        AND o.status IN ('completed', 'processing')
+        AND substr(i.local_date, 1, 7) = ?`,
+  ).bind(month).all();
+
+  let units = 0;
+  let tins = 0;
+  let revenue = 0;
+  const orderIds = new Set();
+  const bySku = {};
+
+  for (const r of (rows.results || [])) {
+    const sku = String(r.sku || '').trim();
+    const qty = Number(r.quantity) || 0;
+    const lineTotal = Number(r.line_total) || 0;
+
+    orderIds.add(r.order_id);
+    units += qty;
+    revenue += lineTotal;
+
+    const isAu = sku && isAuSkuCode(sku);
+    let baseSku = null;
+    let mult = 1;
+    if (sku) {
+      const [b, m] = normalizeAuSku(sku);
+      baseSku = b || null;
+      mult = Number(m) || 1;
+    }
+    const tinsThisLine = isAu ? qty * mult : 0;
+    tins += tinsThisLine;
+
+    if (isAu && baseSku) {
+      if (!bySku[baseSku]) {
+        bySku[baseSku] = { tins: 0, revenue: 0, units: 0, name: r.name || '' };
+      }
+      bySku[baseSku].tins    += tinsThisLine;
+      bySku[baseSku].revenue += lineTotal;
+      bySku[baseSku].units   += qty;
+      if (!bySku[baseSku].name && r.name) bySku[baseSku].name = r.name;
+    }
+  }
+
+  return {
+    channelTotal: {
+      units,
+      tins,
+      revenue,
+      orders: orderIds.size,
+    },
+    bySku,
+  };
+}
+
 async function buildAuSalesPayloadFromD1(env, month) {
   if (!env.DB) {
     throw new Error('Phase C: env.DB binding not configured (logistics-db)');
@@ -1016,12 +1107,21 @@ async function buildAuSalesPayloadFromD1(env, month) {
       GROUP BY i.base_sku`,
   ).bind(month).all();
 
+  // Woo channel from D1 (Phase 3a, v2.2.14). Sourced from orders +
+  // order_items where market='AU' — populated by the Metorik CSV import
+  // and kept fresh by runWooCronSync. Per-SKU rollup discarded here for
+  // this ship (the existing client-side merge in loadLiveAuSales keeps
+  // pulling Woo per-SKU from static au-data.js); v2.2.15 will fold the
+  // per-SKU view in too.
+  const wooFromD1 = await getAuWooSalesFromD1(env, month);
+
   // Materialise — match the shape buildAuSalesPayload produces so the
   // frontend doesn't need to know which path served the data.
   const channelsOut = {
     col:  { tins: 0, revenue: 0, orders: 0 },
     woo2: { tins: 0, revenue: 0, orders: 0 },
     dist: { tins: 0, revenue: 0, orders: 0 },
+    woo:  { tins: 0, revenue: 0, orders: 0, units: 0 },
   };
   for (const r of (channelsRows.results || [])) {
     if (!channelsOut[r.channel]) continue;
@@ -1031,6 +1131,7 @@ async function buildAuSalesPayloadFromD1(env, month) {
       orders:  Number(r.orders)  || 0,
     };
   }
+  channelsOut.woo = wooFromD1.channelTotal;
 
   const refundsOut = {
     tins:      Number(refundsAgg?.tins)    || 0,
@@ -1082,9 +1183,10 @@ async function buildAuSalesPayloadFromD1(env, month) {
       creditNotesConsidered: refundsOut.orders,
       skuRows:               skuSales.length,
     },
-    // NOTE: woo + amz channels intentionally absent. They live on the Woo
-    // and Amazon channel APIs (Phase 3). Frontend merges this with static
-    // window.AU_DATA.salesByMonth[month] for those two channels.
+    // v2.2.14 (Phase 3a read-side cutover): `woo` is now sourced from D1
+    // alongside col/woo2/dist. `amz` is still absent — it'll be added in
+    // Phase 3b once Amazon AU SP-API is wired up. Frontend's loadLiveAuSales
+    // still merges with static window.AU_DATA.salesByMonth[month] for `amz`.
   };
 }
 
