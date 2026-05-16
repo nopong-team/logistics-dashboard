@@ -71,6 +71,11 @@ export const auRoutes = new Hono();
 // ─── KV cache ───────────────────────────────────────────────────────────────
 
 const KV_INVENTORY_KEY = 'au:inventory:v1';
+// au:pos:v4 (v2.2.16, 2026-05-16) — bumped because `expected_date` now falls
+// back through CIN7's full date field chain (deliveryDate → estimatedDeliveryDate
+// → estimatedArrivalDate → supplierAcceptanceDate). Payload shape gains
+// expected_date_source + delivery_date / estimated_delivery_date /
+// estimated_arrival_date / supplier_acceptance_date / invoice_date.
 // au:pos:v3 (v2.2.15, 2026-05-16) — bumped alongside an isOpenPo rewrite.
 // Previously the filter only checked `status` + `completedDate`, which left
 // ~140 received-but-never-marked-Completed APPROVED POs leaking through
@@ -83,7 +88,7 @@ const KV_INVENTORY_KEY = 'au:inventory:v1';
 // observed showing all POs instead of just open ones. That fix added `'void'`
 // to CLOSED_PO_STATUSES — see the comment on the set below for the history.
 // Future bumps: any time the response shape or filter logic changes.
-const KV_POS_KEY       = 'au:pos:v3';
+const KV_POS_KEY       = 'au:pos:v4';
 // Per-month sales: `au:sales:YYYY-MM:v4`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because
@@ -1283,13 +1288,28 @@ async function fetchAllPurchaseOrders(env) {
   // manual step, so they sit APPROVED indefinitely and leaked through the
   // open filter. `fullyReceivedDate` is the auto-set field; the line-item
   // `qtyShipped` totals are the fallback when even that's not populated.
+  //
+  // v2.2.16: live AU data shows `deliveryDate` is null on every open PO. CIN7
+  // has SEVERAL date fields on the PurchaseOrder model and No Pong's data
+  // entry process clearly populates a different one. Pull the full set so
+  // `shapePoRows` can fall back through them and `pos/debug` can surface
+  // which one your suppliers actually use:
+  //   • deliveryDate         — the "expected delivery date" field we used in v2.35
+  //   • estimatedDeliveryDate — CIN7's documented Estimated Delivery Date
+  //   • estimatedArrivalDate  — Estimated time of arrival (for Indent Order)
+  //   • supplierAcceptanceDate — when supplier confirmed the PO
+  //   • port                  — Port for Indent Order (useful diagnostic)
+  //   • customFields          — anything stored in CIN7 custom fields
   const fields = [
-    'id', 'reference', 'createdDate', 'modifiedDate', 'deliveryDate', 'invoiceDate',
+    'id', 'reference', 'createdDate', 'modifiedDate',
+    'deliveryDate', 'estimatedDeliveryDate', 'estimatedArrivalDate',
+    'supplierAcceptanceDate', 'invoiceDate',
     'status', 'stage', 'completedDate', 'fullyReceivedDate', 'cancellationDate', 'isVoid',
     'company', 'firstName', 'lastName', 'memberEmail',
-    'branchName',
+    'branchName', 'port',
     'total', 'subTotal',
     'lineItems',
+    'customFields',
   ].join(',');
   return cin7FetchAll(env, 'PurchaseOrders', { fields });
 }
@@ -1402,13 +1422,40 @@ function shapePoRows(rawPos) {
       skuSet.add(code);
     }
 
+    // v2.2.16: live AU data shows `deliveryDate` is null on every open PO.
+    // CIN7 lets users enter the expected date in several different fields
+    // depending on their internal process. Fall back through the most-specific
+    // → least-specific chain so the dashboard surfaces whichever date the
+    // supplier or PO author actually populated.
+    const expectedDate =
+      po?.deliveryDate           ||
+      po?.estimatedDeliveryDate  ||
+      po?.estimatedArrivalDate   ||
+      po?.supplierAcceptanceDate ||
+      null;
+    // Track WHERE the expected_date came from for the table tooltip + debug.
+    const expectedDateSource =
+      po?.deliveryDate           ? 'deliveryDate'           :
+      po?.estimatedDeliveryDate  ? 'estimatedDeliveryDate'  :
+      po?.estimatedArrivalDate   ? 'estimatedArrivalDate'   :
+      po?.supplierAcceptanceDate ? 'supplierAcceptanceDate' :
+      null;
+
     out.push({
       po:              String(po?.reference || po?.id || ''),
       company,
       contact,
       // New in v2.35 — these were null in the static export.
       created_date:    po?.createdDate || null,
-      expected_date:   po?.deliveryDate || null,
+      expected_date:   expectedDate,
+      expected_date_source: expectedDateSource,
+      // v2.2.16: keep all date sources accessible for the debug endpoint + a
+      // potential per-row tooltip showing where each date came from.
+      delivery_date:           po?.deliveryDate           || null,
+      estimated_delivery_date: po?.estimatedDeliveryDate  || null,
+      estimated_arrival_date:  po?.estimatedArrivalDate   || null,
+      supplier_acceptance_date: po?.supplierAcceptanceDate || null,
+      invoice_date:            po?.invoiceDate            || null,
       status:          po?.status || null,
       // v2.2.15: surface the closure signals so the table can render them
       // and so the front-end can compute days-until-arrival from a single
@@ -1874,6 +1921,21 @@ auRoutes.get('/pos/debug', async (c) => {
         fullyReceivedDate:       match?.fullyReceivedDate || null,
         cancellationDate:        match?.cancellationDate  || null,
         isVoid:                  match?.isVoid === true,
+        // v2.2.16: surface every date field so we can see which one this
+        // supplier actually populates for "expected delivery".
+        dateFields: {
+          createdDate:             match?.createdDate             || null,
+          modifiedDate:             match?.modifiedDate            || null,
+          deliveryDate:             match?.deliveryDate            || null,
+          estimatedDeliveryDate:    match?.estimatedDeliveryDate   || null,
+          estimatedArrivalDate:     match?.estimatedArrivalDate    || null,
+          supplierAcceptanceDate:   match?.supplierAcceptanceDate  || null,
+          invoiceDate:              match?.invoiceDate             || null,
+          fullyReceivedDate:        match?.fullyReceivedDate       || null,
+          cancellationDate:         match?.cancellationDate        || null,
+          completedDate:            match?.completedDate           || null,
+        },
+        customFields:              match?.customFields            || null,
         lineQtyRollup:           (match.lineItems || []).map((li) => ({
           code:        li?.code,
           qty:         Number(li?.qty || 0),
@@ -1898,6 +1960,18 @@ auRoutes.get('/pos/debug', async (c) => {
     open_by_v2_2_14_filter:      0, // status + completedDate only
     open_by_v2_2_15_filter:      0, // new logic
   };
+  // v2.2.16: count how many OPEN POs have each date field populated. Tells us
+  // which CIN7 date field your team actually populates for "expected delivery".
+  const openDateFieldCoverage = {
+    open_pos_total:               0,
+    deliveryDate_set:             0,
+    estimatedDeliveryDate_set:    0,
+    estimatedArrivalDate_set:     0,
+    supplierAcceptanceDate_set:   0,
+    invoiceDate_set:              0,
+    customFields_set:             0,
+    no_date_at_all:               0,
+  };
   const oldestApproved = [];
   for (const po of rawPos) {
     const st = String(po?.status || '');
@@ -1911,7 +1985,23 @@ auRoutes.get('/pos/debug', async (c) => {
     const sLower = st.trim().toLowerCase();
     const oldClosed = !!po?.completedDate || CLOSED_PO_STATUSES.has(sLower);
     if (!oldClosed) closureSignals.open_by_v2_2_14_filter++;
-    if (isOpenPo(po)) closureSignals.open_by_v2_2_15_filter++;
+    if (isOpenPo(po)) {
+      closureSignals.open_by_v2_2_15_filter++;
+      // Track date-field coverage only on OPEN POs — closed ones already
+      // have fullyReceivedDate, that's not the question we're answering.
+      openDateFieldCoverage.open_pos_total++;
+      if (po?.deliveryDate)            openDateFieldCoverage.deliveryDate_set++;
+      if (po?.estimatedDeliveryDate)   openDateFieldCoverage.estimatedDeliveryDate_set++;
+      if (po?.estimatedArrivalDate)    openDateFieldCoverage.estimatedArrivalDate_set++;
+      if (po?.supplierAcceptanceDate)  openDateFieldCoverage.supplierAcceptanceDate_set++;
+      if (po?.invoiceDate)             openDateFieldCoverage.invoiceDate_set++;
+      if (po?.customFields && Object.keys(po.customFields).length > 0) {
+        openDateFieldCoverage.customFields_set++;
+      }
+      const anyDate = po?.deliveryDate || po?.estimatedDeliveryDate ||
+                      po?.estimatedArrivalDate || po?.supplierAcceptanceDate;
+      if (!anyDate) openDateFieldCoverage.no_date_at_all++;
+    }
 
     if (st.toLowerCase() === 'approved' && !isOpenPo(po)) {
       // POs that the new filter drops — most useful sample to inspect.
@@ -1929,6 +2019,11 @@ auRoutes.get('/pos/debug', async (c) => {
     closureSignals,
     delta_v2_2_14_to_v2_2_15:
       closureSignals.open_by_v2_2_14_filter - closureSignals.open_by_v2_2_15_filter,
+    // v2.2.16: which date field do open POs actually have populated? Use this
+    // to confirm whether the dashboard's empty Expected date / Days until
+    // arrival columns mean (a) data is in CIN7 in a field we don't read, or
+    // (b) the data simply isn't entered in CIN7 by your process.
+    openDateFieldCoverage,
     sampleClosedByNewFilter: oldestApproved.slice(0, sampleSize),
     note: 'Diagnostic — to inspect one PO with full fields + filter eval: ?ref=PO-AU-T88',
   });

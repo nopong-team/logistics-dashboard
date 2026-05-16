@@ -1845,7 +1845,7 @@
           <tr>
             <th title="CIN7 Order Reference (PO number). Type badge sits next to the number — Finished / Soap / Tins / Packaging / Other based on dominant line-item.">PO # ⓘ</th>
             <th title="Supplier company and primary contact from CIN7.">Supplier ⓘ</th>
-            <th title="Expected delivery date — the deliveryDate field from CIN7. Blank if not set on the PO.">Expected date ⓘ</th>
+            <th title="Expected delivery date from CIN7. Pulled from deliveryDate, with fallback through estimatedDeliveryDate → estimatedArrivalDate → supplierAcceptanceDate. Blank only if none of these are set on the PO.">Expected date ⓘ</th>
             <th class="num" title="Days from today until the expected delivery date. Negative = overdue (red), 0–7 = arriving soon (amber).">Days until arrival ⓘ</th>
             <th class="num" title="Total units across all real line items on the PO (excludes Freight, KittingFee, discounts). Mixed units — tins for finished/soap/raw, packaging units for P-... lines.">Total units ⓘ</th>
             <th class="num" title="Distinct SKU count on the PO (excludes Freight, KittingFee, discount lines).">SKUs ⓘ</th>
@@ -1905,9 +1905,23 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.15</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.16</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.16 &mdash; 16 May 2026 (PO expected-date fallback chain + diagnostic for date-field coverage)</h4>
+    <ul>
+      <li><strong>Expected date + Days until arrival columns were blank for every open PO.</strong> Symptom showed up immediately after v2.2.15 deployed: the new CA-style table rendered the columns correctly but the data behind them was always null. Root cause: <code>fetchAllPurchaseOrders</code> in <code>src/cin7.js</code> only requested CIN7's <code>deliveryDate</code> field, and live AU data shows <code>deliveryDate</code> is never populated &mdash; No Pong's PO-entry process clearly uses a different date field (or none at all). CIN7's PurchaseOrder model has five candidate date fields besides <code>deliveryDate</code>.</li>
+      <li><strong>Fix: fallback chain through all CIN7 date fields.</strong> <code>fetchAllPurchaseOrders</code> now also requests <code>estimatedDeliveryDate</code>, <code>estimatedArrivalDate</code>, <code>supplierAcceptanceDate</code>, <code>port</code>, and <code>customFields</code>. <code>shapePoRows</code>'s <code>expected_date</code> is now derived: <code>deliveryDate &rarr; estimatedDeliveryDate &rarr; estimatedArrivalDate &rarr; supplierAcceptanceDate &rarr; null</code>. New field <code>expected_date_source</code> records which field actually supplied the value (for debugging + future tooltip). All raw date fields are also surfaced on the row payload (<code>delivery_date</code>, <code>estimated_delivery_date</code>, <code>estimated_arrival_date</code>, <code>supplier_acceptance_date</code>, <code>invoice_date</code>) so a future ship can render any of them on hover if useful.</li>
+      <li><strong>Diagnostic endpoint extended.</strong> <code>/api/au/pos/debug</code> (aggregate mode) now returns <code>openDateFieldCoverage</code> &mdash; counts how many of the 36 currently-open POs have each date field populated (deliveryDate / estimatedDeliveryDate / estimatedArrivalDate / supplierAcceptanceDate / invoiceDate / customFields), plus a <code>no_date_at_all</code> count for POs with no date in any field. Tells us empirically which field your team uses. <code>?ref=&lt;PO&gt;</code> mode now returns a full <code>dateFields</code> block plus the raw <code>customFields</code> on the PO, so we can see what's actually stored.</li>
+      <li><strong>KV cache key bumped <code>au:pos:v3</code> &rarr; <code>:v4</code>.</strong> Payload shape changed (new <code>expected_date_source</code> + raw date fields), so v3 caches need to drop cleanly.</li>
+      <li><strong>Verify after deploy.</strong> Hit <code>https://logistics.apps.nopong.com/api/au/pos?refresh=1</code> &mdash; if any open PO has <code>expected_date</code> populated, the dashboard Expected date column will start showing dates. Then hit <code>https://logistics.apps.nopong.com/api/au/pos/debug</code> and look at <code>openDateFieldCoverage</code>:
+        <ul>
+          <li>If <code>estimatedDeliveryDate_set</code> or <code>estimatedArrivalDate_set</code> is high, the fallback is now picking those up &mdash; nothing else to do.</li>
+          <li>If everything is at zero and <code>no_date_at_all: 36</code>, then CIN7 simply doesn't have expected-date data for AU POs and someone needs to start entering it in the CIN7 UI (or we add a custom-field lookup).</li>
+          <li>If <code>customFields_set</code> is high, the data is in a CIN7 custom field &mdash; next ship would map the custom-field key to <code>expected_date</code>.</li>
+        </ul>
+      </li>
+    </ul>
     <h4>v2.2.15 &mdash; 16 May 2026 (PO filter rework + PO table restyle to match CA columns)</h4>
     <ul>
       <li><strong>PO filter &mdash; receive-but-never-Completed POs were leaking through.</strong> v2.2.14's <code>'void'</code> hotfix dropped 13 truly-cancelled rows, but 143 remained &mdash; all <code>APPROVED</code>, many 6+ months old (PO-AU-T88 from Sept 2025, PO-313 from Oct, PO-4806 from Nov). Root cause: <code>isOpenPo</code> only checked <code>status</code> + <code>completedDate</code>, both of which require a human to manually mark the PO Completed in CIN7's UI. CIN7 doesn't auto-flip the status when stock is received; many orgs (including No Pong) just leave old POs sitting <code>APPROVED</code> indefinitely once the goods arrive.</li>
