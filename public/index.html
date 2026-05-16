@@ -583,6 +583,11 @@
 
     /* th.num for the prototype's right-aligned headers */
     #region-au th.num { text-align: right; }
+    /* v2.2.17: align the data cells too — base td.num only sets padding +
+       tabular-nums, not text-align, so AU numeric columns had right-aligned
+       headers but left-aligned cells. Pin both to right so numbers line up
+       under their headers and against each other. */
+    #region-au td.num { text-align: right; }
   </style>
 </head>
 <body>
@@ -1905,9 +1910,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.16</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.17</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.17 &mdash; 16 May 2026 (AU numeric data cells now right-align to match their headers)</h4>
+    <ul>
+      <li><strong>Numbers didn't sit under their column headings on AU tables.</strong> Headers like <em>Current stock</em> / <em>Run rate</em> / <em>Days left</em> / <em>Incoming</em> on the Incoming stock by SKU table (and the new <em>Total units</em> / <em>SKUs</em> / <em>Days until arrival</em> on the Open POs table) were right-aligned per the v2.35 prototype rule, but the data cells defaulted to left-aligned because the base <code>td.num</code> CSS only sets padding + tabular-nums, no alignment. Result: number columns visually drifted left while their headers drifted right, columns of numbers didn't stack against each other, and totals were hard to read at a glance.</li>
+      <li><strong>Fix.</strong> One CSS rule in <code>public/index.html</code>: <code>#region-au td.num { text-align: right; }</code>. Mirrors the existing <code>#region-au th.num { text-align: right; }</code> rule one line above so AU's numeric headers and cells share the same alignment. NA tables aren't affected (they're outside <code>#region-au</code> and use <code>class="num right"</code> explicitly when needed).</li>
+      <li><strong>Diagnostic confirms v2.2.16's fallback chain is doing its job.</strong> Aggregate diagnostic from <code>/api/au/pos/debug</code> shows <code>estimatedDeliveryDate_set: 35</code> out of 36 open POs &mdash; the v2.2.16 fallback was the right call. Your team's PO data entry uses <code>estimatedDeliveryDate</code>, not <code>deliveryDate</code>. One PO has no date in any field (will show &mdash; on the table); two have <code>invoiceDate</code> populated as an extra signal we don't currently use.</li>
+    </ul>
     <h4>v2.2.16 &mdash; 16 May 2026 (PO expected-date fallback chain + diagnostic for date-field coverage)</h4>
     <ul>
       <li><strong>Expected date + Days until arrival columns were blank for every open PO.</strong> Symptom showed up immediately after v2.2.15 deployed: the new CA-style table rendered the columns correctly but the data behind them was always null. Root cause: <code>fetchAllPurchaseOrders</code> in <code>src/cin7.js</code> only requested CIN7's <code>deliveryDate</code> field, and live AU data shows <code>deliveryDate</code> is never populated &mdash; No Pong's PO-entry process clearly uses a different date field (or none at all). CIN7's PurchaseOrder model has five candidate date fields besides <code>deliveryDate</code>.</li>
