@@ -71,12 +71,19 @@ export const auRoutes = new Hono();
 // ─── KV cache ───────────────────────────────────────────────────────────────
 
 const KV_INVENTORY_KEY = 'au:inventory:v1';
+// au:pos:v3 (v2.2.15, 2026-05-16) — bumped alongside an isOpenPo rewrite.
+// Previously the filter only checked `status` + `completedDate`, which left
+// ~140 received-but-never-marked-Completed APPROVED POs leaking through
+// (six months of inactive POs that CIN7 doesn't auto-close on the Status
+// field). Now the filter also checks `fullyReceivedDate` (CIN7-auto-set
+// when every line item is received), `cancellationDate`, `isVoid`, AND a
+// line-item rollup fallback (every non-zero-qty line has `qtyShipped >= qty`)
+// to catch legacy POs that CIN7 didn't backfill `fullyReceivedDate` on.
 // au:pos:v2 (v2.2.14, 2026-05-15) — bumped from v1 to bust a stale snapshot
-// observed showing all POs instead of just open ones. The server-side filter
-// (isOpenPo + CLOSED_PO_STATUSES) hasn't changed; bumping the key forces a
-// fresh fetch on the next hit which re-applies the current filter cleanly.
+// observed showing all POs instead of just open ones. That fix added `'void'`
+// to CLOSED_PO_STATUSES — see the comment on the set below for the history.
 // Future bumps: any time the response shape or filter logic changes.
-const KV_POS_KEY       = 'au:pos:v2';
+const KV_POS_KEY       = 'au:pos:v3';
 // Per-month sales: `au:sales:YYYY-MM:v4`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because
@@ -1268,9 +1275,17 @@ function classifyPoLineCode(code) {
 // payload is the same size whether we pre-filter or not (200ish total POs
 // fits in 1 page at PAGE_SIZE=250).
 async function fetchAllPurchaseOrders(env) {
+  // v2.2.15: added fullyReceivedDate / cancellationDate / isVoid / stage /
+  // modifiedDate so isOpenPo can use the actual closure signals CIN7 sets
+  // automatically. Previously we only saw `status` + `completedDate`, both
+  // of which CIN7 only writes when a human manually marks the PO Completed
+  // in the UI — many old POs are received against stock but never get that
+  // manual step, so they sit APPROVED indefinitely and leaked through the
+  // open filter. `fullyReceivedDate` is the auto-set field; the line-item
+  // `qtyShipped` totals are the fallback when even that's not populated.
   const fields = [
-    'id', 'reference', 'createdDate', 'deliveryDate', 'invoiceDate',
-    'status', 'completedDate',
+    'id', 'reference', 'createdDate', 'modifiedDate', 'deliveryDate', 'invoiceDate',
+    'status', 'stage', 'completedDate', 'fullyReceivedDate', 'cancellationDate', 'isVoid',
     'company', 'firstName', 'lastName', 'memberEmail',
     'branchName',
     'total', 'subTotal',
@@ -1279,26 +1294,70 @@ async function fetchAllPurchaseOrders(env) {
   return cin7FetchAll(env, 'PurchaseOrders', { fields });
 }
 
-// Open = status not in the closed set AND no completedDate set.
-// Case-insensitive — belt-and-braces against CIN7 capitalising things
-// differently across endpoints.
+// Open = none of CIN7's closure signals are set AND the line items aren't
+// already fully received. Case-insensitive on status — belt-and-braces
+// against CIN7 capitalising things differently across endpoints.
+//
+// v2.2.15 (2026-05-16): rewrote to use the actual closure signals from
+// CIN7's documented PurchaseOrder model. Previously we only checked
+// `status` + `completedDate`, both of which require a manual Complete
+// click in the CIN7 UI. ~140 old APPROVED POs (PO-AU-T88 Sept 2025,
+// PO-313 Oct 2025, PO-4806 Nov 2025, etc.) were received against stock
+// months ago but never got that manual click, so they leaked through.
+// Now we also check `fullyReceivedDate` (auto-set when every line item
+// is received), `cancellationDate`, and `isVoid`, AND a line-item rollup
+// fallback (`qtyShipped >= qty` on every non-zero line) for POs CIN7
+// didn't backfill `fullyReceivedDate` on.
 //
 // v2.2.14 (2026-05-15): added 'void'. CIN7 Omni's /PurchaseOrders endpoint
-// returns the status string as 'VOID' (4 chars), not 'Voided' / 'VOIDED'
-// (6 chars) as the original v2.35 comment in fetchAllPurchaseOrders
-// assumed. After .toLowerCase() this is 'void', which wasn't in the set
-// — so VOID POs leaked through the open filter and surfaced on the
-// dashboard's PO list. Keep BOTH 'void' and 'voided' so the filter is
-// resilient to CIN7 ever switching back. If a new closed-status value
-// appears later (e.g. "Returned"), add it here.
+// returns the status string as 'VOID' (4 chars), not 'Voided' / 'VOIDED'.
+// Keep BOTH 'void' and 'voided' so the filter is resilient to CIN7 ever
+// switching back. If a new closed-status value appears later (e.g.
+// "Returned"), add it here.
 const CLOSED_PO_STATUSES = new Set([
   'completed', 'void', 'voided', 'cancelled', 'closed',
 ]);
+
+// A PO is "fully received" via its line items if every line with a positive
+// `qty` has been received (`qtyShipped >= qty`). Lines with `qty <= 0` are
+// freight / discount / fee rows and are ignored. Returns false if the PO has
+// no non-zero qty lines (can't infer received from nothing). Tolerates a tiny
+// floating-point epsilon — CIN7 returns qtys as decimals.
+function isFullyReceivedByLines(po) {
+  const lines = Array.isArray(po?.lineItems) ? po.lineItems : [];
+  if (lines.length === 0) return false;
+  let sawNonZeroLine = false;
+  for (const li of lines) {
+    const qty = Number(li?.qty ?? li?.quantity ?? 0) || 0;
+    if (qty <= 0) continue; // freight / KittingFee / discount line
+    sawNonZeroLine = true;
+    // `qtyShipped` on a CIN7 Omni PurchaseOrderItem is the qty *received from
+    // the supplier* (the shape is shared with SalesOrder line items, where
+    // the same field means qty shipped to the customer — same field, opposite
+    // direction of flow).
+    const received = Number(li?.qtyShipped ?? li?.quantityShipped ?? 0) || 0;
+    if (received + 0.001 < qty) return false;
+  }
+  return sawNonZeroLine;
+}
+
 function isOpenPo(po) {
+  // Hard-closed signals from CIN7
+  if (po?.isVoid === true) return false;
   if (po?.completedDate) return false;
+  if (po?.fullyReceivedDate) return false;
+  if (po?.cancellationDate) return false;
+
+  // Status string (case-insensitive)
   const s = String(po?.status || '').trim().toLowerCase();
-  if (!s) return true; // no status set → assume open (better to over-include than miss)
-  return !CLOSED_PO_STATUSES.has(s);
+  if (s && CLOSED_PO_STATUSES.has(s)) return false;
+
+  // Fallback: CIN7 didn't auto-set `fullyReceivedDate` (common on legacy
+  // POs and on partial-receipts done outside the CIN7 UI), but the line
+  // items themselves show every non-zero line is fully received.
+  if (isFullyReceivedByLines(po)) return false;
+
+  return true;
 }
 
 // Build the same `pos[]` shape the static au-data.js has, plus the new
@@ -1332,6 +1391,17 @@ function shapePoRows(rawPos) {
     else if (buckets.carton_tray > 0) type = 'finished'; // standalone carton-only PO
     else type = 'other';
 
+    // Distinct SKU count — matches the CA dashboard's "SKUs" column. Excludes
+    // freight/KittingFee/discount rows (any line that classifies as 'fees').
+    const skuSet = new Set();
+    for (const li of lineItems) {
+      const code = String(li?.code || li?.sku || '').trim();
+      if (!code) continue;
+      const cls = classifyPoLineCode(code);
+      if (cls === 'fees') continue;
+      skuSet.add(code);
+    }
+
     out.push({
       po:              String(po?.reference || po?.id || ''),
       company,
@@ -1340,8 +1410,16 @@ function shapePoRows(rawPos) {
       created_date:    po?.createdDate || null,
       expected_date:   po?.deliveryDate || null,
       status:          po?.status || null,
+      // v2.2.15: surface the closure signals so the table can render them
+      // and so the front-end can compute days-until-arrival from a single
+      // canonical expected_date.
+      fully_received_date: po?.fullyReceivedDate || null,
+      cancellation_date:   po?.cancellationDate  || null,
+      is_void:             po?.isVoid === true,
+      stage:               po?.stage  || null,
       // Existing static-shape fields
       line_count:      lines.length,
+      sku_count:       skuSet.size,                // v2.2.15: CA-table parity
       finished_units:  buckets.finished + buckets.carton_tray, // carton-only POs count as finished
       soap_units:      buckets.soap,
       raw_tin_units:   buckets.raw_tin,
@@ -1755,6 +1833,105 @@ auRoutes.get('/pos', async (c) => {
     }
     throw e;
   }
+});
+
+// Diagnostic-only endpoint — dumps raw CIN7 /PurchaseOrders data so the
+// open-vs-closed filter (`isOpenPo`) can be tuned to real CIN7 behaviour
+// rather than assumed field shapes. Added 2026-05-16 (v2.2.15) while
+// reworking the filter to use `fullyReceivedDate` + line-item rollup
+// instead of just `status` + `completedDate`.
+//
+// Modes:
+//   • No params (default) — frequency tables of status values, closure-signal
+//     counts (how many POs have fullyReceivedDate / cancellationDate / isVoid
+//     set vs not), and a sample of the OLDEST APPROVED POs (the ones most
+//     likely to be received-but-never-closed). Use this to confirm the new
+//     filter drops the right rows.
+//   • ?ref=PO-AU-T88 — dump one specific PO by reference, with the raw fields
+//     plus `isOpenByCurrentFilter` and `isFullyReceivedByLines` evaluations.
+//
+// PII note: PO responses include supplier company + contact name/email.
+// Endpoint is gated behind Cloudflare Access SSO same as the rest of /api/au.
+auRoutes.get('/pos/debug', async (c) => {
+  const refQuery   = c.req.query('ref');
+  const sampleSize = Math.min(20, Number(c.req.query('sample')) || 5);
+  const rawPos     = await fetchAllPurchaseOrders(c.env);
+
+  if (refQuery) {
+    const needle = String(refQuery).trim().toLowerCase();
+    const match  = rawPos.find((p) =>
+      String(p?.reference || '').trim().toLowerCase() === needle,
+    );
+    return c.json({
+      ref: refQuery,
+      found: !!match,
+      po: match || null,
+      evaluation: match ? {
+        isOpenByCurrentFilter:   isOpenPo(match),
+        isFullyReceivedByLines:  isFullyReceivedByLines(match),
+        status:                  match?.status || null,
+        completedDate:           match?.completedDate     || null,
+        fullyReceivedDate:       match?.fullyReceivedDate || null,
+        cancellationDate:        match?.cancellationDate  || null,
+        isVoid:                  match?.isVoid === true,
+        lineQtyRollup:           (match.lineItems || []).map((li) => ({
+          code:        li?.code,
+          qty:         Number(li?.qty || 0),
+          qtyShipped:  Number(li?.qtyShipped || 0),
+          holdingQty:  Number(li?.holdingQty || 0),
+          fullyReceived: (Number(li?.qty || 0) <= 0)
+            ? 'n/a (zero qty)'
+            : (Number(li?.qtyShipped || 0) + 0.001 >= Number(li?.qty || 0)),
+        })),
+      } : null,
+    });
+  }
+
+  // Aggregate diagnostic across all POs
+  const uniqStatuses = new Map();
+  const closureSignals = {
+    completedDate_set:           0,
+    fullyReceivedDate_set:       0,
+    cancellationDate_set:        0,
+    isVoid_true:                 0,
+    fully_received_by_lines:     0,
+    open_by_v2_2_14_filter:      0, // status + completedDate only
+    open_by_v2_2_15_filter:      0, // new logic
+  };
+  const oldestApproved = [];
+  for (const po of rawPos) {
+    const st = String(po?.status || '');
+    uniqStatuses.set(st, (uniqStatuses.get(st) || 0) + 1);
+    if (po?.completedDate)        closureSignals.completedDate_set++;
+    if (po?.fullyReceivedDate)    closureSignals.fullyReceivedDate_set++;
+    if (po?.cancellationDate)     closureSignals.cancellationDate_set++;
+    if (po?.isVoid === true)      closureSignals.isVoid_true++;
+    if (isFullyReceivedByLines(po)) closureSignals.fully_received_by_lines++;
+    // Old filter for comparison: closed iff completedDate set or status in set
+    const sLower = st.trim().toLowerCase();
+    const oldClosed = !!po?.completedDate || CLOSED_PO_STATUSES.has(sLower);
+    if (!oldClosed) closureSignals.open_by_v2_2_14_filter++;
+    if (isOpenPo(po)) closureSignals.open_by_v2_2_15_filter++;
+
+    if (st.toLowerCase() === 'approved' && !isOpenPo(po)) {
+      // POs that the new filter drops — most useful sample to inspect.
+      oldestApproved.push(po);
+    }
+  }
+  oldestApproved.sort((a, b) =>
+    String(a?.createdDate || '').localeCompare(String(b?.createdDate || '')),
+  );
+
+  return c.json({
+    totalPos: rawPos.length,
+    uniqueStatuses: Array.from(uniqStatuses.entries())
+      .sort((a, b) => b[1] - a[1]),
+    closureSignals,
+    delta_v2_2_14_to_v2_2_15:
+      closureSignals.open_by_v2_2_14_filter - closureSignals.open_by_v2_2_15_filter,
+    sampleClosedByNewFilter: oldestApproved.slice(0, sampleSize),
+    note: 'Diagnostic — to inspect one PO with full fields + filter eval: ?ref=PO-AU-T88',
+  });
 });
 
 // Live inventory. KV-cached for 15 min; pass ?refresh=1 to bypass and force

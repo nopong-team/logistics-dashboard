@@ -1839,16 +1839,17 @@
           <button class="btn-csv" onclick="downloadAuPosCSV()">Export CSV</button>
         </div>
       </div>
-      <div class="table-hint" style="padding:0 20px 10px;font-size:11px;color:var(--text-secondary);">Hover any row to see the full line-item detail with quantities.</div>
+      <div class="table-hint" style="padding:0 20px 10px;font-size:11px;color:var(--text-secondary);">Hover any row to see the full line-item detail with quantities. Type badge (Finished / Soap / Tins / Packaging / Other) shown next to the PO number.</div>
       <div class="table-scroll"><table>
         <thead>
           <tr>
-            <th title="CIN7 Order Reference (PO number).">PO # ⓘ</th>
+            <th title="CIN7 Order Reference (PO number). Type badge sits next to the number — Finished / Soap / Tins / Packaging / Other based on dominant line-item.">PO # ⓘ</th>
             <th title="Supplier company and primary contact from CIN7.">Supplier ⓘ</th>
-            <th title="Type of PO based on dominant line-item: Finished tins, Soap (new product), raw Tins, Packaging, or Other.">Type ⓘ</th>
-            <th title="Items on the PO. Shows up to 3 SKU codes; hover the row for the full breakdown with quantities. Freight/Kitting fee lines are excluded from the summary.">Items ⓘ</th>
-            <th class="num" title="Total units across all real line items on the PO (excludes Freight, KittingFee). Mixed units — tins for finished/soap/raw, packaging units for P-... lines.">Total units ⓘ</th>
-            <th title="Expected Time of Delivery — the deliveryDate field from CIN7. Tinted red if past due (negative days), amber if within 7 days, neutral otherwise. Blank if CIN7 has no delivery date set on the PO.">ETD ⓘ</th>
+            <th title="Expected delivery date — the deliveryDate field from CIN7. Blank if not set on the PO.">Expected date ⓘ</th>
+            <th class="num" title="Days from today until the expected delivery date. Negative = overdue (red), 0–7 = arriving soon (amber).">Days until arrival ⓘ</th>
+            <th class="num" title="Total units across all real line items on the PO (excludes Freight, KittingFee, discounts). Mixed units — tins for finished/soap/raw, packaging units for P-... lines.">Total units ⓘ</th>
+            <th class="num" title="Distinct SKU count on the PO (excludes Freight, KittingFee, discount lines).">SKUs ⓘ</th>
+            <th title="Derived status — Overdue (past expected date), Arriving soon (within 7 days), Confirmed (>7 days out or no date). CIN7 raw status (APPROVED / DRAFT) shown as a smaller sub-label.">Status ⓘ</th>
           </tr>
         </thead>
         <tbody id="au-po-tbody"></tbody>
@@ -1904,9 +1905,19 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.14</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.15</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.15 &mdash; 16 May 2026 (PO filter rework + PO table restyle to match CA columns)</h4>
+    <ul>
+      <li><strong>PO filter &mdash; receive-but-never-Completed POs were leaking through.</strong> v2.2.14's <code>'void'</code> hotfix dropped 13 truly-cancelled rows, but 143 remained &mdash; all <code>APPROVED</code>, many 6+ months old (PO-AU-T88 from Sept 2025, PO-313 from Oct, PO-4806 from Nov). Root cause: <code>isOpenPo</code> only checked <code>status</code> + <code>completedDate</code>, both of which require a human to manually mark the PO Completed in CIN7's UI. CIN7 doesn't auto-flip the status when stock is received; many orgs (including No Pong) just leave old POs sitting <code>APPROVED</code> indefinitely once the goods arrive.</li>
+      <li><strong>Fix &mdash; use CIN7's auto-set closure signals + line-item rollup fallback.</strong> <code>fetchAllPurchaseOrders</code> in <code>src/cin7.js</code> now requests <code>fullyReceivedDate</code>, <code>cancellationDate</code>, <code>isVoid</code>, <code>stage</code>, and <code>modifiedDate</code> alongside the existing fields. <code>isOpenPo</code> drops a PO if any of those closure signals are set, AND falls back to a line-item rollup (every non-zero-qty line has <code>qtyShipped &gt;= qty</code>) for legacy POs CIN7 didn't backfill <code>fullyReceivedDate</code> on. New helper: <code>isFullyReceivedByLines</code>. KV cache key bumped <code>au:pos:v2</code> &rarr; <code>:v3</code>.</li>
+      <li><strong>New diagnostic endpoint: <code>GET /api/au/pos/debug</code>.</strong> Aggregate mode returns frequency tables of CIN7 status values, counts of each closure signal across all POs, and a sample of the oldest APPROVED POs that the new filter drops (so you can confirm the right rows are getting filtered). Pass <code>?ref=PO-AU-T88</code> to dump one specific PO with raw fields plus line-by-line received-vs-ordered breakdown. Mirrors the <code>/sales/debug</code> pattern. Use this whenever a PO behaves unexpectedly &mdash; faster than re-deploying with extra logging.</li>
+      <li><strong>PO table restyled to match the CA dashboard's PO tab.</strong> Columns are now: <em>PO #</em> (with Type badge inline) &middot; <em>Supplier</em> &middot; <em>Expected date</em> &middot; <em>Days until arrival</em> &middot; <em>Total units</em> &middot; <em>SKUs</em> &middot; <em>Status</em>. The Type column is removed (badge folded into the PO # cell to retain the info without spending a column on it); the Items column is removed (full SKU list still shows on row hover); the ETD column is split into Expected date + Days until arrival to mirror CA. Status column shows a derived Overdue / Arriving soon / Confirmed badge with CIN7's raw status (<code>APPROVED</code> / <code>DRAFT</code>) as a small sub-label.</li>
+      <li><strong>Backend supports the new columns.</strong> <code>shapePoRows</code> in <code>src/cin7.js</code> now emits <code>sku_count</code> (distinct SKUs excluding freight / KittingFee / discount lines) plus the new closure-signal fields (<code>fully_received_date</code>, <code>cancellation_date</code>, <code>is_void</code>, <code>stage</code>). The Type and Items info is still available in the payload &mdash; the Type column is just no longer rendered as a separate column.</li>
+      <li><strong>CSV export refreshed to match.</strong> <code>downloadAuPosCSV</code> emits the new column order: PO # / Supplier / Contact / Expected date / Days until arrival / Total units / SKUs / CIN7 status / Derived status / Type / Items. Type + Items are kept on the right edge of the spreadsheet for drill-down convenience even though they're not in the on-page table.</li>
+      <li><strong>Verify after deploy.</strong> Hit <code>/api/au/pos?refresh=1</code> &mdash; PO count should drop noticeably from 143 (was after v2.2.14). Spot-check by ref: <code>/api/au/pos/debug?ref=PO-AU-T88</code> &mdash; should now report <code>isOpenByCurrentFilter: false</code> with the line-item rollup showing all lines fully received. For an aggregate view of how many POs changed bucket: <code>/api/au/pos/debug</code> returns <code>delta_v2_2_14_to_v2_2_15</code> with the count.</li>
+    </ul>
     <h4>v2.2.14 &mdash; 15 May 2026 (PO cache bust + Woo channel read-side cutover from D1)</h4>
     <ul>
       <li><strong>POs &mdash; VOID statuses were leaking through the open-filter.</strong> Right after the v2.2.13 deploy the AU Purchase Orders tab showed every PO instead of just open ones &mdash; not a cache issue as I first guessed, but an actual filter bug. <code>fetchAllPurchaseOrders</code>' <code>isOpenPo</code> helper closed on a set of <code>{'completed', 'voided', 'cancelled', 'closed'}</code> (the v2.35 comment claimed CIN7 returned <code>Voided</code> as the status), but Omni's <code>/PurchaseOrders</code> endpoint actually returns <code>VOID</code> (4 chars), not <code>VOIDED</code>/<code>Voided</code> (6 chars). Lowercased, <code>'void' !== 'voided'</code>, so 13+ VOID POs slipped through and surfaced. Fix: added <code>'void'</code> to <code>CLOSED_PO_STATUSES</code> alongside <code>'voided'</code> so the filter is resilient to either capitalisation. Also bumped the <code>au:pos:v1</code> &rarr; <code>au:pos:v2</code> KV key so the buggy cache snapshot doesn't keep serving for the next 15 min after deploy.</li>
@@ -6914,31 +6925,51 @@ function summarizeAuPoItems(lines) {
   return shown + more;
 }
 
-// Format a CIN7 ISO date (e.g. "2026-05-30T00:00:00Z") for the ETD column.
-// Returns { html, sortKey } so the table cell can be coloured + sorted.
-// Tinted red if past due (negative days), amber if within 7 days, neutral
-// otherwise. Returns blank if the PO has no expected_date set.
-function _auFormatEtd(iso) {
-  if (!iso) return { html: '<span style="color:var(--text-light);">—</span>', sortKey: 99999 };
+// Format a CIN7 ISO date (e.g. "2026-05-30T00:00:00Z") into the date label
+// and the integer days-until-arrival. Mirrors the CA dashboard's PO table
+// rendering pattern (separate Expected date + Days until arrival + Status
+// columns) rather than the v2.35 single ETD column. Returns:
+//   { dateHtml, daysHtml, days, statusBdg, sortKey }
+// `days` is null when no expected_date is set; `sortKey` puts no-date rows
+// at the bottom of the sort.
+function _auFormatPoDates(iso, rawStatus) {
+  const NO_DATE = '<span style="color:var(--text-light);">—</span>';
+  const rawSub = rawStatus
+    ? `<div style="font-size:10px;color:var(--text-light);text-transform:uppercase;letter-spacing:0.04em;margin-top:2px;">${rawStatus}</div>`
+    : '';
+  if (!iso) {
+    return {
+      dateHtml: NO_DATE,
+      daysHtml: NO_DATE,
+      days: null,
+      // No expected date set in CIN7 → treat as Confirmed (green) — we know
+      // it's open from isOpenPo, we just don't know when it lands.
+      statusBdg: `<span class="badge badge-green">Confirmed</span>${rawSub}`,
+      sortKey: 99999,
+    };
+  }
   const d = new Date(iso);
-  if (isNaN(d)) return { html: '<span style="color:var(--text-light);">—</span>', sortKey: 99999 };
+  if (isNaN(d)) {
+    return { dateHtml: NO_DATE, daysHtml: NO_DATE, days: null,
+             statusBdg: `<span class="badge badge-green">Confirmed</span>${rawSub}`, sortKey: 99999 };
+  }
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
   const dUtc = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
   const days = Math.round((dUtc - today) / (1000 * 60 * 60 * 24));
   const dateLabel = d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' });
-  let colour = 'var(--text)';
-  let suffix = '';
+  let daysHtml, statusBdg;
   if (days < 0) {
-    colour = '#A32D2D';
-    suffix = ` <span style="font-size:11px;color:${colour};">${Math.abs(days)}d late</span>`;
+    daysHtml = `<span style="color:#A32D2D;font-weight:600;">${days}d (overdue)</span>`;
+    statusBdg = `<span class="badge badge-red">Overdue</span>${rawSub}`;
   } else if (days <= 7) {
-    colour = '#B57500';
-    suffix = ` <span style="font-size:11px;color:${colour};">in ${days}d</span>`;
+    daysHtml = `<span style="color:#B57500;font-weight:600;font-variant-numeric:tabular-nums;">${days}d</span>`;
+    statusBdg = `<span class="badge badge-amber">Arriving soon</span>${rawSub}`;
   } else {
-    suffix = ` <span style="font-size:11px;color:var(--text-secondary);">in ${days}d</span>`;
+    daysHtml = `<span style="font-variant-numeric:tabular-nums;font-weight:500;">${days}d</span>`;
+    statusBdg = `<span class="badge badge-green">Confirmed</span>${rawSub}`;
   }
-  return { html: `<span style="color:${colour};">${dateLabel}</span>${suffix}`, sortKey: days };
+  return { dateHtml: dateLabel, daysHtml, days, statusBdg, sortKey: days };
 }
 
 function renderAuPoTable() {
@@ -6946,7 +6977,7 @@ function renderAuPoTable() {
   const tf = document.getElementById('au-po-tfoot');
   if (!tb) return;
   if (AU_POS.length === 0) {
-    tb.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">No purchase orders loaded.</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:24px;color:var(--text-secondary);">No purchase orders loaded.</td></tr>`;
     if (tf) tf.innerHTML = '';
     return;
   }
@@ -6956,40 +6987,49 @@ function renderAuPoTable() {
     return true;
   });
   if (filtered.length === 0) {
-    tb.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">No POs match the current filters.</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:24px;color:var(--text-secondary);">No POs match the current filters.</td></tr>`;
     if (tf) tf.innerHTML = '';
     return;
   }
-  // Sort by ETD ascending (most-overdue first, then nearest, then no-date at
-  // the bottom). Filtered already preserves the original order otherwise.
-  // Falls back to the existing PO-ref sort when ETD is missing.
+  // Sort by expected-date ascending (most-overdue first, then nearest, then
+  // no-date at the bottom). v2.2.15 mirrors the CA PO tab's sort order.
+  // Falls back to PO-ref tiebreaker when expected_date is missing/equal.
   const sorted = filtered.slice().sort((a, b) => {
-    const aKey = _auFormatEtd(a.expected_date).sortKey;
-    const bKey = _auFormatEtd(b.expected_date).sortKey;
+    const aKey = _auFormatPoDates(a.expected_date).sortKey;
+    const bKey = _auFormatPoDates(b.expected_date).sortKey;
     if (aKey !== bKey) return aKey - bKey;
     return (b.po || '').localeCompare(a.po || ''); // tiebreaker — newest PO# first
   });
   tb.innerHTML = sorted.map(p => {
     const linesText = (p.lines || []).map(l => `${l.code}  ×  ${Math.round(l.qty).toLocaleString('en-AU')}`).join('\n');
-    const etd = _auFormatEtd(p.expected_date);
+    const dates = _auFormatPoDates(p.expected_date, p.status || '');
+    const typeBdg = AU_PO_TYPE_BADGE[p.type] || '';
     return `<tr title="${linesText.replace(/"/g, '&quot;')}">
-      <td><strong>${p.po}</strong></td>
+      <td>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <strong>${p.po}</strong>
+          ${typeBdg}
+        </div>
+      </td>
       <td>
         <div>${p.company || ''}</div>
         ${p.contact ? `<div style="font-size:11px;color:var(--text-secondary);">${p.contact}</div>` : ''}
       </td>
-      <td>${AU_PO_TYPE_BADGE[p.type] || ''}</td>
-      <td>${summarizeAuPoItems(p.lines)}</td>
+      <td>${dates.dateHtml}</td>
+      <td class="num">${dates.daysHtml}</td>
       <td class="num"><strong>${fmtAuNum(p.total_units)}</strong></td>
-      <td>${etd.html}</td>
+      <td class="num">${fmtAuNum(p.sku_count || 0)}</td>
+      <td>${dates.statusBdg}</td>
     </tr>`;
   }).join('');
   if (tf) {
-    const tot = filtered.reduce((a, p) => a + (p.total_units || 0), 0);
+    const tot     = filtered.reduce((a, p) => a + (p.total_units || 0), 0);
+    const totSkus = filtered.reduce((a, p) => a + (p.sku_count    || 0), 0);
     const filterLabel = (AU_PO_FILTER_TYPE !== 'all' || AU_PO_FILTER_SUPPLIER !== 'all') ? ` (filtered from ${AU_POS.length})` : '';
     tf.innerHTML = `<tr style="background:#FFF5F7;font-weight:700;border-top:2px solid var(--border);">
       <td colspan="4" style="padding:12px;">TOTAL — ${filtered.length} POs${filterLabel}</td>
       <td class="num" style="padding:12px;">${fmtAuNum(tot)}</td>
+      <td class="num" style="padding:12px;">${fmtAuNum(totSkus)}</td>
       <td></td>
     </tr>`;
   }
@@ -7101,10 +7141,33 @@ function downloadAuInvCSV() {
 }
 function downloadAuPosCSV() {
   if (!AU_HAS_REAL) { alert('AU data not loaded.'); return; }
-  const lines = [['PO #','Supplier','Contact','Type','Total units','Items']];
+  // v2.2.15: column set mirrors the CA PO tab (PO # / Supplier / Expected date
+  // / Days until arrival / Total units / SKUs / Status). Type + Items kept on
+  // the end for completeness — useful for spreadsheet drill-down even though
+  // they don't have their own columns on the table any more.
+  const lines = [[
+    'PO #', 'Supplier', 'Contact', 'Expected date', 'Days until arrival',
+    'Total units', 'SKUs', 'CIN7 status', 'Derived status',
+    'Type', 'Items',
+  ]];
   AU_POS.forEach(p => {
+    const dates  = _auFormatPoDates(p.expected_date, p.status || '');
+    const derived = dates.days == null ? 'Confirmed'
+                  : dates.days < 0     ? 'Overdue'
+                  : dates.days <= 7    ? 'Arriving soon'
+                                       : 'Confirmed';
     const itemSummary = (p.lines || []).filter(l => l.code).map(l => `${l.code}×${Math.round(l.qty)}`).join('; ');
-    lines.push([p.po, p.company||'', p.contact||'', p.type||'', p.total_units||0, itemSummary]);
+    lines.push([
+      p.po, p.company || '', p.contact || '',
+      p.expected_date ? p.expected_date.slice(0, 10) : '',
+      dates.days == null ? '' : dates.days,
+      p.total_units || 0,
+      p.sku_count   || 0,
+      p.status || '',
+      derived,
+      p.type || '',
+      itemSummary,
+    ]);
   });
   downloadCSV('au-purchase-orders.csv', lines.map(r => r.map(toCsvField).join(',')).join('\r\n'));
 }
