@@ -105,7 +105,12 @@ const KV_POS_KEY       = 'au:pos:v4';
 // channels payload now includes a `woo` key sourced from D1's `orders` table
 // (market='AU'), in addition to the existing col/woo2/dist (CIN7). Bumping
 // invalidates v4 caches that don't have the woo channel populated.
-function kvSalesKey(month) { return `au:sales:${month}:v5`; }
+// v6 (v2.2.18, 2026-05-16): skuSales rows gain a `woo` field (tin count per
+// base SKU from Woo) AND `revenue` per row now includes Woo revenue alongside
+// CIN7 revenue. Previously the front-end approximated Woo per-SKU from the
+// static au-data.js snapshot (April only) and apportioned woo+amz revenue
+// by tin share — that approximation is gone, so v5 caches need to invalidate.
+function kvSalesKey(month) { return `au:sales:${month}:v6`; }
 
 // 15 min TTL — short enough that drift is bounded but long enough to absorb
 // dashboard refreshes on the same minute. Bump the key suffix (v1 → v2) on
@@ -1119,12 +1124,14 @@ async function buildAuSalesPayloadFromD1(env, month) {
       GROUP BY i.base_sku`,
   ).bind(month).all();
 
-  // Woo channel from D1 (Phase 3a, v2.2.14). Sourced from orders +
-  // order_items where market='AU' — populated by the Metorik CSV import
-  // and kept fresh by runWooCronSync. Per-SKU rollup discarded here for
-  // this ship (the existing client-side merge in loadLiveAuSales keeps
-  // pulling Woo per-SKU from static au-data.js); v2.2.15 will fold the
-  // per-SKU view in too.
+  // Woo channel from D1. Sourced from orders + order_items where market='AU'
+  // — populated by the Metorik CSV import (Phase 3a, v2.2.13) and kept fresh
+  // by runWooCronSync.
+  //
+  // v2.2.14 wired the channel-level totals (channels.woo). v2.2.18 finishes
+  // the job: `bySku` is now folded into `skuSales` below, so per-SKU Woo tin
+  // counts AND per-SKU revenue come from D1 across ALL months instead of
+  // showing from static au-data.js (April only) and 0 elsewhere.
   const wooFromD1 = await getAuWooSalesFromD1(env, month);
 
   // Materialise — match the shape buildAuSalesPayload produces so the
@@ -1159,18 +1166,53 @@ async function buildAuSalesPayloadFromD1(env, month) {
     };
   }
 
-  const skuSales = [];
+  // v2.2.18: merge CIN7 per-SKU rollup with Woo per-SKU rollup (from
+  // getAuWooSalesFromD1). Both are keyed by AU base SKU (CIN7 emits `base_sku`
+  // pre-normalised; Woo applies normalizeAuSku() inside getAuWooSalesFromD1).
+  // The merged row has tin counts per channel (col / woo2 / dist / woo),
+  // total_tins summing all four, and revenue = CIN7 revenue + Woo revenue.
+  // SKUs with Woo sales but no CIN7 channel sales appear as new rows; this
+  // is correct (Woo-only D2C SKUs are real).
+  const skuMap = new Map(); // base_sku → merged row in-progress
   for (const r of (skuRows.results || [])) {
-    const col  = Number(r.col)  || 0;
-    const woo2 = Number(r.woo2) || 0;
-    const dist = Number(r.dist) || 0;
-    const revenue = Number(r.revenue) || 0;
-    const total = col + woo2 + dist;
+    skuMap.set(r.sku, {
+      sku:           r.sku,
+      name:          r.name || '',
+      col:           Number(r.col)  || 0,
+      woo2:          Number(r.woo2) || 0,
+      dist:          Number(r.dist) || 0,
+      woo:           0,
+      cin7_revenue:  Number(r.revenue) || 0,
+      woo_revenue:   0,
+    });
+  }
+  for (const [baseSku, w] of Object.entries(wooFromD1.bySku || {})) {
+    const existing = skuMap.get(baseSku) || {
+      sku:           baseSku,
+      name:          w.name || '',
+      col: 0, woo2: 0, dist: 0,
+      woo: 0,
+      cin7_revenue:  0,
+      woo_revenue:   0,
+    };
+    existing.woo         += Number(w.tins)    || 0;
+    existing.woo_revenue += Number(w.revenue) || 0;
+    if (!existing.name && w.name) existing.name = w.name;
+    skuMap.set(baseSku, existing);
+  }
+
+  const skuSales = [];
+  for (const m of skuMap.values()) {
+    const total = m.col + m.woo2 + m.dist + m.woo;
+    const revenue = m.cin7_revenue + m.woo_revenue;
     if (total === 0 && revenue === 0) continue;
     skuSales.push({
-      sku: r.sku,
-      name: r.name || '',
-      col, woo2, dist,
+      sku:        m.sku,
+      name:       m.name,
+      col:        m.col,
+      woo2:       m.woo2,
+      dist:       m.dist,
+      woo:        m.woo,
       total_tins: total,
       revenue,
     });
@@ -1490,18 +1532,17 @@ function shapePoRows(rawPos) {
 // instead of single-month-divided-by-30 (CA-style smoothing).
 function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
   // monthSalesPayloads is an array (newest → oldest) of { skuSales, month }
-  // objects from getMonthSales(). Each skuSales row already has total_tins
-  // (CIN7-channels only — col/woo2/dist) — but that's a problem for the
-  // run rate, because it MISSES Woo + Amazon volume, and those are real
-  // sales that draw from the same warehouse. Until Phase 3 wires Woo + Amz,
-  // we have to either (a) accept that the live run rate undercounts (only
-  // sees ~80% of the volume — supermarket EDI dwarfs Woo+Amz so this is
-  // small for most SKUs but big for FBA-only SKUs like the small-pack
-  // Originals), or (b) bridge in static window.AU_DATA's woo+amz columns
-  // for the same months. (a) is honest and self-corrects when Phase 3 lands;
-  // (b) is more accurate today but bakes the static snapshot into the live
-  // path. We pick (a) and surface this in the column tooltip on the front
-  // end. The under-count is documented in the response `notes` field.
+  // objects from getMonthSales(). v2.2.18: each skuSales row's total_tins
+  // now sums col + woo2 + dist + woo — i.e. CIN7 channels PLUS Woo per-SKU
+  // (from D1, via getAuWooSalesFromD1's bySku rollup folded into
+  // buildAuSalesPayloadFromD1). Run rate denominator therefore reflects
+  // ~95% of true volume across all months.
+  //
+  // The remaining gap is Amazon — Phase 3b will lift the NA SP-API code
+  // into a market-parameterised path so AU FBA sales land in D1 too.
+  // Until then, FBA-heavy SKUs (e.g. small-pack Originals) still under-count
+  // by their FBA share. The runRateBasis.note surfaces this state to the
+  // frontend tooltip.
 
   // Sum tins per base SKU across the trailing window
   const tinsByBase = new Map();
@@ -1670,7 +1711,7 @@ async function buildAuPosPayload(env) {
       // tooltip can show "trailing 3 months: Feb / Mar / Apr 2026".
       months: monthPayloads.map((p) => p.month),
       missingMonths: monthList.filter((m) => !monthPayloads.some((p) => p.month === m)),
-      note: 'CIN7-channels only (Coles + Woolies + Distributors). Woo + Amazon volume not included until Phase 3.',
+      note: 'CIN7 + Woo channels (Coles + Woolies + Distributors + Woo). Amazon volume still pending Phase 3b — slight under-count for FBA-heavy SKUs.',
     },
     lastSync: new Date().toISOString(),
     source:   'cin7-live',

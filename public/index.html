@@ -1867,7 +1867,7 @@
       <div class="table-card-header">
         <div class="table-card-title">Incoming stock by SKU</div>
         <span id="au-incoming-source-chip" class="source-chip" style="display:none;" title="Source of the run-rate basis"></span>
-        <div class="table-hint">Stock = base SKU SOH + carton tins (×48) · Run rate = trailing 3 complete months ÷ days · Days left = stock ÷ run rate · Discontinued SKUs excluded · <em>Run rate is CIN7-channels only (Coles + Woolies + Distributors) until Phase 3 wires Woo + Amazon — under-counts demand for SKUs that sell heavily on Woo/FBA.</em></div>
+        <div class="table-hint">Stock = base SKU SOH + carton tins (×48) · Run rate = trailing 3 complete months ÷ days · Days left = stock ÷ run rate · Discontinued SKUs excluded · <em>Run rate is CIN7 + Woo channels (Coles + Woolies + Distributors + Woo). Amazon volume still pending Phase 3b — slight under-count for FBA-heavy SKUs (e.g. small-pack Originals).</em></div>
         <button class="btn-csv" onclick="downloadAuIncomingCSV()">Export CSV</button>
       </div>
       <div class="table-scroll"><table>
@@ -1875,7 +1875,7 @@
           <tr>
             <th title="Base AU SKU. Cartons are rolled up to this base × 48 tins.">SKU ⓘ</th>
             <th class="num" title="Sellable tins on hand right now: base SKU SOH plus all cartons of this SKU rolled up at ×48 tins each.">Current stock ⓘ</th>
-            <th class="num" title="Average tins sold per day. Live (v2.35+): trailing 3 complete months from CIN7 — Coles + Woolies + Distributors only. Woo + Amazon volume not included until Phase 3 (under-counts demand for FBA-heavy SKUs). Static fallback: April 2026 ÷ 30 days, all 5 channels.">Run rate (tins/day) ⓘ</th>
+            <th class="num" title="Average tins sold per day. Live (v2.2.18+): trailing 3 complete months across CIN7 + Woo channels (Coles + Woolies + Distributors + Woo). Amazon volume not included until Phase 3b — slightly under-counts demand for FBA-heavy SKUs. Static fallback: April 2026 ÷ 30 days, all 5 channels.">Run rate (tins/day) ⓘ</th>
             <th class="num" title="Days of stock remaining at the current run rate. Blank if no sales in the period.">Days left ⓘ</th>
             <th class="num" title="Total tins on order across all open POs for this SKU. Includes finished tins (AU-...) and any carton lines (AU-CTN-...×48). Excludes raw tins (T-AU-...) which need manufacturing first.">Incoming ⓘ</th>
             <th title="PO references where this SKU appears.">Next PO(s) ⓘ</th>
@@ -1910,9 +1910,19 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.17</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.18</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.18 &mdash; 16 May 2026 (Woo per-SKU live from D1 across all months; drop Amazon revenue estimate)</h4>
+    <ul>
+      <li><strong>Per-SKU Monthly SKU Sales table was only showing Woo for April (from static).</strong> Spot-audit after v2.2.17 found that Woo columns on the Monthly SKU Sales tab read <code>—</code> for every month except April, even though D1 has the full Woo history Nov 2025 &rarr; May 2026. Root cause: v2.2.14 wired Woo at the channel level only (<code>channels.woo</code> on the sales payload), but the per-SKU <code>skuSales</code> array still only carried CIN7 columns (col / woo2 / dist). The front-end merge tried to fill the gap from <code>au-data.js</code>'s static snapshot &mdash; which only has April. Other months read 0.</li>
+      <li><strong>Backend now serves Woo per-SKU.</strong> <code>buildAuSalesPayloadFromD1</code> in <code>src/cin7.js</code> folds <code>getAuWooSalesFromD1.bySku</code> into the <code>skuSales</code> array. Each row gains a <code>woo</code> field (tin count per base SKU) and <code>revenue</code> per row now includes Woo revenue alongside CIN7. SKUs with Woo sales but no CIN7 channel sales appear as new rows (Woo-only D2C SKUs). KV cache key bumped <code>au:sales:YYYY-MM:v5</code> &rarr; <code>:v6</code>.</li>
+      <li><strong>Front-end merge dropped the Woo+Amazon revenue approximation.</strong> Previously <code>loadLiveAuSales</code> approximated woo+amz revenue from static via <code>static.revenue &times; (woo_amz_tins / total_tins)</code> &mdash; that violated the "never fudge data" rule. With Woo now real from D1, the approximation is gone entirely. Amazon TINS still display for April from the static snapshot (real April export), but <strong>Amazon revenue now shows blank/0 until Phase 3b</strong> lands real SP-API data. This is the honest representation: CIN7 + Woo are real; Amazon is missing and we're transparent about it.</li>
+      <li><strong>Channel total revenue will visibly drop for months that previously included the Woo+Amz approximation.</strong> April 2026 will see the biggest delta since the static approximation contributed most there. Per-SKU Woo numbers across non-April months will look new because they weren't being displayed before &mdash; check the totals at the bottom of the Monthly SKU Sales table against the channel-level Woo total at the top.</li>
+      <li><strong>Sales by Channel table source label fixed.</strong> The Woo row's source column was still reading "Metorik / Woo &middot; static (Phase 3)" even though v2.2.14 had it live. Now correctly reads "Woo &middot; D1 (Metorik backfill + cron)" when the live fetch has landed, mirroring the CIN7 channels' live/static behaviour. Amazon row still reads "static &mdash; Phase 3b" because that's still true.</li>
+      <li><strong>Run rate denominator now includes Woo.</strong> <code>buildIncomingBySku</code>'s <code>total_tins</code> input now sums col + woo2 + dist + woo, so the trailing-3-month run rate on the Incoming stock by SKU table reflects ~95% of true demand (was ~80% on CIN7-only). The <code>runRateBasis.note</code>, the table-hint above the table, and the column tooltip all updated. FBA-heavy SKUs (small-pack Originals especially) will still under-count slightly until Phase 3b.</li>
+      <li><strong>Verify after deploy.</strong> Hit <code>https://logistics.apps.nopong.com/api/au/sales?month=2026-03&amp;refresh=1</code> &mdash; <code>skuSales</code> rows should now have a <code>woo</code> field with non-zero values. On the dashboard, navigate Monthly SKU Sales to any month other than April &mdash; the Woo column should now have data (was blank). Check the table TOTAL row matches the channel-level Woo total card at the top of the Sales by Channel tab. For April 2026: per-SKU revenue per row will be slightly lower than v2.2.17 (the Amazon revenue estimate is gone); total tins per row include the static Amazon tin count for April only.</li>
+    </ul>
     <h4>v2.2.17 &mdash; 16 May 2026 (AU numeric data cells now right-align to match their headers)</h4>
     <ul>
       <li><strong>Numbers didn't sit under their column headings on AU tables.</strong> Headers like <em>Current stock</em> / <em>Run rate</em> / <em>Days left</em> / <em>Incoming</em> on the Incoming stock by SKU table (and the new <em>Total units</em> / <em>SKUs</em> / <em>Days until arrival</em> on the Open POs table) were right-aligned per the v2.35 prototype rule, but the data cells defaulted to left-aligned because the base <code>td.num</code> CSS only sets padding + tabular-nums, no alignment. Result: number columns visually drifted left while their headers drifted right, columns of numbers didn't stack against each other, and totals were hard to read at a glance.</li>
@@ -6481,40 +6491,49 @@ async function loadLiveAuSales(month) {
     // Replace refunds row for the month
     if (data.refunds) AU_REFUNDS_BY_MONTH[month] = data.refunds;
 
-    // Per-SKU monthly: merge col/woo2/dist columns from live, keep woo/amz
-    // from static. The merge is by base SKU. Revenue is apportioned: live
-    // CIN7 revenue (col+woo2+dist) is used directly; the woo+amz share of
-    // the static row's all-channels revenue is approximated by
-    //   static_revenue × static_woo_amz_tins / static_total_tins
-    // under the assumption that AOV per tin is roughly similar across
-    // channels. Phase 3 (Woo + Amazon source-of-truth) will replace this
-    // approximation with real per-channel revenue.
+    // Per-SKU monthly merge. v2.2.18:
+    //  • col / woo2 / dist + Woo all come from live D1 (backend skuSales row
+    //    now includes a `woo` field and revenue includes Woo revenue).
+    //  • amz tins still come from the static April snapshot (only month with
+    //    Amazon data) — Phase 3b will replace it with live SP-API.
+    //  • amz REVENUE is NOT estimated. Previously the merge apportioned
+    //    woo+amz revenue from static.revenue × tin share — that was a
+    //    fudge per Melanie's "no fudging data" rule. Now Amazon revenue
+    //    shows blank/0 until Phase 3b lands real numbers.
     const liveBySku = new Map();
     for (const r of (data.skuSales || [])) liveBySku.set(r.sku, r);
     const staticRows = (window.AU_DATA?.skuSalesByMonth?.[month] || []);
     const merged = new Map();
-    // Seed with static rows (preserves woo/amz columns + name for SKUs that
-    // have no live CIN7 sales in this month).
+    // Seed with static rows so we get amz tins for April. col/woo2/dist/woo
+    // will be overwritten by live below; amz tins survive.
     for (const r of staticRows) merged.set(r.sku, { ...r });
-    for (const [sku, live] of liveBySku.entries()) {
-      const stat = merged.get(sku) || { sku, name: live.name || '', woo: 0, amz: 0, revenue: 0, total_tins: 0 };
-      const wooAmzTins   = (stat.woo || 0) + (stat.amz || 0);
-      const staticAllChs = stat.total_tins || (wooAmzTins + (stat.col || 0) + (stat.woo2 || 0) + (stat.dist || 0));
-      const wooAmzRevApprox = (stat.revenue && staticAllChs > 0)
-        ? stat.revenue * (wooAmzTins / staticAllChs)
-        : 0;
-      const acc = {
-        sku,
-        name:       stat.name || live.name || '',
-        woo:        stat.woo  || 0,
-        amz:        stat.amz  || 0,
-        col:        live.col  || 0,
-        woo2:       live.woo2 || 0,
-        dist:       live.dist || 0,
-        total_tins: (stat.woo || 0) + (stat.amz || 0) + (live.col || 0) + (live.woo2 || 0) + (live.dist || 0),
-        revenue:    (live.revenue || 0) + wooAmzRevApprox,
-      };
-      merged.set(sku, acc);
+    // Also union in any SKU that has live data but no static row (most
+    // common for non-April months).
+    for (const sku of liveBySku.keys()) {
+      if (!merged.has(sku)) merged.set(sku, { sku, name: '', amz: 0 });
+    }
+    for (const [sku, slot] of merged.entries()) {
+      const live = liveBySku.get(sku);
+      const amzTins = slot.amz || 0; // static April only; 0 elsewhere
+      if (live) {
+        slot.name       = slot.name || live.name || '';
+        slot.col        = live.col  || 0;
+        slot.woo2       = live.woo2 || 0;
+        slot.dist       = live.dist || 0;
+        slot.woo        = live.woo  || 0;
+        slot.total_tins = (live.total_tins || 0) + amzTins;
+        slot.revenue    = live.revenue || 0; // CIN7+Woo from backend; amz=0 until Phase 3b
+      } else {
+        // SKU appears only in static (no live activity this month) — keep
+        // its existing fields but ensure missing channels read as 0 and
+        // total_tins is recomputed honestly.
+        slot.col        = slot.col  || 0;
+        slot.woo2       = slot.woo2 || 0;
+        slot.dist       = slot.dist || 0;
+        slot.woo        = slot.woo  || 0;
+        slot.total_tins = slot.col + slot.woo2 + slot.dist + slot.woo + amzTins;
+        slot.revenue    = slot.revenue || 0;
+      }
     }
     AU_SKU_SALES_BY_MONTH[month] = Array.from(merged.values())
       .filter(r => (r.total_tins || 0) > 0 || (r.revenue || 0) > 0)
@@ -6722,15 +6741,15 @@ function renderAuSalesTable() {
   const tins   = AU_TINS_BY_MONTH[AU_SELECTED_MONTH]   || {};
   const prev   = auPrevMonthKey(AU_SELECTED_MONTH);
   const prevData = prev ? AU_SALES_BY_MONTH[prev] : null;
-  // Per-channel source label. Woo + Amazon are always static (Phase 3
-  // wires those live). Coles / Woolies / Distributors flip to "CIN7 live"
-  // once /api/au/sales has populated AU_LIVE_SALES_MONTHS for this month;
-  // otherwise the static April snapshot is the fallback.
+  // Per-channel source label. v2.2.18: Woo now flips to live (Metorik
+  // backfill + cron) once /api/au/sales has populated for this month —
+  // mirrors the col/woo2/dist behaviour. Amazon stays on static until
+  // Phase 3b lands SP-API.
   const liveCin7 = AU_LIVE_SALES_MONTHS.has(AU_SELECTED_MONTH);
   const sourceMap = {
-    woo: 'Metorik / Woo · static (Phase 3)',
-    amz: 'Amazon SP-API · static (Phase 3)',
-    col:  liveCin7 ? 'CIN7 live · Coles (EDI + backend)'  : 'CIN7 static (April snapshot)',
+    woo:  liveCin7 ? 'Woo · D1 (Metorik backfill + cron)'  : 'Woo · static (April snapshot)',
+    amz:  'Amazon · static (April snapshot — Phase 3b)',
+    col:  liveCin7 ? 'CIN7 live · Coles (EDI + backend)'   : 'CIN7 static (April snapshot)',
     woo2: liveCin7 ? 'CIN7 live · Woolworths (EDI)'        : 'CIN7 static (April snapshot)',
     dist: liveCin7 ? 'CIN7 live · Distributors (non-EDI)'  : 'CIN7 static (April snapshot)',
   };
