@@ -1910,9 +1910,17 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.18</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.19</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.19 &mdash; 16 May 2026 (Monthly SKU table now sources product names from CIN7 inventory, not sales line items)</h4>
+    <ul>
+      <li><strong>Most product names on the Monthly SKU Sales table were wrong after v2.2.18.</strong> The 35g SKUs that sell via Coles / Woolies / Distributors were showing carton-variant names like <em>"CARTON OF 4 SRT'S - 48 X NO PONG ORIGINAL 35G"</em> instead of the canonical <em>"NO PONG ORIGINAL 35G"</em>. AU-OG-NPO-35, AU-LL-BCF-35, AU-OG-BCF-35, AU-FP-VLB-35, AU-B-BS-BCF-35, AU-CL-VLB-35, AU-EF-BCF-35, AU-FF-VLB-35, AU-B-MJ-BCF-35 all hit.</li>
+      <li><strong>Root cause.</strong> Backend's per-SKU name comes from <code>MAX(i.name) GROUP BY i.base_sku</code> on <code>cin7_sales_order_items</code>. For SKUs sold in carton form, CIN7's line-item <code>name</code> field is the carton's name (e.g. <em>"CARTON OF 4 SRT'S - 48 X NO PONG ORIGINAL 35G"</em>). When MAX picks alphabetically, <em>"CARTON OF..."</em> beats <em>"NO PONG..."</em> (C &lt; N). This was hidden in earlier versions because the front-end merge used static <code>au-data.js</code> names for April; v2.2.18 stopped using static, exposing the bad names for every month including April.</li>
+      <li><strong>Fix &mdash; source names from inventory.</strong> The Inventory SKUs tab pulls product names from CIN7's <code>/Stock</code> + <code>/Products</code> endpoints, which return one canonical name per product. New helper <code>_auCanonicalSkuName(sku, fallback)</code> in <code>public/index.html</code> looks up the row's SKU in <code>AU_INVENTORY_DATA</code> and returns the inventory name. Falls back to the row's own name for SKUs not in inventory (monthly club, Re-Use Stickers, anything outside the Finished Products / Bicarb Based categories that's filtered out of inventory). <code>loadLiveAuInventory</code> now also triggers <code>renderAuMonthlySkuTable()</code> when it completes so canonical names appear without a tab switch.</li>
+      <li><strong>Backend payload still has the carton-variant name bug.</strong> The <code>/api/au/sales</code> payload's <code>skuSales[].name</code> field still comes from the buggy SQL aggregation. Documented as a known issue. A follow-up backend ship can rebuild the name source from <code>/Stock</code> + <code>/Products</code> the same way <code>buildAuInventoryPayload</code> does. Frontend-only fix here keeps the ship small.</li>
+      <li><strong>Verify after deploy.</strong> Hard-refresh, Monthly SKU Sales tab. Top rows like AU-OG-NPO-35 should now read <em>"NO PONG ORIGINAL 35G"</em> instead of <em>"CARTON OF..."</em>. Names that already looked good in v2.2.18 (most 85g Woo-only SKUs) might change capitalisation but should still be recognisable since CIN7's master names are the source-of-truth. SKUs not in inventory (monthly club, stickers) keep their previous names.</li>
+    </ul>
     <h4>v2.2.18 &mdash; 16 May 2026 (Woo per-SKU live from D1 across all months; drop Amazon revenue estimate)</h4>
     <ul>
       <li><strong>Per-SKU Monthly SKU Sales table was only showing Woo for April (from static).</strong> Spot-audit after v2.2.17 found that Woo columns on the Monthly SKU Sales tab read <code>—</code> for every month except April, even though D1 has the full Woo history Nov 2025 &rarr; May 2026. Root cause: v2.2.14 wired Woo at the channel level only (<code>channels.woo</code> on the sales payload), but the per-SKU <code>skuSales</code> array still only carried CIN7 columns (col / woo2 / dist). The front-end merge tried to fill the gap from <code>au-data.js</code>'s static snapshot &mdash; which only has April. Other months read 0.</li>
@@ -6409,6 +6417,11 @@ async function loadLiveAuInventory() {
     AU_INVENTORY_DATA = data.inventory;
     renderAuInventoryKpis();
     renderAuInventoryTable();
+    // v2.2.19: Monthly SKU Sales table looks up canonical names from
+    // AU_INVENTORY_DATA. If inventory finishes loading after the sales table
+    // first rendered (which it often will — sales is the default landing tab),
+    // re-render so the canonical names replace the carton-variant fallbacks.
+    if (typeof renderAuMonthlySkuTable === 'function') renderAuMonthlySkuTable();
 
     if (data.staleFallback) {
       setChip('CIN7 cached (upstream error)', 'gray',
@@ -6797,6 +6810,28 @@ function renderAuSalesTable() {
 }
 
 // ── Monthly SKU Sales ──
+// Canonical product name for a base SKU. Sourced from AU_INVENTORY_DATA, which
+// itself comes from CIN7 /Stock + /Products (the authoritative product catalog).
+// v2.2.19: added because the live skuSales rows' `name` field came from
+// cin7_sales_order_items.name which holds per-line-item names. For SKUs sold in
+// carton form (most supermarket SKUs), MAX(name) GROUP BY base_sku alphabetically
+// preferred carton variant names like "CARTON OF 4 SRT'S - 48 X NO PONG ORIGINAL
+// 35G" over the canonical "NO PONG ORIGINAL 35G". Inventory data has the right
+// name because /Stock returns one row per product with its canonical name.
+//
+// Falls back to the row's own name for SKUs not in inventory (monthly club SKUs,
+// "Re-Use Stickers", anything CIN7 categorises outside Finished Products /
+// Bicarb Based that gets filtered out of inventory).
+function _auCanonicalSkuName(sku, fallback) {
+  if (!sku || typeof AU_INVENTORY_DATA === 'undefined' || !AU_INVENTORY_DATA?.length) {
+    return fallback || '';
+  }
+  // Direct match on base SKU
+  const direct = AU_INVENTORY_DATA.find(r => r.sku === sku && r.name);
+  if (direct?.name) return direct.name;
+  return fallback || '';
+}
+
 function renderAuMonthlySkuTable() {
   const tb = document.getElementById('au-monthly-tbody');
   const tf = document.getElementById('au-monthly-tfoot');
@@ -6809,7 +6844,7 @@ function renderAuMonthlySkuTable() {
   }
   tb.innerHTML = rows.map(r => `<tr>
     <td><div class="sku-name">${r.sku}</div></td>
-    <td>${r.name || ''}</td>
+    <td>${_auCanonicalSkuName(r.sku, r.name)}</td>
     <td class="num">${r.woo  ? fmtAuNum(r.woo)  : '<span style="color:var(--text-light)">—</span>'}</td>
     <td class="num">${r.amz  ? fmtAuNum(r.amz)  : '<span style="color:var(--text-light)">—</span>'}</td>
     <td class="num">${r.col  ? fmtAuNum(r.col)  : '<span style="color:var(--text-light)">—</span>'}</td>
