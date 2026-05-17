@@ -105,12 +105,13 @@ const KV_POS_KEY       = 'au:pos:v4';
 // channels payload now includes a `woo` key sourced from D1's `orders` table
 // (market='AU'), in addition to the existing col/woo2/dist (CIN7). Bumping
 // invalidates v4 caches that don't have the woo channel populated.
-// v6 (v2.2.18, 2026-05-16): skuSales rows gain a `woo` field (tin count per
-// base SKU from Woo) AND `revenue` per row now includes Woo revenue alongside
-// CIN7 revenue. Previously the front-end approximated Woo per-SKU from the
-// static au-data.js snapshot (April only) and apportioned woo+amz revenue
-// by tin share — that approximation is gone, so v5 caches need to invalidate.
-function kvSalesKey(month) { return `au:sales:${month}:v6`; }
+// v7 (v2.2.20, 2026-05-17): channels.amz + skuSales rows gain an `amz` field
+// + revenue includes Amazon revenue. Phase 3b-a finishes the Woo/Amazon
+// symmetry — Amazon now sourced from amazon_orders + amazon_items (the
+// historical CSV import is the seed; SP-API cron extension is Phase 3b-b).
+// v6 (v2.2.18, 2026-05-16): skuSales rows gained a `woo` field. v5 → v6
+// notes preserved in git history.
+function kvSalesKey(month) { return `au:sales:${month}:v7`; }
 
 // 15 min TTL — short enough that drift is bounded but long enough to absorb
 // dashboard refreshes on the same minute. Bump the key suffix (v1 → v2) on
@@ -974,6 +975,82 @@ async function buildAuSalesPayload(env, month) {
 // / cancelled / refunded / pending / on-hold / duplicated orders sit in D1
 // but never count toward the channel total — the v2.2.13 import preserved
 // them for auditability + future refund reconciliation (Phase 3c).
+// v2.2.20 (Phase 3b-a): Amazon AU per-month rollup from D1, sourced from
+// amazon_orders + amazon_items (the same tables NA Amazon uses, scoped to
+// market='AU'). Populated by scripts/import-amazon-au-csv.py for historical
+// data; future SP-API cron extension (Phase 3b-b) will keep it fresh.
+//
+// amazon_orders and amazon_items aren't joined by order id (NA's Reports API
+// doesn't return order ids per line — see migration 0002 comment). For the
+// CSV-import case BOTH tables come from the same TSV, so they ARE related
+// 1:1 via amazon-order-id at the source. We still query them separately to
+// match NA's downstream code shape.
+//
+// Returns { channelTotal: { units, tins, revenue, orders }, bySku: { [sku]: { tins, units, revenue, name } } }
+// Matches getAuWooSalesFromD1's shape so the per-channel merge logic in
+// buildAuSalesPayloadFromD1 stays symmetric.
+async function getAuAmazonSalesFromD1(env, month) {
+  // Channel total — orders count + revenue come from amazon_orders.
+  // (amazon_orders.total INCLUDES shipping; amazon_items.total is per-line
+  //  item price only. We use orders.total for the channel-level revenue
+  //  number on the dashboard.)
+  const orderAgg = await env.DB.prepare(
+    `SELECT COUNT(DISTINCT id) AS orders,
+            COALESCE(SUM(total), 0) AS revenue
+       FROM amazon_orders
+      WHERE market = 'AU'
+        AND substr(local_date, 1, 7) = ?`,
+  ).bind(month).first();
+
+  // Per-SKU breakdown — pull from amazon_items. Tin count = quantity (1:1
+  // assumption — Amazon SKUs are per-tin listings in the AU catalog; FNSKU
+  // aliases that point to canonical SKUs preserve the 1:1 relationship).
+  // Line-item revenue (amazon_items.total) sums separately from order
+  // revenue — the delta is shipping cost allocated at the order level,
+  // which we attribute to the channel total but not to any individual SKU.
+  const skuRows = await env.DB.prepare(
+    `SELECT dashboard_sku AS sku,
+            MAX(name)            AS name,
+            COALESCE(SUM(quantity), 0) AS units,
+            COALESCE(SUM(total), 0)    AS revenue
+       FROM amazon_items
+      WHERE market = 'AU'
+        AND substr(local_date, 1, 7) = ?
+        AND dashboard_sku IS NOT NULL
+      GROUP BY dashboard_sku`,
+  ).bind(month).all();
+
+  // Total units / tins across all SKUs (including unmapped rows so the
+  // channel total tin count is honest even when dashboard_sku is NULL).
+  const unitAgg = await env.DB.prepare(
+    `SELECT COALESCE(SUM(quantity), 0) AS units
+       FROM amazon_items
+      WHERE market = 'AU'
+        AND substr(local_date, 1, 7) = ?`,
+  ).bind(month).first();
+
+  const bySku = {};
+  for (const r of (skuRows.results || [])) {
+    if (!r.sku) continue;
+    bySku[r.sku] = {
+      tins:    Number(r.units)   || 0, // 1:1 — Amazon AU SKUs are per-tin listings
+      units:   Number(r.units)   || 0,
+      revenue: Number(r.revenue) || 0,
+      name:    r.name || '',
+    };
+  }
+
+  return {
+    channelTotal: {
+      units:   Number(unitAgg?.units)    || 0,
+      tins:    Number(unitAgg?.units)    || 0,  // 1:1 — see note above
+      revenue: Number(orderAgg?.revenue) || 0,
+      orders:  Number(orderAgg?.orders)  || 0,
+    },
+    bySku,
+  };
+}
+
 async function getAuWooSalesFromD1(env, month) {
   const rows = await env.DB.prepare(
     `SELECT
@@ -1134,6 +1211,12 @@ async function buildAuSalesPayloadFromD1(env, month) {
   // showing from static au-data.js (April only) and 0 elsewhere.
   const wooFromD1 = await getAuWooSalesFromD1(env, month);
 
+  // Amazon channel from D1 (Phase 3b-a, v2.2.20). Sourced from amazon_orders
+  // + amazon_items where market='AU' — populated by the Fulfilled Shipments
+  // CSV import; SP-API cron extension is Phase 3b-b. Same merge shape as Woo:
+  // channels.amz gets channelTotal; bySku folds into skuSales below.
+  const amzFromD1 = await getAuAmazonSalesFromD1(env, month);
+
   // Materialise — match the shape buildAuSalesPayload produces so the
   // frontend doesn't need to know which path served the data.
   const channelsOut = {
@@ -1141,6 +1224,7 @@ async function buildAuSalesPayloadFromD1(env, month) {
     woo2: { tins: 0, revenue: 0, orders: 0 },
     dist: { tins: 0, revenue: 0, orders: 0 },
     woo:  { tins: 0, revenue: 0, orders: 0, units: 0 },
+    amz:  { tins: 0, revenue: 0, orders: 0, units: 0 },
   };
   for (const r of (channelsRows.results || [])) {
     if (!channelsOut[r.channel]) continue;
@@ -1151,6 +1235,7 @@ async function buildAuSalesPayloadFromD1(env, month) {
     };
   }
   channelsOut.woo = wooFromD1.channelTotal;
+  channelsOut.amz = amzFromD1.channelTotal;
 
   const refundsOut = {
     tins:      Number(refundsAgg?.tins)    || 0,
@@ -1166,13 +1251,17 @@ async function buildAuSalesPayloadFromD1(env, month) {
     };
   }
 
-  // v2.2.18: merge CIN7 per-SKU rollup with Woo per-SKU rollup (from
-  // getAuWooSalesFromD1). Both are keyed by AU base SKU (CIN7 emits `base_sku`
-  // pre-normalised; Woo applies normalizeAuSku() inside getAuWooSalesFromD1).
-  // The merged row has tin counts per channel (col / woo2 / dist / woo),
-  // total_tins summing all four, and revenue = CIN7 revenue + Woo revenue.
-  // SKUs with Woo sales but no CIN7 channel sales appear as new rows; this
-  // is correct (Woo-only D2C SKUs are real).
+  // v2.2.18 + v2.2.20: merge CIN7 per-SKU rollup with Woo and Amazon
+  // per-SKU rollups. All three are keyed by AU base SKU:
+  //   - CIN7 emits `base_sku` pre-normalised at write time
+  //   - Woo applies normalizeAuSku() inside getAuWooSalesFromD1
+  //   - Amazon applies map_seller_sku() at CSV import time, storing the
+  //     canonical SKU in amazon_items.dashboard_sku (default identity for
+  //     AU- seller SKUs; explicit map for FNSKU aliases)
+  // The merged row has tin counts per channel (col / woo2 / dist / woo / amz),
+  // total_tins summing all five, and revenue = CIN7 + Woo + Amazon revenue.
+  // SKUs that appear in any one channel get a row; columns they don't
+  // appear in stay 0.
   const skuMap = new Map(); // base_sku → merged row in-progress
   for (const r of (skuRows.results || [])) {
     skuMap.set(r.sku, {
@@ -1182,29 +1271,45 @@ async function buildAuSalesPayloadFromD1(env, month) {
       woo2:          Number(r.woo2) || 0,
       dist:          Number(r.dist) || 0,
       woo:           0,
+      amz:           0,
       cin7_revenue:  Number(r.revenue) || 0,
       woo_revenue:   0,
+      amz_revenue:   0,
     });
   }
   for (const [baseSku, w] of Object.entries(wooFromD1.bySku || {})) {
     const existing = skuMap.get(baseSku) || {
       sku:           baseSku,
       name:          w.name || '',
-      col: 0, woo2: 0, dist: 0,
-      woo: 0,
+      col: 0, woo2: 0, dist: 0, woo: 0, amz: 0,
       cin7_revenue:  0,
       woo_revenue:   0,
+      amz_revenue:   0,
     };
     existing.woo         += Number(w.tins)    || 0;
     existing.woo_revenue += Number(w.revenue) || 0;
     if (!existing.name && w.name) existing.name = w.name;
     skuMap.set(baseSku, existing);
   }
+  for (const [baseSku, a] of Object.entries(amzFromD1.bySku || {})) {
+    const existing = skuMap.get(baseSku) || {
+      sku:           baseSku,
+      name:          a.name || '',
+      col: 0, woo2: 0, dist: 0, woo: 0, amz: 0,
+      cin7_revenue:  0,
+      woo_revenue:   0,
+      amz_revenue:   0,
+    };
+    existing.amz         += Number(a.tins)    || 0;
+    existing.amz_revenue += Number(a.revenue) || 0;
+    if (!existing.name && a.name) existing.name = a.name;
+    skuMap.set(baseSku, existing);
+  }
 
   const skuSales = [];
   for (const m of skuMap.values()) {
-    const total = m.col + m.woo2 + m.dist + m.woo;
-    const revenue = m.cin7_revenue + m.woo_revenue;
+    const total = m.col + m.woo2 + m.dist + m.woo + m.amz;
+    const revenue = m.cin7_revenue + m.woo_revenue + m.amz_revenue;
     if (total === 0 && revenue === 0) continue;
     skuSales.push({
       sku:        m.sku,
@@ -1213,6 +1318,7 @@ async function buildAuSalesPayloadFromD1(env, month) {
       woo2:       m.woo2,
       dist:       m.dist,
       woo:        m.woo,
+      amz:        m.amz,
       total_tins: total,
       revenue,
     });
@@ -1532,17 +1638,14 @@ function shapePoRows(rawPos) {
 // instead of single-month-divided-by-30 (CA-style smoothing).
 function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
   // monthSalesPayloads is an array (newest → oldest) of { skuSales, month }
-  // objects from getMonthSales(). v2.2.18: each skuSales row's total_tins
-  // now sums col + woo2 + dist + woo — i.e. CIN7 channels PLUS Woo per-SKU
-  // (from D1, via getAuWooSalesFromD1's bySku rollup folded into
-  // buildAuSalesPayloadFromD1). Run rate denominator therefore reflects
-  // ~95% of true volume across all months.
+  // objects from getMonthSales(). v2.2.20: each skuSales row's total_tins
+  // now sums col + woo2 + dist + woo + amz — i.e. all five AU channels
+  // (CIN7 supermarket/distributor + Woo direct + Amazon). Run rate
+  // denominator therefore reflects the full demand picture.
   //
-  // The remaining gap is Amazon — Phase 3b will lift the NA SP-API code
-  // into a market-parameterised path so AU FBA sales land in D1 too.
-  // Until then, FBA-heavy SKUs (e.g. small-pack Originals) still under-count
-  // by their FBA share. The runRateBasis.note surfaces this state to the
-  // frontend tooltip.
+  // History:
+  //   v2.2.18 added Woo per-SKU (col+woo2+dist+woo); ~95% of true volume.
+  //   v2.2.20 added Amazon per-SKU from D1; ~100% of true volume.
 
   // Sum tins per base SKU across the trailing window
   const tinsByBase = new Map();
@@ -1711,7 +1814,7 @@ async function buildAuPosPayload(env) {
       // tooltip can show "trailing 3 months: Feb / Mar / Apr 2026".
       months: monthPayloads.map((p) => p.month),
       missingMonths: monthList.filter((m) => !monthPayloads.some((p) => p.month === m)),
-      note: 'CIN7 + Woo channels (Coles + Woolies + Distributors + Woo). Amazon volume still pending Phase 3b — slight under-count for FBA-heavy SKUs.',
+      note: 'All 5 channels (Coles + Woolies + Distributors + Woo + Amazon). Full demand picture.',
     },
     lastSync: new Date().toISOString(),
     source:   'cin7-live',
