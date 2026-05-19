@@ -1684,6 +1684,7 @@
     <button class="tab-btn"        data-tab="au-pos"       onclick="switchAuTab('au-pos')">Purchase Orders</button>
     <button class="tab-btn"        data-tab="au-forecast"  onclick="switchAuTab('au-forecast')">Forecasting</button>
     <button class="tab-btn"        data-tab="au-packaging" onclick="switchAuTab('au-packaging')">Packaging</button>
+    <button class="tab-btn"        data-tab="au-birthday"  onclick="switchAuTab('au-birthday')" style="background:#FF578A;color:#fff;font-weight:700;">🎂 11th Birthday</button>
   </nav>
 </div>
 
@@ -1905,14 +1906,214 @@
     </div>
   </div>
 
+  <!-- ═══════ TAB: 11TH BIRTHDAY LAUNCH (v2.2.21) ═══════ -->
+  <div class="tab-panel" id="tab-au-birthday">
+    <style>
+      /* Birthday tab — scoped styles, only loaded when this panel renders. */
+      #tab-au-birthday .bday-hero {
+        background: linear-gradient(135deg, #FF578A 0%, #FF8FB3 100%);
+        color: #fff;
+        border-radius: 14px;
+        padding: 22px 26px;
+        margin-bottom: 20px;
+        display: grid;
+        grid-template-columns: 2fr 1fr 1fr;
+        gap: 20px;
+        align-items: center;
+        box-shadow: 0 4px 18px rgba(255,87,138,0.25);
+      }
+      #tab-au-birthday .bday-hero h2 { margin: 0 0 6px 0; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
+      #tab-au-birthday .bday-hero .subtitle { font-size: 13px; opacity: 0.9; font-weight: 500; }
+      #tab-au-birthday .bday-countdown-big {
+        font-size: 48px; font-weight: 800; line-height: 1;
+        font-variant-numeric: tabular-nums; letter-spacing: -1px;
+        margin-bottom: 4px;
+      }
+      #tab-au-birthday .bday-countdown-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.85; font-weight: 600; }
+      #tab-au-birthday .bday-drop-time { font-size: 22px; font-weight: 700; line-height: 1; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+      #tab-au-birthday .bday-section-title {
+        font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px;
+        color: var(--text-secondary); margin: 18px 0 10px 4px;
+      }
+      #tab-au-birthday .bday-card {
+        background: var(--card-bg, #fff);
+        border: 1px solid var(--border, #E5E7EB);
+        border-radius: 10px;
+        padding: 16px 18px;
+      }
+      #tab-au-birthday .bday-card-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-secondary); font-weight: 600; margin-bottom: 6px; }
+      #tab-au-birthday .bday-card-value { font-size: 30px; font-weight: 800; line-height: 1.1; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+      #tab-au-birthday .bday-card-sub { font-size: 11px; color: var(--text-secondary); margin-top: 4px; font-weight: 500; }
+      #tab-au-birthday .bday-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+      #tab-au-birthday .bday-grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+      #tab-au-birthday .bday-alert {
+        background: #FFF5F7;
+        border: 2px solid #FF578A;
+        border-radius: 10px;
+        padding: 16px 18px;
+        margin-top: 14px;
+      }
+      #tab-au-birthday .bday-alert-header {
+        display: flex; align-items: center; justify-content: space-between;
+        margin-bottom: 10px;
+      }
+      #tab-au-birthday .bday-alert-title { font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; color: #C8295F; }
+      #tab-au-birthday .bday-alert-count { font-size: 28px; font-weight: 800; color: #C8295F; font-variant-numeric: tabular-nums; }
+      #tab-au-birthday .bday-alert-list { font-size: 12px; color: var(--text-primary); }
+      #tab-au-birthday .bday-alert-list .bday-alert-row { padding: 4px 0; border-top: 1px dashed #FFCAD8; }
+      #tab-au-birthday .bday-alert-list .bday-alert-row:first-child { border-top: none; }
+      #tab-au-birthday .bday-pill {
+        display: inline-block; font-size: 9px; font-weight: 800; letter-spacing: 0.6px;
+        padding: 2px 6px; border-radius: 4px; margin-right: 4px; vertical-align: middle;
+      }
+      #tab-au-birthday .bday-pill.intl    { background: #FFE0B2; color: #B26500; }
+      #tab-au-birthday .bday-pill.express { background: #BBDEFB; color: #0D47A1; }
+      #tab-au-birthday .bday-pill.disconnected { background: #ECECEC; color: #555; }
+      #tab-au-birthday .bday-meta-bar {
+        display: flex; align-items: center; justify-content: space-between;
+        margin-top: 18px; padding: 10px 14px;
+        background: var(--card-bg, #fff);
+        border: 1px solid var(--border, #E5E7EB);
+        border-radius: 8px;
+        font-size: 12px; color: var(--text-secondary);
+      }
+      #tab-au-birthday .bday-refresh-btn {
+        background: #FF578A; color: #fff; border: none; padding: 6px 14px;
+        border-radius: 6px; font-weight: 700; font-size: 12px; cursor: pointer;
+      }
+      #tab-au-birthday .bday-refresh-btn:hover { background: #E5447A; }
+      #tab-au-birthday .bday-refresh-btn:disabled { background: #ECECEC; color: #999; cursor: wait; }
+      #tab-au-birthday .bday-disconnected {
+        opacity: 0.5;
+      }
+      #tab-au-birthday .bday-error {
+        background: #FFF5F7; border: 1px solid #FF578A; color: #C8295F;
+        padding: 10px 14px; border-radius: 8px; font-size: 13px; font-weight: 500;
+        margin-bottom: 14px;
+      }
+    </style>
+
+    <!-- Hero strip: countdown + next drop + open orders -->
+    <div class="bday-hero">
+      <div>
+        <h2>🎂 11th Birthday Launch</h2>
+        <div class="subtitle">Thursday 21 May 2026 · hourly drops 7am–5pm AEST · live data from Woo + ShipStation</div>
+      </div>
+      <div>
+        <div class="bday-countdown-label">Next drop in</div>
+        <div class="bday-countdown-big" id="bday-countdown">--:--</div>
+        <div class="bday-drop-time" id="bday-next-drop-time">--:-- AEST</div>
+      </div>
+      <div>
+        <div class="bday-countdown-label">Open in ShipStation</div>
+        <div class="bday-countdown-big" id="bday-open-orders-big">--</div>
+        <div class="bday-card-sub" id="bday-open-orders-sub" style="color:#fff;opacity:0.9;">awaiting shipment</div>
+      </div>
+    </div>
+
+    <div id="bday-error-box"></div>
+
+    <!-- WooCommerce zone -->
+    <div class="bday-section-title">WooCommerce · live · today (AEST)</div>
+    <div class="bday-grid-4">
+      <div class="bday-card">
+        <div class="bday-card-label">All orders today</div>
+        <div class="bday-card-value" id="bday-woo-total-orders">--</div>
+        <div class="bday-card-sub">since midnight AEST</div>
+      </div>
+      <div class="bday-card">
+        <div class="bday-card-label">Orders w/ launch products</div>
+        <div class="bday-card-value" id="bday-woo-launch-orders">--</div>
+        <div class="bday-card-sub">contains soap or tin</div>
+      </div>
+      <div class="bday-card">
+        <div class="bday-card-label">Soap units (lifetime)</div>
+        <div class="bday-card-value" id="bday-soap-lifetime">--</div>
+        <div class="bday-card-sub" id="bday-soap-sub">AU-BD-NPS-100 · all-time sold</div>
+      </div>
+      <div class="bday-card">
+        <div class="bday-card-label">11th Birthday Tin units (today)</div>
+        <div class="bday-card-value" id="bday-tin-today">--</div>
+        <div class="bday-card-sub" id="bday-tin-sub">AU-BD-NBF-35 · today only</div>
+      </div>
+    </div>
+
+    <!-- Orders-per-hour chart -->
+    <div class="chart-card" style="margin-top:14px;">
+      <div class="chart-card-header">
+        <div class="chart-card-title">Orders per hour today (all orders) — 7am–5pm window highlighted</div>
+      </div>
+      <div style="position:relative; height:240px; width:100%;">
+        <canvas id="bdayHourlyChart"></canvas>
+      </div>
+    </div>
+
+    <!-- ShipStation zone -->
+    <div class="bday-section-title">ShipStation · live</div>
+    <div class="bday-grid-3" id="bday-ss-cards">
+      <div class="bday-card">
+        <div class="bday-card-label">Orders awaiting shipment</div>
+        <div class="bday-card-value" id="bday-ss-open">--</div>
+        <div class="bday-card-sub">open queue</div>
+      </div>
+      <div class="bday-card">
+        <div class="bday-card-label">Orders shipped today</div>
+        <div class="bday-card-value" id="bday-ss-shipped-orders">--</div>
+        <div class="bday-card-sub">created in ShipStation today</div>
+      </div>
+      <div class="bday-card">
+        <div class="bday-card-label">Items shipped today</div>
+        <div class="bday-card-value" id="bday-ss-shipped-items">--</div>
+        <div class="bday-card-sub">sum of units across shipments</div>
+      </div>
+    </div>
+
+    <!-- Express / international alert -->
+    <div class="bday-alert" id="bday-alert-box">
+      <div class="bday-alert-header">
+        <div class="bday-alert-title">⚠️ Express / International — still open</div>
+        <div class="bday-alert-count" id="bday-alert-count">--</div>
+      </div>
+      <div class="bday-alert-list" id="bday-alert-list">
+        <div style="font-size:12px;color:var(--text-secondary);font-style:italic;">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Meta + refresh -->
+    <div class="bday-meta-bar">
+      <span id="bday-last-updated">Loading…</span>
+      <span>
+        Auto-refresh: <span id="bday-refresh-cadence">5 min</span>
+        <button class="bday-refresh-btn" id="bday-refresh-btn" onclick="bdayRefreshNow()" style="margin-left:10px;">Refresh now</button>
+      </span>
+    </div>
+  </div>
+
 </main>
 
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.20</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.22</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.22 &mdash; 19 May 2026 (ShipStation client swapped to v1 &mdash; basic auth + API Key/Secret pair)</h4>
+    <ul>
+      <li><strong>Fix: ShipStation auth scheme corrected.</strong> v2.2.21 built the ShipStation client against API v2 (single API key, <code>API-Key</code> header, <code>api.shipstation.com</code>). Melanie confirmed on launch-eve that No Pong's ShipStation account uses v1 instead — HTTP Basic auth with both an API Key and an API Secret, against <code>ssapi.shipstation.com</code>. Without the fix, every ShipStation call would have 401'd on Thursday.</li>
+      <li><strong>What changed in <code>src/shipstation.js</code>.</strong> Base URL <code>api.shipstation.com/v2</code> &rarr; <code>ssapi.shipstation.com</code>. <code>API-Key</code> header &rarr; <code>Authorization: Basic base64(key:secret)</code>. Field names v2 snake_case &rarr; v1 camelCase (<code>shipTo.country</code> instead of <code>ship_to.country_code</code>, <code>orderNumber</code> instead of <code>order_number</code>, <code>shipmentItems</code> instead of <code>items</code>). Shipments endpoint now uses <code>shipDateStart</code>/<code>shipDateEnd</code> (YYYY-MM-DD local) with <code>voided=false</code> and <code>includeShipmentItems=true</code>. 401s get a clear "re-run set-shipstation-key.command" message instead of leaking the v1 error body. Public aggregator interface unchanged &mdash; the birthday-launch route and the frontend didn't need to change.</li>
+      <li><strong>New secret: <code>SHIPSTATION_API_SECRET</code>.</strong> v2.2.21 only needed <code>SHIPSTATION_API_KEY</code>. v1 needs both. Updated <code>commands/set-shipstation-key.command</code> prompts for both (hidden input each time) and pipes each into a separate <code>wrangler secret put</code> so neither value lives in shell history.</li>
+    </ul>
+    <h4>v2.2.21 &mdash; 19 May 2026 (New <strong>11th Birthday</strong> launch tab &mdash; live Woo + ShipStation v2 for Thursday 21 May)</h4>
+    <ul>
+      <li><strong>New tab: 11th Birthday.</strong> Bright-pink button at the end of the AU tab bar, live for Thursday 21 May 2026's hourly-drop launch. Live data, real-time, doesn't touch D1 (cron lag would hurt). Tab activates only when clicked &mdash; the page does not poll the launch endpoint on every dashboard load.</li>
+      <li><strong>Hero strip.</strong> A countdown to the next hourly drop (7:00, 8:00, ... 17:00 AEST), the next-drop wall-clock time, and the current count of orders awaiting shipment in ShipStation. Countdown ticks every second; outside the 7am&ndash;5pm window the countdown points to tomorrow's 7am.</li>
+      <li><strong>WooCommerce zone (live REST).</strong> Four cards: All orders today / Orders containing launch products (soap or tin) / Soap units sold all-time (stock tracker &mdash; soap soft-launches Wednesday night) / 11th Birthday Tin units sold today. Below them: a per-hour bar chart of <em>all</em> orders today with the 7am&ndash;5pm AEST window highlighted in No Pong pink (rest of the day in grey). Launch SKUs: <code>AU-BD-NPS-100</code> (soap), <code>AU-BD-NBF-35</code> (tin). Belt-and-braces matching by SKU OR by line-item name containing "Birthday" so a mis-tagged line still gets counted.</li>
+      <li><strong>ShipStation zone (live v2 API).</strong> Three cards: Orders awaiting shipment / Orders shipped today / Items shipped today. Below them a flagship alert card &mdash; <strong>Express / International &mdash; still open</strong> &mdash; with the inline list of order numbers, country, and service code so the fulfilment team knows what to grab first. Cards dim gracefully if the ShipStation key isn't yet configured.</li>
+      <li><strong>Smart auto-refresh.</strong> 2-minute refresh for the first 10 minutes after each top-of-hour drop, then 5 minutes until the next drop. Stateless &mdash; derived from Sydney-local minutes-past-hour on the wall clock so a missed tick can't break the schedule. Tab is visibility-aware: refresh pauses when you click away to another tab, resumes when you come back. Manual <em>Refresh now</em> button always available.</li>
+      <li><strong>New backend module <code>src/birthday.js</code> + <code>src/shipstation.js</code>.</strong> Combined endpoint <code>GET /api/au/birthday-launch</code> returns Woo + ShipStation in one shot. KV-cached at <code>au:birthday-launch:v1</code> with a 60-second TTL (short enough for freshness, long enough to absorb a thundering herd). Soap lifetime sold pulls from Woo's <code>/products?sku=...</code> <code>total_sales</code> field &mdash; no D1 dependency.</li>
+      <li><strong>Secrets.</strong> Reuses existing <code>WOO_AU_URL</code> / <code>WOO_AU_KEY</code> / <code>WOO_AU_SECRET</code>. One new secret needed: <code>SHIPSTATION_API_KEY</code> (single API key, ShipStation v2). Without it the ShipStation zone shows "not connected" but the Woo zone still works.</li>
+      <li><strong>Verify after deploy.</strong> Click the pink <em>11th Birthday</em> tab; the countdown should be ticking down to the next top-of-hour, and the Woo cards should populate within a couple of seconds (likely zeros until soap goes live Wednesday night). <code>https://logistics.apps.nopong.com/api/au/birthday-launch?refresh=1</code> exercises the endpoint directly &mdash; useful for confirming both upstreams are healthy from the Worker side.</li>
+    </ul>
     <h4>v2.2.20 &mdash; 17 May 2026 (Phase 3b-a &mdash; Amazon AU live from D1; all 5 channels real)</h4>
     <ul>
       <li><strong>Phase 3 complete on the read side.</strong> Amazon AU now sources from D1 alongside the other 4 channels. The dashboard is no longer dependent on static <code>au-data.js</code> for any channel — every number you see is from a live source (CIN7, Woo D1, Amazon D1). The static fallback path remains in the code for the cold-load case before <code>/api/au/sales</code> completes, but in steady state nothing reads from it.</li>
@@ -6229,6 +6430,228 @@ function switchAuTab(t) {
   // Re-render the chart on tab activation in case it was hidden when first drawn
   // (Chart.js sometimes mis-sizes when its parent had display:none at draw time).
   if (t === 'au-sales' && typeof renderAuChart === 'function' && AU_HAS_REAL) renderAuChart();
+  // 11th Birthday tab — kick off load + schedule refresh when activated.
+  if (t === 'au-birthday' && typeof bdayOnTabActivate === 'function') bdayOnTabActivate();
+  // Pause the birthday refresh when leaving the tab — saves API calls.
+  if (t !== 'au-birthday' && typeof bdayOnTabDeactivate === 'function') bdayOnTabDeactivate();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   11th Birthday launch tab (v2.2.21) — countdown + live Woo/ShipStation.
+   Auto-refresh cadence: 2 min for the first 10 min after each drop hour,
+   then 5 min until the next drop. Tab-visibility-aware (pauses when hidden).
+   ════════════════════════════════════════════════════════════════════════ */
+let _bdayLastPayload = null;
+let _bdayRefreshTimer = null;
+let _bdayCountdownTimer = null;
+let _bdayChart = null;
+
+function bdayOnTabActivate() {
+  bdayLoad(); // fire immediately
+  _scheduleBdayRefresh();
+  if (_bdayCountdownTimer) clearInterval(_bdayCountdownTimer);
+  _bdayCountdownTimer = setInterval(_bdayUpdateCountdown, 1000);
+}
+
+function bdayOnTabDeactivate() {
+  if (_bdayRefreshTimer)  { clearTimeout(_bdayRefreshTimer); _bdayRefreshTimer = null; }
+  if (_bdayCountdownTimer){ clearInterval(_bdayCountdownTimer); _bdayCountdownTimer = null; }
+}
+
+/**
+ * Compute next-refresh interval in ms based on current Sydney-local
+ * minutes-past-hour:
+ *   minutes 0–9   → 2 min cadence (capture the post-drop surge)
+ *   minutes 10–59 → 5 min cadence (steady state)
+ * This is intentionally stateless — derive from the wall clock so a missed
+ * tick doesn't break the schedule.
+ */
+function _bdayNextRefreshMs() {
+  const sydneyMin = _bdaySydneyMinutePastHour();
+  return (sydneyMin < 10) ? (2 * 60 * 1000) : (5 * 60 * 1000);
+}
+
+function _bdaySydneyMinutePastHour() {
+  // Use the last payload's tz offset if we've got one (most accurate); else
+  // probe with Intl, falling back to a fixed +10:00.
+  let offMin = 600;
+  if (_bdayLastPayload?.sydney_now?.tz_offset_minutes != null) {
+    offMin = _bdayLastPayload.sydney_now.tz_offset_minutes;
+  } else {
+    try {
+      const fmt = new Intl.DateTimeFormat('en-US', { timeZone:'Australia/Sydney', timeZoneName:'shortOffset' });
+      const tz = fmt.formatToParts(new Date()).find(p => p.type==='timeZoneName')?.value;
+      const m = tz?.match(/GMT([+-])(\d+)(?::(\d+))?/);
+      if (m) offMin = (m[1]==='+'?1:-1) * (parseInt(m[2],10)*60 + parseInt(m[3]||'0',10));
+    } catch(_){}
+  }
+  const shifted = new Date(Date.now() + offMin*60*1000);
+  return shifted.getUTCMinutes();
+}
+
+function _scheduleBdayRefresh() {
+  if (_bdayRefreshTimer) clearTimeout(_bdayRefreshTimer);
+  const ms = _bdayNextRefreshMs();
+  const lbl = document.getElementById('bday-refresh-cadence');
+  if (lbl) lbl.textContent = (ms === 120000) ? '2 min' : '5 min';
+  _bdayRefreshTimer = setTimeout(() => {
+    bdayLoad().finally(_scheduleBdayRefresh);
+  }, ms);
+}
+
+function bdayRefreshNow() {
+  const btn = document.getElementById('bday-refresh-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  bdayLoad({ force: true }).finally(() => {
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh now'; }
+    _scheduleBdayRefresh();
+  });
+}
+
+async function bdayLoad({ force = false } = {}) {
+  try {
+    const url = '/api/au/birthday-launch' + (force ? '?refresh=1' : '');
+    const resp = await fetch(url, { credentials: 'include' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error + (data.detail ? `: ${data.detail}` : ''));
+    _bdayLastPayload = data;
+    _bdayRender(data);
+    _hideBdayError();
+  } catch (e) {
+    _showBdayError(e.message || String(e));
+  }
+}
+
+function _showBdayError(msg) {
+  const box = document.getElementById('bday-error-box');
+  if (box) box.innerHTML = `<div class="bday-error">⚠️ Couldn't fetch launch data: ${_bdayEscape(msg)}</div>`;
+}
+function _hideBdayError() {
+  const box = document.getElementById('bday-error-box');
+  if (box) box.innerHTML = '';
+}
+
+function _bdayEscape(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function _bdayFmt(n) {
+  if (n === null || n === undefined) return '--';
+  return Number(n).toLocaleString();
+}
+
+function _bdayRender(data) {
+  // Hero — next drop time (strip the date prefix for the hero, keep just time)
+  const dropLocal = data.drop?.next_drop_local || '';
+  document.getElementById('bday-next-drop-time').textContent =
+    dropLocal ? dropLocal.replace(/^\d{4}-\d{2}-\d{2} /, '') : '--';
+  document.getElementById('bday-open-orders-big').textContent =
+    data.shipstation?.connected ? _bdayFmt(data.shipstation.openOrders) : '—';
+  const openSub = document.getElementById('bday-open-orders-sub');
+  if (openSub) openSub.textContent = data.shipstation?.connected ? 'awaiting shipment' : 'ShipStation not connected';
+
+  // Woo cards
+  document.getElementById('bday-woo-total-orders').textContent  = _bdayFmt(data.woo?.total_orders_today);
+  document.getElementById('bday-woo-launch-orders').textContent = _bdayFmt(data.woo?.orders_with_launch_products);
+  document.getElementById('bday-soap-lifetime').textContent     = _bdayFmt(data.woo?.soap_units_lifetime);
+  document.getElementById('bday-tin-today').textContent         = _bdayFmt(data.woo?.tin_units_today);
+  if (data.woo?.soap_units_today != null) {
+    document.getElementById('bday-soap-sub').textContent =
+      `${data.woo.soap_sku} · all-time sold · ${_bdayFmt(data.woo.soap_units_today)} today`;
+  }
+
+  // ShipStation cards — dim if disconnected, but still render the structure.
+  const ssCards = document.getElementById('bday-ss-cards');
+  const ssConnected = !!data.shipstation?.connected;
+  if (ssCards) ssCards.classList.toggle('bday-disconnected', !ssConnected);
+  document.getElementById('bday-ss-open').textContent           = ssConnected ? _bdayFmt(data.shipstation.openOrders) : '—';
+  document.getElementById('bday-ss-shipped-orders').textContent = ssConnected ? _bdayFmt(data.shipstation.shippedTodayOrders) : '—';
+  document.getElementById('bday-ss-shipped-items').textContent  = ssConnected ? _bdayFmt(data.shipstation.shippedTodayItems)  : '—';
+
+  // Express/intl alert
+  const alertCount = document.getElementById('bday-alert-count');
+  const alertList  = document.getElementById('bday-alert-list');
+  const alertBox   = document.getElementById('bday-alert-box');
+  if (!ssConnected) {
+    alertCount.textContent = '—';
+    alertList.innerHTML = `<div style="font-size:12px;color:var(--text-secondary);font-style:italic;">
+      ShipStation not connected${data.shipstation?.error ? ': ' + _bdayEscape(data.shipstation.error) : ''}
+    </div>`;
+    alertBox.classList.add('bday-disconnected');
+  } else {
+    alertBox.classList.remove('bday-disconnected');
+    const summaries = data.shipstation.expressIntlOpenOrders || [];
+    alertCount.textContent = _bdayFmt(data.shipstation.expressIntlOpen);
+    if (summaries.length === 0) {
+      alertList.innerHTML = `<div style="font-size:12px;color:var(--text-secondary);">No express or international open orders 🎉</div>`;
+    } else {
+      alertList.innerHTML = summaries.slice(0, 20).map(s => {
+        const pills = (s.flags || []).map(f => `<span class="bday-pill ${f.toLowerCase()}">${f}</span>`).join('');
+        const country = s.ship_to_country ? ` · ${_bdayEscape(s.ship_to_country)}` : '';
+        const service = s.service ? ` · ${_bdayEscape(s.service)}` : '';
+        return `<div class="bday-alert-row">${pills}<strong>#${_bdayEscape(s.order_number || '?')}</strong>${country}${service}</div>`;
+      }).join('') + (summaries.length > 20 ? `<div class="bday-alert-row" style="opacity:0.7;">+${summaries.length - 20} more…</div>` : '');
+    }
+  }
+
+  // Orders-per-hour chart
+  _bdayRenderHourlyChart(data.woo?.orders_per_hour || []);
+
+  // Meta bar
+  const updated = data.generated_at_iso ? new Date(data.generated_at_iso) : new Date();
+  document.getElementById('bday-last-updated').textContent =
+    `Last updated: ${updated.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' })}` +
+    (data.cached ? ' (cached)' : '');
+
+  // Kick the countdown once immediately so it reflects the new data.
+  _bdayUpdateCountdown();
+}
+
+function _bdayUpdateCountdown() {
+  const el = document.getElementById('bday-countdown');
+  if (!el) return;
+  if (!_bdayLastPayload?.drop?.next_drop_at_iso) { el.textContent = '--:--'; return; }
+  const next = new Date(_bdayLastPayload.drop.next_drop_at_iso).getTime();
+  const diff = Math.max(0, next - Date.now());
+  if (diff === 0) { el.textContent = '00:00'; return; }
+  const hh = Math.floor(diff / 3600000);
+  const mm = Math.floor((diff % 3600000) / 60000);
+  const ss = Math.floor((diff % 60000) / 1000);
+  const pad = n => String(n).padStart(2, '0');
+  el.textContent = hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${pad(mm)}:${pad(ss)}`;
+}
+
+function _bdayRenderHourlyChart(hourlyBuckets) {
+  const canvas = document.getElementById('bdayHourlyChart');
+  if (!canvas || typeof Chart === 'undefined') return;
+  const labels = hourlyBuckets.map(b => `${b.hour}:00`);
+  const data   = hourlyBuckets.map(b => b.count);
+  // Highlight the 7am–5pm drop window with the No Pong pink, hours outside
+  // that window dim grey.
+  const colours = hourlyBuckets.map(b => (b.hour >= 7 && b.hour <= 17) ? '#FF578A' : '#D0D0D0');
+  if (_bdayChart) {
+    _bdayChart.data.labels = labels;
+    _bdayChart.data.datasets[0].data = data;
+    _bdayChart.data.datasets[0].backgroundColor = colours;
+    _bdayChart.update();
+    return;
+  }
+  _bdayChart = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Orders', data, backgroundColor: colours, borderWidth: 0, borderRadius: 4 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { title: ctx => `${ctx[0].label} AEST`, label: ctx => `${ctx.parsed.y} orders` } },
+      },
+      scales: {
+        y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: '#F0F0F0' } },
+        x: { grid: { display: false }, ticks: { autoSkip: false, maxRotation: 0, font: { size: 10 } } },
+      },
+    },
+  });
 }
 
 // Tracks which months have had their CIN7 channels (col/woo2/dist + refunds)

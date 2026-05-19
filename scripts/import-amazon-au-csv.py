@@ -74,8 +74,42 @@ from datetime import datetime
 DEFAULT_TSV = os.path.expanduser(
     "~/Library/CloudStorage/GoogleDrive-admin@nopong.net/"
     "Shared drives/AI WORKSPACE/2. Shared Projects/Logistics Dashboard/"
-    "AU Dashboard/Amazon Export/amazon-fulfilled-shipments-au.txt"
+    "AU Dashboard/Amazon Export"
 )
+# Amazon Seller Central caps each report at a window smaller than our
+# Nov 2025 → today range, so the historical backfill is downloaded as
+# multiple files into a single folder. If DEFAULT_TSV (or the path passed
+# as $1) is a directory, every .csv / .txt file inside it is parsed and
+# rows are de-duplicated by Shipment Item ID before SQL is written.
+
+# Column-name mapping. Amazon AU's Seller Central "Amazon Fulfilled Shipments"
+# report uses Title Case with spaces ("Amazon Order Id", "Merchant SKU", "Title",
+# "Dispatched Quantity", "Item Price"). NA / older reports use lowercase-hyphen
+# ("amazon-order-id", "sku", etc.). The importer reads via this lookup so it
+# works against either naming convention without code changes.
+COLS = {
+    # primary keys + dates
+    "order_id":      ["Amazon Order Id", "amazon-order-id"],
+    "item_id":       ["Shipment Item ID", "shipment-item-id"],
+    "purchase_date": ["Purchase Date", "purchase-date"],
+    # SKU + product
+    "sku":           ["Merchant SKU", "sku"],
+    "product_name":  ["Title", "product-name"],
+    "quantity":      ["Dispatched Quantity", "quantity-shipped"],
+    # money
+    "currency":      ["Currency", "currency"],
+    "item_price":    ["Item Price", "item-price"],
+    "shipping":      ["Delivery Price", "shipping-price"],
+    # defensive filters
+    "country":       ["Delivery Country Code", "ship-country"],
+}
+
+def col(row, key):
+    """Read the first present column from row, by canonical key."""
+    for cand in COLS[key]:
+        if cand in row:
+            return row[cand]
+    return None
 TMP_SQL = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp-amazon-au-import.sql")
 D1_DATABASE = "logistics-db"
 MARKET = "AU"
@@ -90,10 +124,14 @@ AMAZON_AU_MARKETPLACE_ID = "A39IBJ37TRP1C6"
 CSV_REPORT_TYPE  = "CSV_BACKFILL_AMAZON_FULFILLED_SHIPMENTS"
 CSV_RANGE_LABEL  = "au-csv-backfill"
 
-# Batch sizes for multi-row INSERT VALUES. Sized so each statement stays well
-# under execve() ARG_MAX when the chunked applier passes it as --command=.
+# Batch sizes for multi-row INSERT VALUES. D1's /query endpoint caps individual
+# SQL statements at ~100KB (SQLITE_TOOBIG above that). Amazon rows are wider
+# than Woo's — long product titles + URLs in the name field — so each item row
+# is ~230 bytes vs Woo's ~200. Tuned conservatively:
+#   ~140 bytes/order × 400 = ~56 KB per orders statement  (verified OK)
+#   ~230 bytes/item  × 250 = ~58 KB per items statement   (under cap)
 ORDERS_PER_INSERT = 400
-ITEMS_PER_INSERT  = 500
+ITEMS_PER_INSERT  = 250
 
 # ─── SKU mapping ──────────────────────────────────────────────────────────
 #
@@ -192,81 +230,102 @@ def sql_num(n, default=0):
 
 # ─── Main ─────────────────────────────────────────────────────────────────
 
-def main():
-    args = sys.argv[1:]
-    dry_run = "--dry-run" in args
-    args = [a for a in args if a != "--dry-run"]
-    tsv_path = args[0] if args else DEFAULT_TSV
+def gather_input_files(path):
+    """If path is a directory, return all .csv / .txt files in it (sorted).
+    If path is a single file, return [path]. Raise on missing."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+    if os.path.isfile(path):
+        return [path]
+    files = []
+    for fname in sorted(os.listdir(path)):
+        if fname.startswith("."):
+            continue
+        full = os.path.join(path, fname)
+        if not os.path.isfile(full):
+            continue
+        lower = fname.lower()
+        if lower.endswith(".csv") or lower.endswith(".txt") or lower.endswith(".tsv"):
+            files.append(full)
+    return files
 
-    if not os.path.exists(tsv_path):
-        print(f"ERROR: TSV not found at {tsv_path}", file=sys.stderr)
-        print(f"Usage: python3 {sys.argv[0]} [PATH_TO_TSV] [--dry-run]", file=sys.stderr)
-        sys.exit(1)
 
-    print(f"Reading {tsv_path}…")
+def detect_delimiter(first_line):
+    """Sniff tab vs comma from a header line. Tab if tabs ≥ commas, else comma."""
+    n_tabs   = first_line.count("\t")
+    n_commas = first_line.count(",")
+    return "\t" if n_tabs >= n_commas else ","
 
-    # Aggregate by amazon-order-id for amazon_orders + collect line items for
-    # amazon_items. Defensive filters: only AU ship-country, only AUD currency.
-    # Unmapped SKUs get a NULL dashboard_sku (still ingested for revenue).
 
-    orders = {}            # order_id → { status, purchase_date, local_date, total, currency }
-    items  = []            # list of dicts: { order_id, seller_sku, dashboard_sku, name, quantity, total, date_created, local_date }
-    unmapped_skus = defaultdict(int)
-    filtered_rows = {"non_au_ship_country": 0, "non_aud_currency": 0, "no_order_id": 0}
-    total_rows_seen = 0
-
-    with open(tsv_path, "r", encoding="utf-8-sig", newline="") as f:
-        # Amazon Fulfilled Shipments is tab-delimited.
-        reader = csv.DictReader(f, delimiter="\t")
+def parse_one_file(file_path, orders, items, seen_item_ids, unmapped_skus,
+                   filtered_rows, missing_cols_by_file):
+    """Parse one CSV/TSV and merge results into the caller-supplied accumulators.
+    Returns the number of rows seen (incl. skipped). Dedupes by Shipment Item ID."""
+    n_seen = 0
+    with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
+        first_line = f.readline()
+        f.seek(0)
+        if not first_line.strip():
+            return 0
+        delimiter = detect_delimiter(first_line)
+        reader = csv.DictReader(f, delimiter=delimiter)
         if not reader.fieldnames:
-            print("ERROR: TSV has no header row", file=sys.stderr)
-            sys.exit(1)
-        # Verify the columns we expect are present; if not, list what we got
-        # so we can adjust.
-        required = ["amazon-order-id", "purchase-date", "sku", "quantity-shipped",
-                    "item-price", "currency"]
-        missing = [c for c in required if c not in reader.fieldnames]
+            return 0
+
+        # Check required columns are present under at least one of their
+        # alternate names. Report missing keys per file.
+        missing = []
+        for key in ("order_id", "purchase_date", "sku", "quantity", "item_price", "currency"):
+            if not any(c in reader.fieldnames for c in COLS[key]):
+                missing.append(f"{key} (one of {COLS[key]})")
         if missing:
-            print(f"ERROR: TSV missing required columns: {missing}", file=sys.stderr)
-            print(f"Got columns: {list(reader.fieldnames)}", file=sys.stderr)
-            sys.exit(1)
+            missing_cols_by_file[os.path.basename(file_path)] = missing
+            return 0
 
         for row in reader:
-            total_rows_seen += 1
-            order_id = (row.get("amazon-order-id") or "").strip()
+            n_seen += 1
+
+            order_id = (col(row, "order_id") or "").strip()
             if not order_id:
                 filtered_rows["no_order_id"] += 1
                 continue
 
-            # Defensive: ship-country must be AU. If column absent, skip the
-            # check (some report variants don't include it; trust the report
-            # was scoped to AU).
-            ship_country = (row.get("ship-country") or "").strip().upper()
+            ship_country = (col(row, "country") or "").strip().upper()
             if ship_country and ship_country != "AU":
                 filtered_rows["non_au_ship_country"] += 1
                 continue
 
-            currency = (row.get("currency") or DEFAULT_CURRENCY).strip().upper()
+            currency = (col(row, "currency") or DEFAULT_CURRENCY).strip().upper()
             if currency and currency != "AUD":
                 filtered_rows["non_aud_currency"] += 1
                 continue
 
-            purchase_date_raw = (row.get("purchase-date") or "").strip()
-            purchase_date_iso, local_date = parse_purchase_date(purchase_date_raw)
+            # Dedupe by Shipment Item ID — Amazon's natural unique key for a
+            # single shipment-item row. If we don't have it, fall back to
+            # (order_id, sku) which still catches most duplicates from
+            # overlapping CSV date ranges.
+            raw_item_id = (col(row, "item_id") or "").strip()
+            seller_sku  = (col(row, "sku") or "").strip()
+            dedupe_key  = raw_item_id or f"{order_id}|{seller_sku}"
+            if dedupe_key in seen_item_ids:
+                filtered_rows["duplicate_item_id"] += 1
+                continue
+            seen_item_ids.add(dedupe_key)
 
-            seller_sku = (row.get("sku") or "").strip()
-            product_name = (row.get("product-name") or "").strip()
+            purchase_date_raw = (col(row, "purchase_date") or "").strip()
+            purchase_date_iso, local_date = parse_purchase_date(purchase_date_raw)
+            product_name = (col(row, "product_name") or "").strip()
 
             try:
-                qty = int(float(row.get("quantity-shipped") or 0))
+                qty = int(float(col(row, "quantity") or 0))
             except (ValueError, TypeError):
                 qty = 0
             try:
-                item_price = float(row.get("item-price") or 0)
+                item_price = float(col(row, "item_price") or 0)
             except (ValueError, TypeError):
                 item_price = 0.0
             try:
-                shipping_price = float(row.get("shipping-price") or 0)
+                shipping_price = float(col(row, "shipping") or 0)
             except (ValueError, TypeError):
                 shipping_price = 0.0
 
@@ -274,19 +333,14 @@ def main():
             if not matched and seller_sku:
                 unmapped_skus[seller_sku] += 1
 
-            # Order header. First row per order wins for header fields.
             if order_id not in orders:
                 orders[order_id] = {
-                    "status":        "Shipped",  # Fulfilled Shipments only contains shipped orders
+                    "status":        "Shipped",
                     "purchase_date": purchase_date_iso,
                     "local_date":    local_date,
                     "total":         0.0,
                     "currency":      currency or DEFAULT_CURRENCY,
                 }
-            # Total accumulates: item-price + shipping-price (tax is separate;
-            # mirrors NA Woo's "Total INCLUDES tax + shipping" semantic by
-            # including shipping but omitting tax — Amazon prices in AU are
-            # GST-inclusive at the item-price line, so tax double-count risk).
             orders[order_id]["total"] += item_price + shipping_price
 
             items.append({
@@ -299,6 +353,60 @@ def main():
                 "date_created":  purchase_date_iso,
                 "local_date":    local_date,
             })
+    return n_seen
+
+
+def main():
+    args = sys.argv[1:]
+    dry_run = "--dry-run" in args
+    args = [a for a in args if a != "--dry-run"]
+    input_path = args[0] if args else DEFAULT_TSV
+
+    try:
+        files = gather_input_files(input_path)
+    except FileNotFoundError:
+        print(f"ERROR: path not found: {input_path}", file=sys.stderr)
+        print(f"Usage: python3 {sys.argv[0]} [PATH_TO_TSV_OR_FOLDER] [--dry-run]", file=sys.stderr)
+        sys.exit(1)
+
+    if not files:
+        print(f"ERROR: no .csv / .txt / .tsv files found in {input_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if len(files) == 1:
+        print(f"Reading 1 file: {files[0]}")
+    else:
+        print(f"Reading {len(files)} files from {input_path}:")
+        for f in files:
+            sz = os.path.getsize(f)
+            print(f"  • {os.path.basename(f)} ({sz:,} bytes)")
+
+    # Shared accumulators across all input files.
+    orders = {}
+    items = []
+    seen_item_ids = set()
+    unmapped_skus = defaultdict(int)
+    filtered_rows = {
+        "non_au_ship_country": 0,
+        "non_aud_currency":    0,
+        "no_order_id":         0,
+        "duplicate_item_id":   0,
+    }
+    missing_cols_by_file = {}
+    total_rows_seen = 0
+
+    for file_path in files:
+        rows_seen = parse_one_file(
+            file_path, orders, items, seen_item_ids, unmapped_skus,
+            filtered_rows, missing_cols_by_file,
+        )
+        total_rows_seen += rows_seen
+
+    if missing_cols_by_file:
+        print(f"\nERROR: required columns missing in:", file=sys.stderr)
+        for fname, miss in missing_cols_by_file.items():
+            print(f"  {fname}: {miss}", file=sys.stderr)
+        sys.exit(1)
 
     # ─── Diagnostic summary ──────────────────────────────────────────────
 
@@ -338,7 +446,9 @@ def main():
     print(f"\nWriting SQL to {TMP_SQL}…")
     with open(TMP_SQL, "w", encoding="utf-8") as out:
         out.write("-- Amazon AU CSV import — generated by scripts/import-amazon-au-csv.py\n")
-        out.write(f"-- Source: {tsv_path}\n")
+        out.write(f"-- Source: {input_path}\n")
+        if len(files) > 1:
+            out.write(f"-- ({len(files)} input files merged + deduped by Shipment Item ID)\n")
         out.write(f"-- Generated: {datetime.utcnow().isoformat()}Z\n")
         out.write(f"-- {n_orders:,} orders / {n_items:,} line items / ${total_rev:,.2f} revenue\n\n")
 

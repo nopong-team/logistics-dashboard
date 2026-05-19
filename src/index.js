@@ -19,6 +19,7 @@ import { diagnosticsRoutes } from './diagnostics.js';
 import { xeroRoutes, xeroAuthRoutes, readXeroStatus } from './xero.js';
 import { logiwaRoutes, readLogiwaStatus } from './logiwa.js';
 import { auRoutes } from './cin7.js';
+import { birthdayRoutes } from './birthday.js';
 import { runCin7SalesOrdersChunk, runCin7CreditNotesChunk } from './cin7-sync.js';
 import buyingToolHistory from './buying-tool-history.js';
 import { redactSecrets } from './redact.js';
@@ -103,6 +104,11 @@ app.route('/api/logiwa', logiwaRoutes);
 // and will move here in subsequent PRs. See src/cin7.js header for the full
 // design — KV cache, fallback semantics, secret names.
 app.route('/api/au', auRoutes);
+
+// 11th Birthday launch tab (v2.2.21, Thursday 2026-05-21). Live Woo + live
+// ShipStation v2 — bypasses D1 because the cron's watermark lag would hurt
+// the launch-day signal. See src/birthday.js header for the full design.
+app.route('/api/au', birthdayRoutes);
 
 // Buying-tool history — 18+ months of per-SKU monthly sales plus manually
 // curated allocation buffers from the buying-tool spreadsheet. Powers the
