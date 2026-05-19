@@ -467,7 +467,18 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
     const cls = classifyDistributor(o);
     if (!cls) continue;
 
-    const deliveryDate = parseDeliveryDate(o?.deliveryDate);
+    // Delivery-date source:
+    //   • Coles + Woolies (EDI orders): CIN7 maps the EDI's "start date"
+    //     (which IS the requested delivery date / ETD) into the order's
+    //     `createdDate` field. So for these orders, createdDate == ETD.
+    //     Confirmed by Melanie 2026-05-19 in the v2.2.27c debug iteration.
+    //   • Other distributors: no separate delivery-date field is tracked
+    //     today; these are sorted by reference (older = more urgent),
+    //     so must_ship_by stays null and the row just shows the order
+    //     number + customer + line items.
+    const deliveryDate = (cls.group === 'colesWoolies')
+      ? parseDeliveryDate(o?.createdDate)
+      : parseDeliveryDate(o?.deliveryDate);
     const mustShipBy = (cls.shipDayBefore && deliveryDate)
       ? previousBusinessDay(deliveryDate)
       : deliveryDate;
@@ -534,58 +545,10 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
 
 // ─── Endpoint ──────────────────────────────────────────────────────────────
 
-/**
- * Debug branch: when ?debug=1 is passed, returns date-looking field
- * names + values from one recent Coles+Woolies order's raw_json. Used to
- * find which CIN7 field actually holds the manually-entered delivery
- * date (vs `deliveryDate`, which comes back null on every order). Bails
- * before the rest of the pipeline runs so the response stays small.
- *
- * The regex matches any key containing date/time/ship/deliv/due — covers
- * deliveryDate, requiredDate, dueDate, customerOrderDate, despatchDate,
- * shipBy, and so on.
- */
-async function debugDateFields(env) {
-  if (!env.DB) return { error: 'D1 binding not available.' };
-  const row = await env.DB.prepare(
-    `SELECT id, reference, company, created_date, raw_json
-       FROM cin7_sales_orders
-      WHERE market = 'AU'
-        AND status = 'APPROVED'
-        AND channel_attr IN ('col', 'woo2')
-        AND json_extract(raw_json, '$.dispatchedDate') IS NULL
-      ORDER BY created_date DESC
-      LIMIT 1`,
-  ).first();
-  if (!row) return { error: 'No recent Coles/Woolies order found in D1.' };
-
-  let parsed = null;
-  try { parsed = JSON.parse(row.raw_json); }
-  catch (e) { return { error: `raw_json parse failed: ${e.message}` }; }
-
-  const interesting = {};
-  const re = /date|time|ship|deliv|due|required|order_no/i;
-  for (const [k, v] of Object.entries(parsed || {})) {
-    if (re.test(k)) interesting[k] = v;
-  }
-  // Also surface ALL top-level keys (without values) so a non-obvious field
-  // name still gets noticed.
-  return {
-    sample_order: { id: row.id, reference: row.reference, company: row.company, created_date: row.created_date },
-    all_top_level_keys: Object.keys(parsed || {}),
-    date_like_fields: interesting,
-  };
-}
-
 logisticsRoutes.get('/logistics', async (c) => {
   const env = c.env;
   const forceRefresh = c.req.query('refresh') === '1' || c.req.query('refresh') === 'true';
-  const debugMode = c.req.query('debug') === '1';
   const cache = env.CACHE;
-
-  if (debugMode) {
-    return c.json(await debugDateFields(env));
-  }
 
   if (!forceRefresh && cache) {
     const cached = await cache.get(KV_KEY, 'json');
