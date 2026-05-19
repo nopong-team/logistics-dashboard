@@ -201,7 +201,8 @@ const SALES_FIELDS = [
   'id', 'reference', 'createdDate', 'modifiedDate', 'dispatchedDate',
   'channel', 'posRegister', 'branchName',
   'memberId', 'memberEmail', 'firstName', 'lastName', 'company',
-  'status', 'invoiceStatus',
+  'status', 'stage', 'invoiceStatus',
+  'estimatedDeliveryDate',
   'total', 'subTotal', 'productTotal',
   'lineItems',
 ].join(',');
@@ -291,6 +292,12 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
       const memberId  = Number(o?.memberId ?? 0) || null;
       const memberEmail = String(o?.memberEmail || '').slice(0, 200) || null;
       const status   = String(o?.status || '').slice(0, 40) || 'UNKNOWN';
+      // Workflow + delivery fields promoted to first-class columns in
+      // migration 0007 (2026-05-19). raw_json reads via json_extract were
+      // unreliable — many rows have raw_json=NULL from backfill-era inserts.
+      const stage          = String(o?.stage || '').slice(0, 40) || null;
+      const dispatchedDate = String(o?.dispatchedDate || '').trim() || null;
+      const deliveryDate   = String(o?.estimatedDeliveryDate || '').trim() || null;
       const total        = Number(o?.total        ?? 0) || 0;
       const subTotal     = Number(o?.subTotal     ?? 0) || 0;
       const productTotal = Number(o?.productTotal ?? 0) || 0;
@@ -300,18 +307,19 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
       stmts.push(
         env.DB.prepare(
           `INSERT OR REPLACE INTO cin7_sales_orders
-             (id, reference, market, status, channel_attr, company,
+             (id, reference, market, status, stage, channel_attr, company,
               first_name, last_name, member_id, member_email,
               total, sub_total, product_total,
-              created_date, modified_date, raw_json,
-              synced_at)
-           VALUES (?, ?, 'AU', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+              created_date, modified_date, dispatched_date, delivery_date,
+              raw_json, synced_at)
+           VALUES (?, ?, 'AU', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    strftime('%Y-%m-%dT%H:%M:%SZ','now'))`,
         ).bind(
-          o.id, reference, status, channelAttr, company,
+          o.id, reference, status, stage, channelAttr, company,
           firstName, lastName, memberId, memberEmail,
           total, subTotal, productTotal,
-          createdDate, modifiedDate, rawJson,
+          createdDate, modifiedDate, dispatchedDate, deliveryDate,
+          rawJson,
         ),
       );
 

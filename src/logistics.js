@@ -41,7 +41,6 @@ import {
   fetchStockBySku,
   attributeCin7Order,
   normalizeAuSku,
-  cin7Fetch,
 } from './cin7.js';
 import { buildShipStationSnapshot } from './shipstation.js';
 import { redactSecrets } from './redact.js';
@@ -367,31 +366,33 @@ async function fetchOpenSalesOrdersFromD1(env) {
   }
 
   // Pull the order rows. Filters in priority order:
-  //   • status = 'APPROVED' — DRAFT/VOID/etc. aren't real warehouse work.
-  //   • dispatchedDate IS NULL — order is still awaiting fulfilment.
-  //   • created_date >= today − 30 days — drops the stale "open forever"
-  //     orders that were despatched outside CIN7 (real warehouse ops are
-  //     always within a few weeks).
-  //   • channel_attr IS NOT NULL — drops Stock Adjustments / Amazon mirrors /
-  //     redacted retail that the cron already classified as non-sale.
-  //
-  // 30-day cutoff is computed as a date string and compared lexicographically
-  // against created_date (ISO 8601), which works because the date prefix
-  // sorts identically to chronological order.
+  //   • stage = 'Processing' — workflow position is "warehouse needs to
+  //     pick this". CIN7 stages include Quote / Approved / Processing /
+  //     Awaiting Dispatch / Dispatched / Closed. "Processing" is the
+  //     actionable bucket. status='APPROVED' alone isn't enough — that's
+  //     a high-level flag and stays APPROVED through Dispatched too.
+  //   • dispatched_date IS NULL — first-class column from migration 0007.
+  //     v2.2.27c–e relied on json_extract(raw_json, ...) which silently
+  //     failed because many rows have raw_json=NULL from backfill-era
+  //     inserts; first-class column eliminates that ambiguity.
+  //   • status NOT IN (VOID/VOIDED/CANCELLED) — drops voided orders.
+  //   • channel_attr IS NOT NULL — drops Stock Adjustments / Amazon
+  //     mirrors / redacted retail.
+  //   • created_date >= today − 30 days — keeps the window bounded.
   const cutoffDate = new Date();
   cutoffDate.setUTCDate(cutoffDate.getUTCDate() - OPEN_ORDER_WINDOW_DAYS);
   const pad = (n) => String(n).padStart(2, '0');
   const cutoff = `${cutoffDate.getUTCFullYear()}-${pad(cutoffDate.getUTCMonth() + 1)}-${pad(cutoffDate.getUTCDate())}`;
 
   const ordersStmt = env.DB.prepare(
-    `SELECT id, reference, status, channel_attr, company,
+    `SELECT id, reference, status, stage, channel_attr, company,
             first_name, last_name, created_date,
-            json_extract(raw_json, '$.deliveryDate')   AS delivery_date,
-            json_extract(raw_json, '$.dispatchedDate') AS dispatched_date
+            delivery_date, dispatched_date
        FROM cin7_sales_orders
       WHERE market = 'AU'
-        AND status = 'APPROVED'
-        AND json_extract(raw_json, '$.dispatchedDate') IS NULL
+        AND status NOT IN ('VOID', 'VOIDED', 'CANCELLED')
+        AND stage = 'Processing'
+        AND dispatched_date IS NULL
         AND channel_attr IS NOT NULL
         AND created_date >= ?
       ORDER BY created_date DESC`,
@@ -468,18 +469,16 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
     const cls = classifyDistributor(o);
     if (!cls) continue;
 
-    // Delivery-date source:
-    //   • Coles + Woolies (EDI orders): CIN7 maps the EDI's "start date"
-    //     (which IS the requested delivery date / ETD) into the order's
-    //     `createdDate` field. So for these orders, createdDate == ETD.
-    //     Confirmed by Melanie 2026-05-19 in the v2.2.27c debug iteration.
-    //   • Other distributors: no separate delivery-date field is tracked
-    //     today; these are sorted by reference (older = more urgent),
-    //     so must_ship_by stays null and the row just shows the order
-    //     number + customer + line items.
-    const deliveryDate = (cls.group === 'colesWoolies')
-      ? parseDeliveryDate(o?.createdDate)
-      : parseDeliveryDate(o?.deliveryDate);
+    // Delivery date comes from the new first-class `delivery_date` column
+    // (migration 0007), which is sourced from CIN7's `estimatedDeliveryDate`
+    // API field — the same value shown as "Delivery Date (ETD)" in the
+    // CIN7 Sales Order edit UI. The v2.2.27d theory that createdDate ==
+    // ETD was wrong (createdDate is when the EDI was received; the two
+    // can be days apart, e.g. order 76910 had createdDate 2026-05-03 vs
+    // estimatedDeliveryDate 2026-05-10). Fallback to createdDate if the
+    // new column is null (transition period for rows synced before
+    // migration 0007 — a backfill closes the gap).
+    const deliveryDate = parseDeliveryDate(o?.deliveryDate || o?.createdDate);
     const mustShipBy = (cls.shipDayBefore && deliveryDate)
       ? previousBusinessDay(deliveryDate)
       : deliveryDate;
@@ -549,53 +548,10 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
 
 // ─── Endpoint ──────────────────────────────────────────────────────────────
 
-/**
- * Live one-shot CIN7 fetch for a single SalesOrder by id. Used to inspect
- * the full field set CIN7 returns — including any `stage` / `currentStatus` /
- * `dispatchedDate` fields the cron's SALES_FIELDS whitelist isn't currently
- * capturing. Triggered via ?debug-live=<id> on /api/au/logistics.
- *
- * Costs 1 CIN7 API call — well within rate limits. Removed once we've
- * identified the right filter fields.
- */
-async function fetchOneOrderLive(env, orderId) {
-  if (!env.CIN7_USERNAME || !env.CIN7_CONNECTION_KEY) {
-    return { error: 'CIN7 credentials not configured.' };
-  }
-  try {
-    // No `fields` param = CIN7 returns ALL fields for the order.
-    const rows = await cin7Fetch(env, 'SalesOrders', { where: `Id=${Number(orderId)}` });
-    if (!Array.isArray(rows) || rows.length === 0) {
-      return { error: `No order found with id ${orderId}.` };
-    }
-    const o = rows[0];
-    return {
-      order_id: o.id,
-      reference: o.reference,
-      company: o.company,
-      all_keys: Object.keys(o),
-      // Surface status-ish + date-ish fields explicitly.
-      status_fields: Object.fromEntries(
-        Object.entries(o).filter(([k]) => /status|stage|state|phase/i.test(k)),
-      ),
-      date_fields: Object.fromEntries(
-        Object.entries(o).filter(([k]) => /date|time|eta|deliv|due|ship|despatch|dispatch/i.test(k)),
-      ),
-    };
-  } catch (e) {
-    return { error: redactSecrets(e?.message || String(e)) };
-  }
-}
-
 logisticsRoutes.get('/logistics', async (c) => {
   const env = c.env;
   const forceRefresh = c.req.query('refresh') === '1' || c.req.query('refresh') === 'true';
-  const debugLiveId = c.req.query('debug-live');
   const cache = env.CACHE;
-
-  if (debugLiveId) {
-    return c.json(await fetchOneOrderLive(env, debugLiveId));
-  }
 
   if (!forceRefresh && cache) {
     const cached = await cache.get(KV_KEY, 'json');

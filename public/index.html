@@ -2313,9 +2313,18 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.27e</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.27f</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.27f &mdash; 19 May 2026 (Logistics: promote stage / dispatched_date / delivery_date to first-class D1 columns)</h4>
+    <ul>
+      <li><strong>Migration 0007 adds three columns to <code>cin7_sales_orders</code>:</strong> <code>stage</code>, <code>dispatched_date</code>, <code>delivery_date</code>. v2.2.27e's live-CIN7 probe on order 76910 (Coles QLD RedBank) revealed: <code>status: "APPROVED"</code> but <code>stage: "Dispatched"</code>, with a real <code>dispatchedDate: "2026-05-08T01:44:00Z"</code> &mdash; the order shipped 11 days ago. The reason it was showing as "open" is the <code>raw_json</code> column is empty for many backfill-era rows, so the <code>json_extract(raw_json, '$.dispatchedDate') IS NULL</code> filter passed for every row regardless. First-class columns fix this for good.</li>
+      <li><strong>Corrected the ETD field.</strong> v2.2.27d theory that <code>createdDate == ETD</code> for EDI orders was wrong. The probe showed order 76910 has <code>createdDate: "2026-05-03"</code> but <code>estimatedDeliveryDate: "2026-05-10"</code> &mdash; 7 days apart. <code>estimatedDeliveryDate</code> is the CIN7 API field for the "Delivery Date (ETD)" shown in the UI; the cron now writes it to the new <code>delivery_date</code> column.</li>
+      <li><strong>Logistics endpoint filter rewritten</strong> using the new columns: <code>stage = 'Processing'</code> AND <code>dispatched_date IS NULL</code> AND <code>status NOT IN (VOID/VOIDED/CANCELLED)</code> AND <code>created_date &gt;= today − 30 days</code>. No more json_extract dependency.</li>
+      <li><strong>Cron updates.</strong> <code>SALES_FIELDS</code> in <code>src/cin7-sync.js</code> now includes <code>estimatedDeliveryDate</code> and <code>stage</code>. Write path populates the three new columns on every upsert.</li>
+      <li><strong>One-time backfill needed</strong> to repopulate existing rows. After deploy: trigger <code>/api/admin/cin7-backfill</code> (or run the existing admin backfill loop) so the cron re-fetches recent orders and writes the new column values. Without this, only orders modified after the cron's first post-migration tick will have <code>stage</code> / <code>dispatched_date</code> / <code>delivery_date</code> set, and the warehouse TV will under-report until those propagate.</li>
+      <li><strong>Removed the v2.2.27e <code>?debug-live</code> branch</strong> &mdash; job done.</li>
+    </ul>
     <h4>v2.2.27e &mdash; 19 May 2026 (Logistics endpoint: live-CIN7 status probe + zero-qty filter)</h4>
     <ul>
       <li><strong>Diagnosed why we're seeing weeks-old "open" orders.</strong> The <code>json_extract(raw_json, '$.dispatchedDate') IS NULL</code> filter relies on raw_json being populated &mdash; but raw_json is empty in D1 for most rows, so <code>json_extract(NULL, ...)</code> returns NULL, which IS NULL, which passes the filter for every row. So we're effectively showing all APPROVED orders regardless of dispatch state. Also: Melanie's expected open filter is <code>status = 'Open' AND stage = 'Processing'</code>, but the current SQL has <code>status = 'APPROVED'</code> &mdash; likely reading the wrong CIN7 field. A proper fix needs to promote <code>dispatchedDate</code> + <code>stage</code> to first-class D1 columns (migration + cron change + backfill), but first we need to see exactly what CIN7 returns.</li>
