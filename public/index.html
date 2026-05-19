@@ -1946,13 +1946,28 @@
       #tab-au-birthday .bday-card-sub { font-size: 11px; color: var(--text-secondary); margin-top: 4px; font-weight: 500; }
       #tab-au-birthday .bday-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
       #tab-au-birthday .bday-grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+      #tab-au-birthday .bday-alert-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+        margin-top: 14px;
+      }
+      @media (max-width: 900px) {
+        #tab-au-birthday .bday-alert-grid { grid-template-columns: 1fr; }
+      }
       #tab-au-birthday .bday-alert {
         background: #FFF5F7;
         border: 2px solid #FF578A;
         border-radius: 10px;
         padding: 16px 18px;
-        margin-top: 14px;
       }
+      #tab-au-birthday .bday-alert.wholesale {
+        background: #F4F0FF;
+        border-color: #7B5DD3;
+      }
+      #tab-au-birthday .bday-alert.wholesale .bday-alert-title { color: #4A2C9E; }
+      #tab-au-birthday .bday-alert.wholesale .bday-alert-count { color: #4A2C9E; }
+      #tab-au-birthday .bday-alert.wholesale .bday-alert-row { border-top-color: #D4C8F0; }
       #tab-au-birthday .bday-alert-header {
         display: flex; align-items: center; justify-content: space-between;
         margin-bottom: 10px;
@@ -1966,8 +1981,10 @@
         display: inline-block; font-size: 9px; font-weight: 800; letter-spacing: 0.6px;
         padding: 2px 6px; border-radius: 4px; margin-right: 4px; vertical-align: middle;
       }
-      #tab-au-birthday .bday-pill.intl    { background: #FFE0B2; color: #B26500; }
-      #tab-au-birthday .bday-pill.express { background: #BBDEFB; color: #0D47A1; }
+      #tab-au-birthday .bday-pill.intl      { background: #FFE0B2; color: #B26500; }
+      #tab-au-birthday .bday-pill.express   { background: #BBDEFB; color: #0D47A1; }
+      #tab-au-birthday .bday-pill.wholesale { background: #DDD0FF; color: #4A2C9E; }
+      #tab-au-birthday .bday-pill.sku       { background: #F0F0F0; color: #444; font-family: 'SF Mono','Fira Code',monospace; font-size: 9px; }
       #tab-au-birthday .bday-pill.disconnected { background: #ECECEC; color: #555; }
       #tab-au-birthday .bday-meta-bar {
         display: flex; align-items: center; justify-content: space-between;
@@ -2068,14 +2085,25 @@
       </div>
     </div>
 
-    <!-- Express / international alert -->
-    <div class="bday-alert" id="bday-alert-box">
-      <div class="bday-alert-header">
-        <div class="bday-alert-title">⚠️ Express / International — still open</div>
-        <div class="bday-alert-count" id="bday-alert-count">--</div>
+    <!-- Alert pair — Express/Intl + Wholesale, side-by-side -->
+    <div class="bday-alert-grid">
+      <div class="bday-alert" id="bday-alert-box">
+        <div class="bday-alert-header">
+          <div class="bday-alert-title">⚠️ Express / International — still open</div>
+          <div class="bday-alert-count" id="bday-alert-count">--</div>
+        </div>
+        <div class="bday-alert-list" id="bday-alert-list">
+          <div style="font-size:12px;color:var(--text-secondary);font-style:italic;">Loading…</div>
+        </div>
       </div>
-      <div class="bday-alert-list" id="bday-alert-list">
-        <div style="font-size:12px;color:var(--text-secondary);font-style:italic;">Loading…</div>
+      <div class="bday-alert wholesale" id="bday-alert-wholesale-box">
+        <div class="bday-alert-header">
+          <div class="bday-alert-title">📦 Wholesale — still open</div>
+          <div class="bday-alert-count" id="bday-alert-wholesale-count">--</div>
+        </div>
+        <div class="bday-alert-list" id="bday-alert-wholesale-list">
+          <div style="font-size:12px;color:var(--text-secondary);font-style:italic;">Loading…</div>
+        </div>
       </div>
     </div>
 
@@ -2094,9 +2122,24 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.23</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.24</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.24 &mdash; 19 May 2026 (Birthday tab: side-by-side <strong>Express/Intl</strong> + <strong>Wholesale</strong> alert cards)</h4>
+    <ul>
+      <li><strong>New wholesale alert card.</strong> Sits next to the existing Express/International card &mdash; same shape, same "open orders" call-out, different colour (purple/violet). Surfaces open ShipStation orders the fulfilment team should flag before the launch rush, so a wholesale-carton order doesn't get buried under hundreds of consumer orders. List shows order number, the wholesale SKUs that triggered the match, and the shipping service.</li>
+      <li><strong>Wholesale detection: SKU pattern, not Woo category.</strong> ShipStation's WC integration doesn't reliably expose Woo's "wholesale" product category, so we match by SKU instead. An order is wholesale if any line item matches:
+        <ul>
+          <li><code>WC-*</code> &mdash; wholesale custom (e.g. <code>WC-OG-NPO-35</code>)</li>
+          <li><code>*-SRT-*</code> &mdash; sleeve / tray packs (e.g. <code>AU-SRT-x12</code>)</li>
+          <li><code>*-CTN-*</code> &mdash; cartons (e.g. <code>AU-CTN-48</code>, where most AU wholesale volume lives)</li>
+        </ul>
+        Case-insensitive. To add or remove a pattern, edit <code>WHOLESALE_SKU_PATTERNS</code> in <code>src/shipstation.js</code> &mdash; single source of truth.
+      </li>
+      <li><strong>Layout: two cards in a 2-col grid.</strong> On wide viewports the Express/Intl and Wholesale cards sit side-by-side (each 50% wide). Below 900px they stack to 1-col. The cards live below the ShipStation stat row, where the single full-width alert used to be.</li>
+      <li><strong>Frontend refactor:</strong> the v2.2.21 inline alert rendering is now in a shared <code>_bdayRenderAlertCard()</code> helper that handles both cards' loading/empty/error/disconnected states. Each card's per-row markup is passed in as a <code>rowFor</code> callback. No backend behaviour change for express/intl &mdash; the JSON shape is identical to v2.2.23, just with new <code>wholesaleOpen</code> + <code>wholesaleOpenOrders</code> fields alongside the existing <code>expressIntlOpen</code> + <code>expressIntlOpenOrders</code>.</li>
+      <li><strong>Verify after deploy.</strong> Hit <code>/api/au/birthday-launch?refresh=1</code> and check the <code>shipstation</code> block has <code>wholesaleOpen</code> + <code>wholesaleOpenOrders</code> fields. On the dashboard the bday tab should now show two side-by-side cards under the SS row.</li>
+    </ul>
     <h4>v2.2.23 &mdash; 19 May 2026 (Birthday tab: strict-today Woo window + 12-bar 7am&ndash;7pm chart)</h4>
     <ul>
       <li><strong>Woo <code>after</code> filter switched to naive Sydney-local.</strong> v2.2.22 passed a UTC-flavoured ISO (<code>2026-05-19T00:00:00.000Z</code>) to WC's <code>after</code> filter. WC reads <code>after</code> as <em>naive store-local</em> time even when a <code>Z</code> is appended &mdash; so the filter was actually starting from "May 18 at 14:00 Sydney" (yesterday afternoon) instead of Sydney midnight today. Net effect: <code>total_orders_today: 230</code> at 11am Sydney with phantom counts in future hours &mdash; those were yesterday's late orders leaking through. Same naive-local convention is already in <code>src/admin.js</code>'s backfill watermarks. Fix: pass <code>${localDate}T00:00:00</code> (naive) to <code>fetchOrdersSince</code>. UTC equivalent still surfaced in the response's <code>window.from_iso</code> block for debugging. KV TTL is 60s so cached buggy payloads age out within a minute.</li>
@@ -6547,6 +6590,30 @@ function _bdayFmt(n) {
   return Number(n).toLocaleString();
 }
 
+function _bdayRenderAlertCard({ boxId, countId, listId, connected, error, count, summaries, emptyMsg, rowFor }) {
+  const box   = document.getElementById(boxId);
+  const countEl = document.getElementById(countId);
+  const listEl  = document.getElementById(listId);
+  if (!box || !countEl || !listEl) return;
+  if (!connected) {
+    countEl.textContent = '—';
+    listEl.innerHTML = `<div style="font-size:12px;color:var(--text-secondary);font-style:italic;">
+      ShipStation not connected${error ? ': ' + _bdayEscape(error) : ''}
+    </div>`;
+    box.classList.add('bday-disconnected');
+    return;
+  }
+  box.classList.remove('bday-disconnected');
+  countEl.textContent = _bdayFmt(count);
+  if (!summaries || summaries.length === 0) {
+    listEl.innerHTML = `<div style="font-size:12px;color:var(--text-secondary);">${emptyMsg}</div>`;
+    return;
+  }
+  const rows = summaries.slice(0, 20).map(s => `<div class="bday-alert-row">${rowFor(s)}</div>`).join('');
+  const more = summaries.length > 20 ? `<div class="bday-alert-row" style="opacity:0.7;">+${summaries.length - 20} more…</div>` : '';
+  listEl.innerHTML = rows + more;
+}
+
 function _bdayRender(data) {
   // Hero — next drop time (strip the date prefix for the hero, keep just time)
   const dropLocal = data.drop?.next_drop_local || '';
@@ -6575,31 +6642,41 @@ function _bdayRender(data) {
   document.getElementById('bday-ss-shipped-orders').textContent = ssConnected ? _bdayFmt(data.shipstation.shippedTodayOrders) : '—';
   document.getElementById('bday-ss-shipped-items').textContent  = ssConnected ? _bdayFmt(data.shipstation.shippedTodayItems)  : '—';
 
-  // Express/intl alert
-  const alertCount = document.getElementById('bday-alert-count');
-  const alertList  = document.getElementById('bday-alert-list');
-  const alertBox   = document.getElementById('bday-alert-box');
-  if (!ssConnected) {
-    alertCount.textContent = '—';
-    alertList.innerHTML = `<div style="font-size:12px;color:var(--text-secondary);font-style:italic;">
-      ShipStation not connected${data.shipstation?.error ? ': ' + _bdayEscape(data.shipstation.error) : ''}
-    </div>`;
-    alertBox.classList.add('bday-disconnected');
-  } else {
-    alertBox.classList.remove('bday-disconnected');
-    const summaries = data.shipstation.expressIntlOpenOrders || [];
-    alertCount.textContent = _bdayFmt(data.shipstation.expressIntlOpen);
-    if (summaries.length === 0) {
-      alertList.innerHTML = `<div style="font-size:12px;color:var(--text-secondary);">No express or international open orders 🎉</div>`;
-    } else {
-      alertList.innerHTML = summaries.slice(0, 20).map(s => {
-        const pills = (s.flags || []).map(f => `<span class="bday-pill ${f.toLowerCase()}">${f}</span>`).join('');
-        const country = s.ship_to_country ? ` · ${_bdayEscape(s.ship_to_country)}` : '';
-        const service = s.service ? ` · ${_bdayEscape(s.service)}` : '';
-        return `<div class="bday-alert-row">${pills}<strong>#${_bdayEscape(s.order_number || '?')}</strong>${country}${service}</div>`;
-      }).join('') + (summaries.length > 20 ? `<div class="bday-alert-row" style="opacity:0.7;">+${summaries.length - 20} more…</div>` : '');
-    }
-  }
+  // Alert cards — Express/Intl (left) and Wholesale (right). One helper
+  // function handles both; per-card differences are passed in as args.
+  _bdayRenderAlertCard({
+    boxId: 'bday-alert-box',
+    countId: 'bday-alert-count',
+    listId: 'bday-alert-list',
+    connected: ssConnected,
+    error: data.shipstation?.error,
+    count: data.shipstation?.expressIntlOpen,
+    summaries: data.shipstation?.expressIntlOpenOrders || [],
+    emptyMsg: 'No express or international open orders 🎉',
+    rowFor: (s) => {
+      const pills = (s.flags || []).map(f => `<span class="bday-pill ${f.toLowerCase()}">${f}</span>`).join('');
+      const country = s.ship_to_country ? ` · ${_bdayEscape(s.ship_to_country)}` : '';
+      const service = s.service ? ` · ${_bdayEscape(s.service)}` : '';
+      return `${pills}<strong>#${_bdayEscape(s.order_number || '?')}</strong>${country}${service}`;
+    },
+  });
+  _bdayRenderAlertCard({
+    boxId: 'bday-alert-wholesale-box',
+    countId: 'bday-alert-wholesale-count',
+    listId: 'bday-alert-wholesale-list',
+    connected: ssConnected,
+    error: data.shipstation?.error,
+    count: data.shipstation?.wholesaleOpen,
+    summaries: data.shipstation?.wholesaleOpenOrders || [],
+    emptyMsg: 'No wholesale open orders 🎉',
+    rowFor: (s) => {
+      const wsPill = `<span class="bday-pill wholesale">WHOLESALE</span>`;
+      const skuPills = (s.wholesale_skus || []).slice(0, 3).map(k => `<span class="bday-pill sku">${_bdayEscape(k)}</span>`).join('');
+      const extra = (s.wholesale_skus || []).length > 3 ? `<span class="bday-pill sku">+${s.wholesale_skus.length - 3}</span>` : '';
+      const service = s.service ? ` · ${_bdayEscape(s.service)}` : '';
+      return `${wsPill}${skuPills}${extra}<strong style="margin-left:4px;">#${_bdayEscape(s.order_number || '?')}</strong>${service}`;
+    },
+  });
 
   // Orders-per-hour chart
   _bdayRenderHourlyChart(data.woo?.orders_per_hour || []);

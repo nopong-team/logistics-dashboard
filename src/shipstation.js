@@ -47,6 +47,43 @@ function isInternational(country) {
   return String(country).trim().toUpperCase() !== 'AU';
 }
 
+// Wholesale SKU patterns. An open order is "wholesale" if any of its line
+// items match one of these:
+//   WC-*    — wholesale custom (e.g. WC-OG-NPO-35)
+//   *-SRT-* — sleeve / tray packs (e.g. AU-SRT-x12)
+//   *-CTN-* — cartons (e.g. AU-CTN-48, where most AU wholesale volume lives)
+//
+// Per Melanie 2026-05-19: ShipStation's WC integration doesn't reliably
+// expose Woo's "wholesale" product category, so SKU-pattern detection is
+// the most robust route. Patterns are case-insensitive.
+const WHOLESALE_SKU_PATTERNS = [
+  /^WC-/i,
+  /-SRT-/i,
+  /-CTN-/i,
+];
+
+function matchedWholesaleSku(sku) {
+  if (!sku) return false;
+  for (const pat of WHOLESALE_SKU_PATTERNS) {
+    if (pat.test(sku)) return true;
+  }
+  return false;
+}
+
+/**
+ * Return the de-duplicated list of wholesale-matching SKUs on an order. An
+ * empty list means the order isn't wholesale. Used to surface the actual
+ * SKU(s) on the alert card so the fulfilment team knows what's in the box.
+ */
+function wholesaleSkusFor(order) {
+  const items = Array.isArray(order?.items) ? order.items : [];
+  const matched = new Set();
+  for (const item of items) {
+    if (matchedWholesaleSku(item?.sku)) matched.add(item.sku);
+  }
+  return Array.from(matched);
+}
+
 function isExpressService(order) {
   // ShipStation v1 carries the requested service on these fields.
   const fields = [
@@ -194,6 +231,8 @@ export async function buildShipStationSnapshot(env, { localDate /*, tzOffsetMinu
     shippedTodayItems: 0,
     expressIntlOpen: 0,
     expressIntlOpenOrders: [],
+    wholesaleOpen: 0,
+    wholesaleOpenOrders: [],
   };
   if (!env.SHIPSTATION_API_KEY || !env.SHIPSTATION_API_SECRET) {
     return { ...zero, error: 'SHIPSTATION_API_KEY and/or SHIPSTATION_API_SECRET not configured' };
@@ -212,10 +251,13 @@ export async function buildShipStationSnapshot(env, { localDate /*, tzOffsetMinu
       }
     }
 
-    // Express / international open orders — surfaced as a flagship alert on
-    // the tab. We capture lightweight summaries (not the full order) so the
-    // frontend can render an inline list without dragging PII.
+    // Express / international + wholesale open orders — surfaced as two
+    // alert cards on the tab. One pass over the open queue populates both;
+    // an order can be both express and wholesale (and appear in both lists).
+    // We capture lightweight summaries (not the full order) so the frontend
+    // can render an inline list without dragging PII.
     const expressIntlSummaries = [];
+    const wholesaleSummaries = [];
     for (const o of openOrders) {
       const country = o?.shipTo?.country;
       const intl = isInternational(country);
@@ -228,6 +270,15 @@ export async function buildShipStationSnapshot(env, { localDate /*, tzOffsetMinu
           flags: [intl ? 'INTL' : null, exp ? 'EXPRESS' : null].filter(Boolean),
         });
       }
+      const wsSkus = wholesaleSkusFor(o);
+      if (wsSkus.length > 0) {
+        wholesaleSummaries.push({
+          order_number: o?.orderNumber || o?.orderId || null,
+          ship_to_country: country || null,
+          service: o?.requestedShippingService || o?.serviceCode || null,
+          wholesale_skus: wsSkus,
+        });
+      }
     }
 
     return {
@@ -238,6 +289,8 @@ export async function buildShipStationSnapshot(env, { localDate /*, tzOffsetMinu
       shippedTodayItems,
       expressIntlOpen: expressIntlSummaries.length,
       expressIntlOpenOrders: expressIntlSummaries,
+      wholesaleOpen: wholesaleSummaries.length,
+      wholesaleOpenOrders: wholesaleSummaries,
     };
   } catch (e) {
     return { ...zero, error: redactSecrets(e?.message || String(e)) };
