@@ -20,6 +20,7 @@ import { xeroRoutes, xeroAuthRoutes, readXeroStatus } from './xero.js';
 import { logiwaRoutes, readLogiwaStatus } from './logiwa.js';
 import { auRoutes } from './cin7.js';
 import { birthdayRoutes } from './birthday.js';
+import { logisticsRoutes } from './logistics.js';
 import { runCin7SalesOrdersChunk, runCin7CreditNotesChunk } from './cin7-sync.js';
 import buyingToolHistory from './buying-tool-history.js';
 import { redactSecrets } from './redact.js';
@@ -109,6 +110,13 @@ app.route('/api/au', auRoutes);
 // ShipStation v2 — bypasses D1 because the cron's watermark lag would hurt
 // the launch-day signal. See src/birthday.js header for the full design.
 app.route('/api/au', birthdayRoutes);
+
+// Logistics tab (v2.2.27). Live ShipStation + live CIN7 SalesOrders + Stock
+// to drive the warehouse TV with open-distributor visibility and per-line
+// stock-fulfillment checks. Bypasses D1 for the same reasons as the birthday
+// tab — warehouse ops need real-time signal, not a 15-min-lagged cache. See
+// src/logistics.js header for the full design.
+app.route('/api/au', logisticsRoutes);
 
 // Buying-tool history — 18+ months of per-SKU monthly sales plus manually
 // curated allocation buffers from the buying-tool spreadsheet. Powers the

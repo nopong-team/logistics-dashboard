@@ -213,7 +213,7 @@ export async function cin7Fetch(env, endpoint, params = {}) {
 // array of all records. `params` is merged into every request. Sleeps
 // PAGE_DELAY_MS between pages (NOT before the first one) to stay under
 // CIN7's 3 calls/sec rate limit.
-async function cin7FetchAll(env, endpoint, params = {}) {
+export async function cin7FetchAll(env, endpoint, params = {}) {
   const all = [];
   for (let page = 1; page <= MAX_PAGES; page++) {
     if (page > 1) await sleep(PAGE_DELAY_MS);
@@ -309,7 +309,7 @@ function isFbaBranchName(branchName) {
 // (Amazon-fulfilled only, replenished on its own cadence). Surfacing them
 // separately matters because conflating them (v2.34 just summed total) hides
 // the actionable bucket.
-async function fetchStockBySku(env) {
+export async function fetchStockBySku(env) {
   const fields = [
     'productId', 'productOptionId', 'modifiedDate', 'styleCode', 'code', 'barcode',
     'branchId', 'branchName', 'productName',
