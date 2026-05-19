@@ -52,6 +52,13 @@ export const logisticsRoutes = new Hono();
 const KV_KEY = 'au:logistics:v1';
 const KV_TTL_SECONDS = 60;
 
+// How recent an order must be to count as "actually open" on the warehouse
+// TV. CIN7 has 6-month-old SalesOrders that are technically `dispatchedDate
+// IS NULL` but were despatched outside CIN7 and never closed — those aren't
+// real warehouse work. 30 days is well within ops reality for any active
+// distributor order.
+const OPEN_ORDER_WINDOW_DAYS = 30;
+
 // DC → label + state + must-ship-by-business-day-before rule.
 //
 // Both Coles AND Woolies have a "Redbank" DC, so the matcher MUST run
@@ -333,13 +340,13 @@ function analyseLineItem(item, stockBySku) {
 // ─── D1 fetcher: open SalesOrders ──────────────────────────────────────────
 
 /**
- * Read open AU SalesOrders from D1's `cin7_sales_orders` cache rather than
+ * Read open AU SalesOrders from D1's cin7_sales_orders cache rather than
  * hitting CIN7 Omni live. v2.2.27 and v2.2.27a tried to fetch live but kept
  * hitting CIN7's 429 (most likely the 5000-calls-per-day budget — the
- * `*/15 *` cron plus the existing on-demand tabs eat most of it). D1 is
- * refreshed every 15 minutes by `runCin7SalesOrdersChunk`, which is
- * acceptable lag for warehouse-TV ops (vs the launch-day birthday tab where
- * we deliberately bypassed D1 for real-time signal).
+ * every-15-minute cron plus the existing on-demand tabs eat most of it).
+ * D1 is refreshed by runCin7SalesOrdersChunk on the same schedule, which
+ * is acceptable lag for warehouse-TV ops (vs the launch-day birthday tab
+ * where we deliberately bypassed D1 for real-time signal).
  *
  * `dispatchedDate` and `deliveryDate` aren't promoted to first-class columns
  * — they live inside `raw_json`. SQLite's `json_extract` handles the
@@ -358,10 +365,23 @@ async function fetchOpenSalesOrdersFromD1(env) {
     throw new Error('D1 binding (env.DB) not available — cannot read cached SalesOrders.');
   }
 
-  // Pull the order rows. The `channel_attr IS NOT NULL` filter drops the
-  // rows the cron flagged as "not a distributor sale" (Stock Adjustments,
-  // Amazon mirrors, redacted retail) so we don't even attribute-classify
-  // them downstream.
+  // Pull the order rows. Filters in priority order:
+  //   • status = 'APPROVED' — DRAFT/VOID/etc. aren't real warehouse work.
+  //   • dispatchedDate IS NULL — order is still awaiting fulfilment.
+  //   • created_date >= today − 30 days — drops the stale "open forever"
+  //     orders that were despatched outside CIN7 (real warehouse ops are
+  //     always within a few weeks).
+  //   • channel_attr IS NOT NULL — drops Stock Adjustments / Amazon mirrors /
+  //     redacted retail that the cron already classified as non-sale.
+  //
+  // 30-day cutoff is computed as a date string and compared lexicographically
+  // against created_date (ISO 8601), which works because the date prefix
+  // sorts identically to chronological order.
+  const cutoffDate = new Date();
+  cutoffDate.setUTCDate(cutoffDate.getUTCDate() - OPEN_ORDER_WINDOW_DAYS);
+  const pad = (n) => String(n).padStart(2, '0');
+  const cutoff = `${cutoffDate.getUTCFullYear()}-${pad(cutoffDate.getUTCMonth() + 1)}-${pad(cutoffDate.getUTCDate())}`;
+
   const ordersStmt = env.DB.prepare(
     `SELECT id, reference, status, channel_attr, company,
             first_name, last_name, created_date,
@@ -369,11 +389,12 @@ async function fetchOpenSalesOrdersFromD1(env) {
             json_extract(raw_json, '$.dispatchedDate') AS dispatched_date
        FROM cin7_sales_orders
       WHERE market = 'AU'
-        AND status NOT IN ('VOID', 'VOIDED', 'CANCELLED')
+        AND status = 'APPROVED'
         AND json_extract(raw_json, '$.dispatchedDate') IS NULL
         AND channel_attr IS NOT NULL
+        AND created_date >= ?
       ORDER BY created_date DESC`,
-  );
+  ).bind(cutoff);
   const { results: orderRows } = await ordersStmt.all();
   if (!orderRows || orderRows.length === 0) return [];
 
@@ -513,10 +534,58 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
 
 // ─── Endpoint ──────────────────────────────────────────────────────────────
 
+/**
+ * Debug branch: when ?debug=1 is passed, returns date-looking field
+ * names + values from one recent Coles+Woolies order's raw_json. Used to
+ * find which CIN7 field actually holds the manually-entered delivery
+ * date (vs `deliveryDate`, which comes back null on every order). Bails
+ * before the rest of the pipeline runs so the response stays small.
+ *
+ * The regex matches any key containing date/time/ship/deliv/due — covers
+ * deliveryDate, requiredDate, dueDate, customerOrderDate, despatchDate,
+ * shipBy, and so on.
+ */
+async function debugDateFields(env) {
+  if (!env.DB) return { error: 'D1 binding not available.' };
+  const row = await env.DB.prepare(
+    `SELECT id, reference, company, created_date, raw_json
+       FROM cin7_sales_orders
+      WHERE market = 'AU'
+        AND status = 'APPROVED'
+        AND channel_attr IN ('col', 'woo2')
+        AND json_extract(raw_json, '$.dispatchedDate') IS NULL
+      ORDER BY created_date DESC
+      LIMIT 1`,
+  ).first();
+  if (!row) return { error: 'No recent Coles/Woolies order found in D1.' };
+
+  let parsed = null;
+  try { parsed = JSON.parse(row.raw_json); }
+  catch (e) { return { error: `raw_json parse failed: ${e.message}` }; }
+
+  const interesting = {};
+  const re = /date|time|ship|deliv|due|required|order_no/i;
+  for (const [k, v] of Object.entries(parsed || {})) {
+    if (re.test(k)) interesting[k] = v;
+  }
+  // Also surface ALL top-level keys (without values) so a non-obvious field
+  // name still gets noticed.
+  return {
+    sample_order: { id: row.id, reference: row.reference, company: row.company, created_date: row.created_date },
+    all_top_level_keys: Object.keys(parsed || {}),
+    date_like_fields: interesting,
+  };
+}
+
 logisticsRoutes.get('/logistics', async (c) => {
   const env = c.env;
   const forceRefresh = c.req.query('refresh') === '1' || c.req.query('refresh') === 'true';
+  const debugMode = c.req.query('debug') === '1';
   const cache = env.CACHE;
+
+  if (debugMode) {
+    return c.json(await debugDateFields(env));
+  }
 
   if (!forceRefresh && cache) {
     const cached = await cache.get(KV_KEY, 'json');
