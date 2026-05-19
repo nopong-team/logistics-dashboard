@@ -209,16 +209,29 @@ async function fetchOrdersSince(env, afterNaiveLocal, { perPage = 100, maxPages 
 }
 
 /**
- * Read Woo's lifetime sold count for a single SKU. Woo's product object
- * carries `total_sales` which increments as orders move into processing /
- * completed status. Close enough to "lifetime sold" for a stock-tracker
- * read-out — Melanie's call on 2026-05-19.
+ * Read Woo's product info for a single SKU — used for two birthday-tab
+ * needs:
+ *   - lifetime sold (`total_sales`) for the soap stock-tracker card
+ *   - featured image URL for the TV view thumbnails (v2.2.25)
+ *
+ * Woo's product object carries `total_sales` which increments as orders
+ * move into processing / completed status — close enough to "lifetime sold"
+ * for a stock-tracker read-out (Melanie's call on 2026-05-19). The
+ * `images` array holds the gallery; we take `images[0].src` as the
+ * featured image.
+ *
+ * Returns { totalSales, imageUrl }. Both default to safe values if the
+ * SKU isn't found or the product has no image.
  */
-async function fetchLifetimeSoldForSku(env, sku) {
+async function fetchWooProductInfo(env, sku) {
   const { data } = await wooFetch(env, '/products', { sku, per_page: 5 });
-  if (!Array.isArray(data) || data.length === 0) return 0;
-  // Sum across matches (covers variations / multi-product SKU collisions).
-  return data.reduce((acc, p) => acc + Number(p?.total_sales || 0), 0);
+  if (!Array.isArray(data) || data.length === 0) return { totalSales: 0, imageUrl: null };
+  // Sum total_sales across matches (covers variations / multi-product SKU collisions).
+  const totalSales = data.reduce((acc, p) => acc + Number(p?.total_sales || 0), 0);
+  // First product with a non-empty image wins. Most cases there's only one
+  // match anyway; this is just defensive.
+  const imageUrl = data.find(p => p?.images?.[0]?.src)?.images?.[0]?.src || null;
+  return { totalSales, imageUrl };
 }
 
 // ─── Order analysis ────────────────────────────────────────────────────────
@@ -310,11 +323,14 @@ birthdayRoutes.get('/birthday-launch', async (c) => {
   const todayStartUtcIso = sydneyToUtcIso(syd.localDate, '00:00:00', syd.tzOffsetMinutes);
   const drop = computeNextDrop(now);
 
-  // Run Woo orders + Woo product (soap lifetime) + ShipStation concurrently.
-  // All three are independent reads against independent upstreams.
-  const [ordersResult, soapLifetimeResult, shipstationSnap] = await Promise.allSettled([
+  // Run Woo orders + Woo product info (soap + tin) + ShipStation concurrently.
+  // Four independent reads against independent upstreams. v2.2.25 added the
+  // separate tin product fetch to grab the tin's featured-image URL for the
+  // TV-view thumbnail (paired with the existing soap fetch).
+  const [ordersResult, soapInfoResult, tinInfoResult, shipstationSnap] = await Promise.allSettled([
     fetchOrdersSince(env, todayStartLocalNaive),
-    fetchLifetimeSoldForSku(env, SOAP_SKU),
+    fetchWooProductInfo(env, SOAP_SKU),
+    fetchWooProductInfo(env, TIN_SKU),
     buildShipStationSnapshot(env, {
       localDate: syd.localDate,
       tzOffsetMinutes: syd.tzOffsetMinutes,
@@ -332,13 +348,20 @@ birthdayRoutes.get('/birthday-launch', async (c) => {
   const orders = ordersResult.value;
   const summary = summariseTodayOrders(orders);
 
-  // Soap lifetime — soft-degrade: if this errors, show 0 with a note rather
-  // than blowing up the whole tab.
-  const soapLifetimeSold = soapLifetimeResult.status === 'fulfilled'
-    ? soapLifetimeResult.value
-    : 0;
-  const soapLifetimeError = soapLifetimeResult.status === 'rejected'
-    ? redactSecrets(soapLifetimeResult.reason?.message || String(soapLifetimeResult.reason))
+  // Soap + tin product info — soft-degrade: if either errors, fall back to
+  // zeros / null image and surface the error message rather than blowing up
+  // the whole tab.
+  const soapInfo = soapInfoResult.status === 'fulfilled'
+    ? soapInfoResult.value
+    : { totalSales: 0, imageUrl: null };
+  const soapLifetimeError = soapInfoResult.status === 'rejected'
+    ? redactSecrets(soapInfoResult.reason?.message || String(soapInfoResult.reason))
+    : null;
+  const tinInfo = tinInfoResult.status === 'fulfilled'
+    ? tinInfoResult.value
+    : { totalSales: 0, imageUrl: null };
+  const tinInfoError = tinInfoResult.status === 'rejected'
+    ? redactSecrets(tinInfoResult.reason?.message || String(tinInfoResult.reason))
     : null;
 
   // ShipStation — already returns its own connected/error envelope.
@@ -361,13 +384,16 @@ birthdayRoutes.get('/birthday-launch', async (c) => {
     woo: {
       total_orders_today: summary.totalOrders,
       orders_with_launch_products: summary.ordersWithLaunch,
-      soap_units_lifetime: soapLifetimeSold,
+      soap_units_lifetime: soapInfo.totalSales,
       soap_units_today:    summary.soapUnitsToday,
       tin_units_today:     summary.tinUnitsToday,
       orders_per_hour:     summary.hourlyBuckets,
       soap_sku: SOAP_SKU,
       tin_sku:  TIN_SKU,
+      soap_image_url: soapInfo.imageUrl,
+      tin_image_url:  tinInfo.imageUrl,
       soap_lifetime_error: soapLifetimeError,
+      tin_info_error: tinInfoError,
     },
     shipstation,
   };

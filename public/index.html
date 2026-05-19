@@ -1906,60 +1906,148 @@
     </div>
   </div>
 
-  <!-- ═══════ TAB: 11TH BIRTHDAY LAUNCH (v2.2.21) ═══════ -->
+  <!-- ═══════ TAB: 11TH BIRTHDAY LAUNCH (v2.2.21 → v2.2.25 TV layout) ═══════ -->
   <div class="tab-panel" id="tab-au-birthday">
     <style>
-      /* Birthday tab — scoped styles, only loaded when this panel renders. */
+      /* ── TV-fit layout: panel fills the viewport, no scroll. ──
+         Sized for warehouse TV (16:9, 1920×1080) but degrades gracefully
+         on smaller screens. The whole tab is a vertical flex column with
+         the chart row using flex:1 to absorb whatever vertical space
+         remains after the hero / KPI / meta bars take their natural sizes. */
+      #tab-au-birthday.active {
+        display: flex !important;
+        flex-direction: column;
+        gap: 10px;
+        /* Reserve room for region bar + AU tab bar + page padding. The
+           exact reserve number is conservative — on a real 1080p TV in
+           fullscreen we get ~900px usable, this gives us 880px. */
+        height: calc(100vh - 200px);
+        min-height: 640px;
+        overflow: hidden;
+      }
+
+      /* ── Hero ── */
       #tab-au-birthday .bday-hero {
         background: linear-gradient(135deg, #FF578A 0%, #FF8FB3 100%);
         color: #fff;
-        border-radius: 14px;
-        padding: 22px 26px;
-        margin-bottom: 20px;
+        border-radius: 12px;
+        padding: 14px 22px;
         display: grid;
         grid-template-columns: 2fr 1fr 1fr;
         gap: 20px;
         align-items: center;
         box-shadow: 0 4px 18px rgba(255,87,138,0.25);
+        flex: 0 0 auto;
       }
-      #tab-au-birthday .bday-hero h2 { margin: 0 0 6px 0; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
-      #tab-au-birthday .bday-hero .subtitle { font-size: 13px; opacity: 0.9; font-weight: 500; }
+      #tab-au-birthday .bday-hero h2 { margin: 0 0 4px 0; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
+      #tab-au-birthday .bday-hero .subtitle { font-size: 12px; opacity: 0.9; font-weight: 500; }
       #tab-au-birthday .bday-countdown-big {
-        font-size: 48px; font-weight: 800; line-height: 1;
+        font-size: 42px; font-weight: 800; line-height: 1;
         font-variant-numeric: tabular-nums; letter-spacing: -1px;
-        margin-bottom: 4px;
+        margin-bottom: 2px;
       }
-      #tab-au-birthday .bday-countdown-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.85; font-weight: 600; }
-      #tab-au-birthday .bday-drop-time { font-size: 22px; font-weight: 700; line-height: 1; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
-      #tab-au-birthday .bday-section-title {
-        font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px;
-        color: var(--text-secondary); margin: 18px 0 10px 4px;
+      #tab-au-birthday .bday-countdown-label {
+        font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+        opacity: 0.85; font-weight: 600;
+      }
+      #tab-au-birthday .bday-drop-time { font-size: 18px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+
+      /* ── KPI row: 7 cards in one line ── */
+      #tab-au-birthday .bday-kpi-row {
+        display: grid;
+        /* 4 Woo cards + 3 SS cards. Image cards (3rd + 4th) get slightly
+           more width to fit the 64px thumbnail. */
+        grid-template-columns: 1fr 1fr 1.25fr 1.25fr 1fr 1fr 1fr;
+        gap: 10px;
+        flex: 0 0 auto;
       }
       #tab-au-birthday .bday-card {
         background: var(--card-bg, #fff);
         border: 1px solid var(--border, #E5E7EB);
         border-radius: 10px;
-        padding: 16px 18px;
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        min-width: 0;
       }
-      #tab-au-birthday .bday-card-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-secondary); font-weight: 600; margin-bottom: 6px; }
-      #tab-au-birthday .bday-card-value { font-size: 30px; font-weight: 800; line-height: 1.1; color: var(--text-primary); font-variant-numeric: tabular-nums; }
-      #tab-au-birthday .bday-card-sub { font-size: 11px; color: var(--text-secondary); margin-top: 4px; font-weight: 500; }
-      #tab-au-birthday .bday-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-      #tab-au-birthday .bday-grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
-      #tab-au-birthday .bday-alert-grid {
+      #tab-au-birthday .bday-card.bday-card--woo { border-left: 3px solid #FF578A; }
+      #tab-au-birthday .bday-card.bday-card--ss  { border-left: 3px solid #7B5DD3; }
+      #tab-au-birthday .bday-card-icon-row {
+        display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
+      }
+      #tab-au-birthday .bday-mini-icon {
+        flex: 0 0 auto;
+        color: var(--text-secondary);
+      }
+      #tab-au-birthday .bday-card-label {
+        font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
+        color: var(--text-secondary); font-weight: 600; line-height: 1.2;
+      }
+      #tab-au-birthday .bday-card-value {
+        font-size: 36px; font-weight: 800; line-height: 1; color: var(--text-primary);
+        font-variant-numeric: tabular-nums; margin-top: 6px;
+      }
+      #tab-au-birthday .bday-card-sub { font-size: 10px; color: var(--text-secondary); margin-top: 4px; font-weight: 500; line-height: 1.3; }
+
+      /* ── Product-image cards ── */
+      #tab-au-birthday .bday-card--with-img {
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 14px;
-        margin-top: 14px;
+        grid-template-columns: 64px 1fr;
+        column-gap: 10px;
+        align-items: center;
+        padding: 10px 12px;
       }
-      @media (max-width: 900px) {
-        #tab-au-birthday .bday-alert-grid { grid-template-columns: 1fr; }
+      #tab-au-birthday .bday-card--with-img .bday-product-img {
+        width: 64px; height: 64px; object-fit: contain;
+        border-radius: 6px; background: #F8F8F8;
+        grid-row: span 3;
+      }
+      #tab-au-birthday .bday-card--with-img .bday-card-label { margin-bottom: 0; }
+      #tab-au-birthday .bday-card--with-img .bday-card-value { font-size: 32px; margin-top: 2px; }
+      #tab-au-birthday .bday-card--with-img .bday-card-sub { margin-top: 0; }
+      #tab-au-birthday .bday-product-img.empty {
+        background: linear-gradient(135deg, #FFEEF3 0%, #FFD8E5 100%);
+      }
+
+      /* ── Main row: chart + alerts column ── */
+      #tab-au-birthday .bday-main-row {
+        display: grid;
+        grid-template-columns: 2fr 1fr;
+        gap: 10px;
+        flex: 1 1 auto;
+        min-height: 0; /* required for the chart canvas to size correctly */
+      }
+      #tab-au-birthday .bday-chart-card {
+        background: var(--card-bg, #fff);
+        border: 1px solid var(--border, #E5E7EB);
+        border-radius: 10px;
+        padding: 14px 16px 10px 16px;
+        display: flex; flex-direction: column;
+        min-height: 0; min-width: 0;
+      }
+      #tab-au-birthday .bday-chart-title {
+        font-size: 13px; font-weight: 700; color: var(--text-primary);
+        margin-bottom: 8px;
+      }
+      #tab-au-birthday .bday-chart-canvas-wrap {
+        position: relative; flex: 1 1 auto; min-height: 0; width: 100%;
+      }
+
+      /* ── Alerts column (2 stacked alert cards in the right column) ── */
+      #tab-au-birthday .bday-alerts-col {
+        display: flex; flex-direction: column; gap: 10px;
+        min-height: 0;
       }
       #tab-au-birthday .bday-alert {
         background: #FFF5F7;
         border: 2px solid #FF578A;
         border-radius: 10px;
-        padding: 16px 18px;
+        padding: 12px 14px;
+        flex: 1 1 0;
+        min-height: 0;
+        display: flex; flex-direction: column;
+        overflow: hidden;
       }
       #tab-au-birthday .bday-alert.wholesale {
         background: #F4F0FF;
@@ -1970,13 +2058,19 @@
       #tab-au-birthday .bday-alert.wholesale .bday-alert-row { border-top-color: #D4C8F0; }
       #tab-au-birthday .bday-alert-header {
         display: flex; align-items: center; justify-content: space-between;
-        margin-bottom: 10px;
+        margin-bottom: 8px; flex: 0 0 auto;
       }
-      #tab-au-birthday .bday-alert-title { font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; color: #C8295F; }
-      #tab-au-birthday .bday-alert-count { font-size: 28px; font-weight: 800; color: #C8295F; font-variant-numeric: tabular-nums; }
-      #tab-au-birthday .bday-alert-list { font-size: 12px; color: var(--text-primary); }
-      #tab-au-birthday .bday-alert-list .bday-alert-row { padding: 4px 0; border-top: 1px dashed #FFCAD8; }
+      #tab-au-birthday .bday-alert-title { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.6px; color: #C8295F; }
+      #tab-au-birthday .bday-alert-count { font-size: 26px; font-weight: 800; color: #C8295F; font-variant-numeric: tabular-nums; line-height: 1; }
+      #tab-au-birthday .bday-alert-list {
+        font-size: 12px; color: var(--text-primary);
+        flex: 1 1 auto; overflow-y: auto; /* scroll within the card if needed */
+        min-height: 0;
+      }
+      #tab-au-birthday .bday-alert-list .bday-alert-row { padding: 3px 0; border-top: 1px dashed #FFCAD8; }
       #tab-au-birthday .bday-alert-list .bday-alert-row:first-child { border-top: none; }
+
+      /* ── Pills ── */
       #tab-au-birthday .bday-pill {
         display: inline-block; font-size: 9px; font-weight: 800; letter-spacing: 0.6px;
         padding: 2px 6px; border-radius: 4px; margin-right: 4px; vertical-align: middle;
@@ -1986,31 +2080,41 @@
       #tab-au-birthday .bday-pill.wholesale { background: #DDD0FF; color: #4A2C9E; }
       #tab-au-birthday .bday-pill.sku       { background: #F0F0F0; color: #444; font-family: 'SF Mono','Fira Code',monospace; font-size: 9px; }
       #tab-au-birthday .bday-pill.disconnected { background: #ECECEC; color: #555; }
+
+      /* ── Meta bar (compact, always at the bottom) ── */
       #tab-au-birthday .bday-meta-bar {
         display: flex; align-items: center; justify-content: space-between;
-        margin-top: 18px; padding: 10px 14px;
+        padding: 6px 12px;
         background: var(--card-bg, #fff);
         border: 1px solid var(--border, #E5E7EB);
         border-radius: 8px;
-        font-size: 12px; color: var(--text-secondary);
+        font-size: 11px; color: var(--text-secondary);
+        flex: 0 0 auto;
       }
       #tab-au-birthday .bday-refresh-btn {
-        background: #FF578A; color: #fff; border: none; padding: 6px 14px;
-        border-radius: 6px; font-weight: 700; font-size: 12px; cursor: pointer;
+        background: #FF578A; color: #fff; border: none; padding: 4px 12px;
+        border-radius: 6px; font-weight: 700; font-size: 11px; cursor: pointer;
       }
       #tab-au-birthday .bday-refresh-btn:hover { background: #E5447A; }
       #tab-au-birthday .bday-refresh-btn:disabled { background: #ECECEC; color: #999; cursor: wait; }
-      #tab-au-birthday .bday-disconnected {
-        opacity: 0.5;
-      }
+      #tab-au-birthday .bday-disconnected { opacity: 0.5; }
+      /* SS-card dimming when ShipStation is disconnected — class toggled on the panel root. */
+      #tab-au-birthday.bday-ss-down .bday-card--ss { opacity: 0.5; }
       #tab-au-birthday .bday-error {
         background: #FFF5F7; border: 1px solid #FF578A; color: #C8295F;
-        padding: 10px 14px; border-radius: 8px; font-size: 13px; font-weight: 500;
-        margin-bottom: 14px;
+        padding: 8px 12px; border-radius: 8px; font-size: 12px; font-weight: 500;
+        flex: 0 0 auto;
+      }
+
+      /* ── Smaller screens fall back to scrollable ── */
+      @media (max-width: 1200px) {
+        #tab-au-birthday.active { height: auto; overflow: visible; }
+        #tab-au-birthday .bday-kpi-row { grid-template-columns: repeat(4, 1fr); }
+        #tab-au-birthday .bday-main-row { grid-template-columns: 1fr; }
       }
     </style>
 
-    <!-- Hero strip: countdown + next drop + open orders -->
+    <!-- Hero -->
     <div class="bday-hero">
       <div>
         <h2>🎂 11th Birthday Launch</h2>
@@ -2030,84 +2134,116 @@
 
     <div id="bday-error-box"></div>
 
-    <!-- WooCommerce zone -->
-    <div class="bday-section-title">WooCommerce · live · today (AEST)</div>
-    <div class="bday-grid-4">
-      <div class="bday-card">
-        <div class="bday-card-label">All orders today</div>
+    <!-- KPI row: 4 Woo cards (pink left-stripe) + 3 ShipStation cards (purple left-stripe) -->
+    <div class="bday-kpi-row">
+      <!-- 1: All orders today (envelope) -->
+      <div class="bday-card bday-card--woo">
+        <div>
+          <div class="bday-card-icon-row">
+            <svg class="bday-mini-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/></svg>
+            <div class="bday-card-label">All orders today</div>
+          </div>
+        </div>
         <div class="bday-card-value" id="bday-woo-total-orders">--</div>
         <div class="bday-card-sub">since midnight AEST</div>
       </div>
-      <div class="bday-card">
-        <div class="bday-card-label">Orders w/ launch products</div>
+
+      <!-- 2: Launch-product orders (envelope) -->
+      <div class="bday-card bday-card--woo">
+        <div>
+          <div class="bday-card-icon-row">
+            <svg class="bday-mini-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/></svg>
+            <div class="bday-card-label">Orders w/ launch products</div>
+          </div>
+        </div>
         <div class="bday-card-value" id="bday-woo-launch-orders">--</div>
         <div class="bday-card-sub">contains soap or tin</div>
       </div>
-      <div class="bday-card">
+
+      <!-- 3: Soap (lifetime, with product image) -->
+      <div class="bday-card bday-card--woo bday-card--with-img">
+        <img class="bday-product-img empty" id="bday-soap-img" src="" alt="Soap" />
         <div class="bday-card-label">Soap units (lifetime)</div>
         <div class="bday-card-value" id="bday-soap-lifetime">--</div>
-        <div class="bday-card-sub" id="bday-soap-sub">AU-BD-NPS-100 · all-time sold</div>
+        <div class="bday-card-sub" id="bday-soap-sub">AU-BD-NPS-100 · all-time</div>
       </div>
-      <div class="bday-card">
-        <div class="bday-card-label">11th Birthday Tin units (today)</div>
+
+      <!-- 4: Tin (today, with product image) -->
+      <div class="bday-card bday-card--woo bday-card--with-img">
+        <img class="bday-product-img empty" id="bday-tin-img" src="" alt="11th Birthday Tin" />
+        <div class="bday-card-label">11th Birthday Tin (today)</div>
         <div class="bday-card-value" id="bday-tin-today">--</div>
-        <div class="bday-card-sub" id="bday-tin-sub">AU-BD-NBF-35 · today only</div>
+        <div class="bday-card-sub" id="bday-tin-sub">AU-BD-NBF-35 · today</div>
       </div>
-    </div>
 
-    <!-- Orders-per-hour chart -->
-    <div class="chart-card" style="margin-top:14px;">
-      <div class="chart-card-header">
-        <div class="chart-card-title">Orders per hour — launch window (7am–7pm AEST) — drop hours 7am–5pm highlighted</div>
-      </div>
-      <div style="position:relative; height:240px; width:100%;">
-        <canvas id="bdayHourlyChart"></canvas>
-      </div>
-    </div>
-
-    <!-- ShipStation zone -->
-    <div class="bday-section-title">ShipStation · live</div>
-    <div class="bday-grid-3" id="bday-ss-cards">
-      <div class="bday-card">
-        <div class="bday-card-label">Orders awaiting shipment</div>
+      <!-- 5: SS open queue -->
+      <div class="bday-card bday-card--ss">
+        <div>
+          <div class="bday-card-icon-row">
+            <svg class="bday-mini-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><line x1="7" y1="7" x2="7" y2="7"/><line x1="7" y1="17" x2="7" y2="17"/></svg>
+            <div class="bday-card-label">Awaiting shipment</div>
+          </div>
+        </div>
         <div class="bday-card-value" id="bday-ss-open">--</div>
-        <div class="bday-card-sub">open queue</div>
+        <div class="bday-card-sub">open queue (ShipStation)</div>
       </div>
-      <div class="bday-card">
-        <div class="bday-card-label">Orders shipped today</div>
+
+      <!-- 6: SS shipped today (orders) -->
+      <div class="bday-card bday-card--ss">
+        <div>
+          <div class="bday-card-icon-row">
+            <svg class="bday-mini-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7l-9 6-9-6"/><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7"/><path d="M3 7l9-4 9 4"/></svg>
+            <div class="bday-card-label">Shipped today (orders)</div>
+          </div>
+        </div>
         <div class="bday-card-value" id="bday-ss-shipped-orders">--</div>
-        <div class="bday-card-sub">created in ShipStation today</div>
+        <div class="bday-card-sub">labels printed today</div>
       </div>
-      <div class="bday-card">
-        <div class="bday-card-label">Items shipped today</div>
+
+      <!-- 7: SS shipped today (items) -->
+      <div class="bday-card bday-card--ss">
+        <div>
+          <div class="bday-card-icon-row">
+            <svg class="bday-mini-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-6"/></svg>
+            <div class="bday-card-label">Shipped today (items)</div>
+          </div>
+        </div>
         <div class="bday-card-value" id="bday-ss-shipped-items">--</div>
-        <div class="bday-card-sub">sum of units across shipments</div>
+        <div class="bday-card-sub">sum across shipments</div>
       </div>
     </div>
 
-    <!-- Alert pair — Express/Intl + Wholesale, side-by-side -->
-    <div class="bday-alert-grid">
-      <div class="bday-alert" id="bday-alert-box">
-        <div class="bday-alert-header">
-          <div class="bday-alert-title">⚠️ Express / International — still open</div>
-          <div class="bday-alert-count" id="bday-alert-count">--</div>
-        </div>
-        <div class="bday-alert-list" id="bday-alert-list">
-          <div style="font-size:12px;color:var(--text-secondary);font-style:italic;">Loading…</div>
+    <!-- Main row: big chart on the left, two stacked alert cards on the right -->
+    <div class="bday-main-row">
+      <div class="bday-chart-card">
+        <div class="bday-chart-title">Orders per hour — launch window (7am–7pm AEST) · drop hours 7am–5pm highlighted</div>
+        <div class="bday-chart-canvas-wrap">
+          <canvas id="bdayHourlyChart"></canvas>
         </div>
       </div>
-      <div class="bday-alert wholesale" id="bday-alert-wholesale-box">
-        <div class="bday-alert-header">
-          <div class="bday-alert-title">📦 Wholesale — still open</div>
-          <div class="bday-alert-count" id="bday-alert-wholesale-count">--</div>
+      <div class="bday-alerts-col">
+        <div class="bday-alert" id="bday-alert-box">
+          <div class="bday-alert-header">
+            <div class="bday-alert-title">⚠️ Express / International — still open</div>
+            <div class="bday-alert-count" id="bday-alert-count">--</div>
+          </div>
+          <div class="bday-alert-list" id="bday-alert-list">
+            <div style="font-size:12px;color:var(--text-secondary);font-style:italic;">Loading…</div>
+          </div>
         </div>
-        <div class="bday-alert-list" id="bday-alert-wholesale-list">
-          <div style="font-size:12px;color:var(--text-secondary);font-style:italic;">Loading…</div>
+        <div class="bday-alert wholesale" id="bday-alert-wholesale-box">
+          <div class="bday-alert-header">
+            <div class="bday-alert-title">📦 Wholesale — still open</div>
+            <div class="bday-alert-count" id="bday-alert-wholesale-count">--</div>
+          </div>
+          <div class="bday-alert-list" id="bday-alert-wholesale-list">
+            <div style="font-size:12px;color:var(--text-secondary);font-style:italic;">Loading…</div>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- Meta + refresh -->
+    <!-- Meta bar -->
     <div class="bday-meta-bar">
       <span id="bday-last-updated">Loading…</span>
       <span>
@@ -2122,9 +2258,19 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.24</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.25</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.25 &mdash; 19 May 2026 (Birthday tab: TV-fit 16:9 no-scroll layout + product images + envelope icons)</h4>
+    <ul>
+      <li><strong>TV-fit no-scroll layout.</strong> The tab now goes on a warehouse TV (1920×1080, 16:9) and needs to fit a single viewport &mdash; no one's scrolling on a TV from across the warehouse floor. Panel restructured as a 4-row flex column: hero / 7-card KPI strip / chart-and-alerts main row (flex:1 to fill remaining vertical space) / compact meta bar. Below 1200px wide the layout falls back to scrollable so it still works on a laptop.</li>
+      <li><strong>One KPI row instead of two separated sections.</strong> The pre-v2.2.25 layout had a Woo section (4 cards) and a ShipStation section (3 cards) on separate rows with section-title dividers. v2.2.25 folds all seven cards into a single 7-column grid &mdash; pink left-stripe (<code>border-left: 3px solid #FF578A</code>) on Woo cards, purple left-stripe on ShipStation cards so the source is still legible at a glance. Saves a chunk of vertical space and frees the chart to grow.</li>
+      <li><strong>Product images on the soap + tin cards.</strong> Backend now fires a second Woo <code>/products?sku=AU-BD-NBF-35</code> call in parallel with the existing soap fetch and the orders fetch &mdash; both product responses' <code>images[0].src</code> URLs are surfaced as <code>woo.soap_image_url</code> and <code>woo.tin_image_url</code> on the payload. Frontend renders them as 64&times;64 thumbnails inside the relevant cards, with a pink-gradient placeholder when the URL is missing or 404s. Image loads fall back to the placeholder via <code>img.onerror</code> rather than showing a broken-image icon.</li>
+      <li><strong>Envelope mini-icons</strong> on the order-count cards (All orders / Launch-product orders) for visual rhythm with the SKU-image cards. Inline SVGs &mdash; no external assets, no extra HTTP requests.</li>
+      <li><strong>Chart sized via flex:1, not fixed pixels.</strong> The chart canvas now grows to fill whatever vertical space remains after the hero / KPI / meta rows take their natural heights. On a 1080p TV that's ~480px of chart, big enough to read drop-hour bars from across the room. Chart.js's <code>maintainAspectRatio: false</code> handles the resize.</li>
+      <li><strong>SS-disconnected dimming refactored.</strong> Previous wrapper-based dim is gone (couldn't survive the cards being flattened into one row). New: a <code>bday-ss-down</code> class toggles on the panel root, CSS rule <code>#tab-au-birthday.bday-ss-down .bday-card--ss { opacity: 0.5 }</code> dims all three SS cards. Identical UX, cleaner CSS.</li>
+      <li><strong>Verify after deploy.</strong> Open the dashboard on the warehouse TV (or any 16:9 fullscreen browser): bday tab should fit one viewport, no scrollbar. Soap + tin cards should render product thumbnails (provided the SKUs exist in Woo). Hit <code>/api/au/birthday-launch?refresh=1</code> and the JSON should now include <code>woo.soap_image_url</code> + <code>woo.tin_image_url</code>.</li>
+    </ul>
     <h4>v2.2.24 &mdash; 19 May 2026 (Birthday tab: side-by-side <strong>Express/Intl</strong> + <strong>Wholesale</strong> alert cards)</h4>
     <ul>
       <li><strong>New wholesale alert card.</strong> Sits next to the existing Express/International card &mdash; same shape, same "open orders" call-out, different colour (purple/violet). Surfaces open ShipStation orders the fulfilment team should flag before the launch rush, so a wholesale-carton order doesn't get buried under hundreds of consumer orders. List shows order number, the wholesale SKUs that triggered the match, and the shipping service.</li>
@@ -6590,6 +6736,25 @@ function _bdayFmt(n) {
   return Number(n).toLocaleString();
 }
 
+function _bdaySetProductImg(imgId, url) {
+  const img = document.getElementById(imgId);
+  if (!img) return;
+  if (url && typeof url === 'string') {
+    img.src = url;
+    img.classList.remove('empty');
+    // If the image fails to load (404, CORS, etc.), fall back to the empty
+    // placeholder rather than showing a broken-image icon.
+    img.onerror = () => {
+      img.removeAttribute('src');
+      img.classList.add('empty');
+      img.onerror = null;
+    };
+  } else {
+    img.removeAttribute('src');
+    img.classList.add('empty');
+  }
+}
+
 function _bdayRenderAlertCard({ boxId, countId, listId, connected, error, count, summaries, emptyMsg, rowFor }) {
   const box   = document.getElementById(boxId);
   const countEl = document.getElementById(countId);
@@ -6634,13 +6799,22 @@ function _bdayRender(data) {
       `${data.woo.soap_sku} · all-time sold · ${_bdayFmt(data.woo.soap_units_today)} today`;
   }
 
-  // ShipStation cards — dim if disconnected, but still render the structure.
-  const ssCards = document.getElementById('bday-ss-cards');
+  // ShipStation cards — dim ALL .bday-card--ss cards if disconnected by
+  // toggling a class on the panel root (CSS does the rest). v2.2.25 dropped
+  // the bday-ss-cards wrapper because the new TV layout flattens all KPI
+  // cards into a single grid row.
+  const panel = document.getElementById('tab-au-birthday');
   const ssConnected = !!data.shipstation?.connected;
-  if (ssCards) ssCards.classList.toggle('bday-disconnected', !ssConnected);
+  if (panel) panel.classList.toggle('bday-ss-down', !ssConnected);
   document.getElementById('bday-ss-open').textContent           = ssConnected ? _bdayFmt(data.shipstation.openOrders) : '—';
   document.getElementById('bday-ss-shipped-orders').textContent = ssConnected ? _bdayFmt(data.shipstation.shippedTodayOrders) : '—';
   document.getElementById('bday-ss-shipped-items').textContent  = ssConnected ? _bdayFmt(data.shipstation.shippedTodayItems)  : '—';
+
+  // Product images — pulled live from Woo's /products?sku=... response (the
+  // first item's images[0].src). Falls back to the pink-gradient placeholder
+  // when the image URL is missing or the SKU doesn't exist yet.
+  _bdaySetProductImg('bday-soap-img', data.woo?.soap_image_url);
+  _bdaySetProductImg('bday-tin-img',  data.woo?.tin_image_url);
 
   // Alert cards — Express/Intl (left) and Wholesale (right). One helper
   // function handles both; per-card differences are passed in as args.
