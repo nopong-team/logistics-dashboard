@@ -1,6 +1,6 @@
 {
   "name": "logistics-dashboard",
-  "version": "0.20.27-f",
+  "version": "0.20.27-g",
   "private": true,
   "description": "No Pong — Logistics Dashboard Cloudflare Worker (logistics.apps.nopong.com)",
   "scripts": {

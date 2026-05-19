@@ -2313,9 +2313,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.27f</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.27g</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.27g &mdash; 19 May 2026 (Logistics: pivot SalesOrders fetch from D1 to live CIN7)</h4>
+    <ul>
+      <li><strong>Bypass D1 for SalesOrders entirely.</strong> v2.2.27f's D1-based filter worked correctly for orders modified today, but missed real open Coles+Woolies EDI orders (e.g. 0111020225 + 0111015771 from May 18-19) whose modifiedDate was before today's watermark. Trying to lower the watermark hit the v2.2.10 strict-greater-than tie-group bug (5000+ row ties at 2026-04-11T14:00:06Z and 2026-05-16T14:00:03Z) that we'd have to fix in the sync infrastructure to resolve cleanly. For the warehouse-TV use case, going LIVE against CIN7 is simpler and more reliable: typical open-order count is &lt;20, so it's one CIN7 call per dashboard refresh.</li>
+      <li><strong>New <code>fetchOpenSalesOrdersLive()</code> in <code>src/logistics.js</code>.</strong> Server-side <code>where</code> filter: <code>CreatedDate&gt;='&lt;30 days ago&gt;' AND Status='APPROVED'</code>. Client-side: drop rows with <code>dispatchedDate</code> set, drop voided. Field whitelist mirrors the cron's <code>SALES_FIELDS</code> so <code>estimatedDeliveryDate</code> + <code>stage</code> are captured. <code>deliveryDate</code> on the returned shape is sourced from <code>estimatedDeliveryDate</code>.</li>
+      <li><strong>Rate-limit math.</strong> Two CIN7 calls per request (SalesOrders + Stock), serialized. KV cache 60s caps absolute volume at ~60 dashboard refreshes/hour = 120 CIN7 calls/hour = 2,880/day. CIN7 limits: 3/sec, 60/min, 5,000/day — comfortably within all three.</li>
+      <li><strong>Migration 0007 columns stay in place.</strong> The cron continues to populate <code>stage</code> / <code>dispatched_date</code> / <code>delivery_date</code> on every tick; other endpoints can use them. This endpoint just doesn't read them.</li>
+    </ul>
     <h4>v2.2.27f &mdash; 19 May 2026 (Logistics: promote stage / dispatched_date / delivery_date to first-class D1 columns)</h4>
     <ul>
       <li><strong>Migration 0007 adds three columns to <code>cin7_sales_orders</code>:</strong> <code>stage</code>, <code>dispatched_date</code>, <code>delivery_date</code>. v2.2.27e's live-CIN7 probe on order 76910 (Coles QLD RedBank) revealed: <code>status: "APPROVED"</code> but <code>stage: "Dispatched"</code>, with a real <code>dispatchedDate: "2026-05-08T01:44:00Z"</code> &mdash; the order shipped 11 days ago. The reason it was showing as "open" is the <code>raw_json</code> column is empty for many backfill-era rows, so the <code>json_extract(raw_json, '$.dispatchedDate') IS NULL</code> filter passed for every row regardless. First-class columns fix this for good.</li>

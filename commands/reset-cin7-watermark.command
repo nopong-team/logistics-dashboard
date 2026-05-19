@@ -25,12 +25,21 @@ echo "  Reset CIN7 sales-orders watermark — $(date)"
 echo "================================================================"
 echo
 echo "  Setting sync_state.watermark for cin7_sales_orders to"
-echo "  2026-04-01T00:00:00Z. The next cron tick (within 15 min) will"
-echo "  re-fetch every order modified since then and write the new"
+echo "  2026-05-19T00:00:00Z (today). The next cron tick (within 15 min)"
+echo "  will re-fetch every order modified today and write the new"
 echo "  columns (stage, dispatched_date, delivery_date)."
 echo
+echo "  Why 2026-05-19 (today): v2.2.10's strict-greater-than watermark"
+echo "  hits tie groups at every CIN7 bulk-modification timestamp"
+echo "  (we hit one at 2026-04-11T14:00:06Z, another at"
+echo "  2026-05-16T14:00:03Z). Skipping straight to today avoids them"
+echo "  entirely and surfaces ONLY the currently-open Processing orders"
+echo "  the warehouse cares about. Anything modified in the past few"
+echo "  days that's still open will be re-touched today as part of"
+echo "  normal CIN7 activity."
+echo
 npx wrangler d1 execute logistics-db --remote --command \
-  "UPDATE sync_state SET watermark = '2026-04-01T00:00:00Z', watermark_id = 0 WHERE source = 'cin7_sales_orders'"
+  "UPDATE sync_state SET watermark = '2026-05-19T00:00:00Z', watermark_id = 0 WHERE source = 'cin7_sales_orders'"
 STATUS=$?
 
 echo

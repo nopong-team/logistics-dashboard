@@ -3,13 +3,13 @@
  *
  * Drives the warehouse TV (1920×1080, 16:9, no-scroll) for the AU
  * fulfilment team. Patterns mirror src/birthday.js (KV-cached 60s,
- * ShipStation snapshot reused as-is), with one difference: SalesOrders
- * come from the D1 cache (cron-refreshed every 15 min) rather than live
- * CIN7. The birthday tab bypassed D1 for launch-day real-time signal;
- * the logistics tab is permanent ops where 15-min lag is acceptable and
- * the daily 5000-call CIN7 budget gets crowded otherwise. Stock is still
- * live (single endpoint, one call, current-moment numbers for the
- * green-tick fulfilment check).
+ * ShipStation snapshot reused as-is). v2.2.27g: SalesOrders are fetched
+ * LIVE from CIN7 Omni v1 — bypassing the D1 cache because the v2.2.10
+ * strict-greater-than watermark gets stuck on CIN7 bulk-modification tie
+ * groups, and chasing them with manual watermark resets loses data. Two
+ * CIN7 calls per dashboard refresh (SalesOrders + Stock), serialized,
+ * KV-cached 60s — comfortably within CIN7's 3/sec, 60/min, 5000/day
+ * limits.
  *
  * Surfaces:
  *   1. ShipStation snapshot — open queue, shipped-today counts, express/intl
@@ -41,6 +41,7 @@ import {
   fetchStockBySku,
   attributeCin7Order,
   normalizeAuSku,
+  cin7FetchAll,
 } from './cin7.js';
 import { buildShipStationSnapshot } from './shipstation.js';
 import { redactSecrets } from './redact.js';
@@ -337,114 +338,92 @@ function analyseLineItem(item, stockBySku) {
   };
 }
 
-// ─── D1 fetcher: open SalesOrders ──────────────────────────────────────────
+// ─── Live CIN7 fetcher: open SalesOrders ──────────────────────────────────
 
 /**
- * Read open AU SalesOrders from D1's cin7_sales_orders cache rather than
- * hitting CIN7 Omni live. v2.2.27 and v2.2.27a tried to fetch live but kept
- * hitting CIN7's 429 (most likely the 5000-calls-per-day budget — the
- * every-15-minute cron plus the existing on-demand tabs eat most of it).
- * D1 is refreshed by runCin7SalesOrdersChunk on the same schedule, which
- * is acceptable lag for warehouse-TV ops (vs the launch-day birthday tab
- * where we deliberately bypassed D1 for real-time signal).
+ * Fetch open AU SalesOrders directly from CIN7 Omni v1 — bypassing the D1
+ * cache entirely.
  *
- * `dispatchedDate` and `deliveryDate` aren't promoted to first-class columns
- * — they live inside `raw_json`. SQLite's `json_extract` handles the
- * filter and projection without a schema migration.
+ * Why live (v2.2.27g): the cron's incremental sync uses a strict-greater-
+ * than watermark (v2.2.10) that gets stuck on bulk-modification tie groups
+ * — we hit one at 2026-04-11T14:00:06Z and another at 2026-05-16T14:00:03Z
+ * in the v2.2.27a–f iterations. Trying to catch up to today's data via
+ * D1 means manually advancing the watermark past each tie group, which
+ * loses any in-tie orders we'd want to see. For the warehouse-TV use case
+ * we only need a small set of currently-open orders (typically <20 across
+ * EDI + non-EDI), and a single CIN7 call per dashboard refresh is well
+ * within rate limits (60s KV cache caps us at ~60 calls/hour for this
+ * endpoint, vs CIN7's 60/min limit).
  *
- * Stock comes from the live `fetchStockBySku()` (a single Stock endpoint
- * call) — the warehouse green-tick needs current-moment stock, and one
- * endpoint per request stays well within rate limits.
+ * Filter:
+ *   • Server-side `where`: createdDate >= today − 30 days AND status =
+ *     'APPROVED' — narrows the response to the right window. CIN7's
+ *     where syntax doesn't reliably support IS NULL on dispatchedDate
+ *     across all account configs, so we filter that in JS.
+ *   • Client-side: dispatchedDate IS NULL — the canonical "still needs
+ *     warehouse action" check. An order moves to dispatchedDate=<timestamp>
+ *     the moment it ships.
+ *   • Client-side: status NOT IN (VOID/VOIDED/CANCELLED) — defensive,
+ *     even though the server-side filter already specifies APPROVED.
  *
- * Returns an array of objects matching the shape `aggregateDistributorOrders`
- * expects: `{ id, reference, createdDate, dispatchedDate, deliveryDate,
- * company, status, lineItems: [...] }`.
+ * Stage is captured in the returned objects (CIN7 returns it when the
+ * `fields` whitelist includes it) but not used to filter; dispatchedDate
+ * is the more reliable signal. The 0007 migration columns (stage,
+ * dispatched_date, delivery_date) get populated on every cron tick now,
+ * so other endpoints can use them; just this one bypasses D1.
  */
-async function fetchOpenSalesOrdersFromD1(env) {
-  if (!env.DB) {
-    throw new Error('D1 binding (env.DB) not available — cannot read cached SalesOrders.');
-  }
-
-  // Pull the order rows. Filters in priority order:
-  //   • stage = 'Processing' — workflow position is "warehouse needs to
-  //     pick this". CIN7 stages include Quote / Approved / Processing /
-  //     Awaiting Dispatch / Dispatched / Closed. "Processing" is the
-  //     actionable bucket. status='APPROVED' alone isn't enough — that's
-  //     a high-level flag and stays APPROVED through Dispatched too.
-  //   • dispatched_date IS NULL — first-class column from migration 0007.
-  //     v2.2.27c–e relied on json_extract(raw_json, ...) which silently
-  //     failed because many rows have raw_json=NULL from backfill-era
-  //     inserts; first-class column eliminates that ambiguity.
-  //   • status NOT IN (VOID/VOIDED/CANCELLED) — drops voided orders.
-  //   • channel_attr IS NOT NULL — drops Stock Adjustments / Amazon
-  //     mirrors / redacted retail.
-  //   • created_date >= today − 30 days — keeps the window bounded.
+async function fetchOpenSalesOrdersLive(env) {
+  // 30-day window — same OPEN_ORDER_WINDOW_DAYS used previously. Computed
+  // as YYYY-MM-DD for the where clause.
   const cutoffDate = new Date();
   cutoffDate.setUTCDate(cutoffDate.getUTCDate() - OPEN_ORDER_WINDOW_DAYS);
   const pad = (n) => String(n).padStart(2, '0');
   const cutoff = `${cutoffDate.getUTCFullYear()}-${pad(cutoffDate.getUTCMonth() + 1)}-${pad(cutoffDate.getUTCDate())}`;
 
-  const ordersStmt = env.DB.prepare(
-    `SELECT id, reference, status, stage, channel_attr, company,
-            first_name, last_name, created_date,
-            delivery_date, dispatched_date
-       FROM cin7_sales_orders
-      WHERE market = 'AU'
-        AND status NOT IN ('VOID', 'VOIDED', 'CANCELLED')
-        AND stage = 'Processing'
-        AND dispatched_date IS NULL
-        AND channel_attr IS NOT NULL
-        AND created_date >= ?
-      ORDER BY created_date DESC`,
-  ).bind(cutoff);
-  const { results: orderRows } = await ordersStmt.all();
-  if (!orderRows || orderRows.length === 0) return [];
+  // Field whitelist — mirror cin7-sync.js SALES_FIELDS so we capture
+  // stage + estimatedDeliveryDate + dispatchedDate + lineItems. CIN7 only
+  // returns what we ask for.
+  const fields = [
+    'id', 'reference', 'createdDate', 'modifiedDate', 'dispatchedDate',
+    'channel', 'branchName',
+    'memberId', 'memberEmail', 'firstName', 'lastName', 'company',
+    'status', 'stage', 'invoiceStatus',
+    'estimatedDeliveryDate',
+    'total', 'subTotal', 'productTotal',
+    'lineItems',
+  ].join(',');
 
-  // Pull the matching line items in a single follow-up query. parent_id = 0
-  // filter happens at the SQL layer for efficiency (the read-side rule).
-  const ids = orderRows.map((r) => r.id);
-  const placeholders = ids.map(() => '?').join(',');
-  const itemsStmt = env.DB.prepare(
-    `SELECT order_id, parent_id, code, base_sku, multiplier, uom_size,
-            qty, unit_price, total, name
-       FROM cin7_sales_order_items
-      WHERE order_id IN (${placeholders})
-        AND parent_id = 0
-      ORDER BY order_id`,
-  ).bind(...ids);
-  const { results: itemRows } = await itemsStmt.all();
+  const where = `CreatedDate>='${cutoff}' AND Status='APPROVED'`;
 
-  // Bucket items by order_id.
-  const itemsByOrder = new Map();
-  for (const it of (itemRows || [])) {
-    const arr = itemsByOrder.get(it.order_id) || [];
-    arr.push({
-      code: it.code,
-      name: it.name,
-      qty: Number(it.qty) || 0,
-      uomSize: Number(it.uom_size) || 1,
-      parentId: Number(it.parent_id) || 0,
-      unitPrice: Number(it.unit_price) || 0,
-      total: Number(it.total) || 0,
-    });
-    itemsByOrder.set(it.order_id, arr);
-  }
+  // cin7FetchAll paginates internally with 400ms inter-page sleep. For a
+  // 30-day window with No Pong AU volume the response is typically 1-2
+  // pages (≤500 orders) so the call completes in under a second.
+  const allOrders = await cin7FetchAll(env, 'SalesOrders', { fields, where });
 
-  // Reshape to the same shape the live CIN7 path returned, so the rest of
-  // the pipeline (classifyDistributor + aggregateDistributorOrders) doesn't
-  // change.
-  return orderRows.map((o) => ({
-    id: o.id,
-    reference: o.reference,
-    status: o.status,
-    company: o.company,
-    firstName: o.first_name,
-    lastName: o.last_name,
-    createdDate: o.created_date,
-    dispatchedDate: o.dispatched_date, // null by construction (filter above)
-    deliveryDate: o.delivery_date,
-    lineItems: itemsByOrder.get(o.id) || [],
-  }));
+  // Filter to truly-open: no dispatchedDate, not voided. Pre-classifier so
+  // downstream aggregator only sees actionable orders.
+  return allOrders
+    .filter((o) => !o?.dispatchedDate)
+    .filter((o) => {
+      const status = String(o?.status || '').toUpperCase();
+      return !['VOID', 'VOIDED', 'CANCELLED'].includes(status);
+    })
+    // Reshape so deliveryDate flows from estimatedDeliveryDate (the actual
+    // ETD field per v2.2.27e probe). createdDate/dispatchedDate/lineItems
+    // are passed through as-is.
+    .map((o) => ({
+      id: o.id,
+      reference: o.reference,
+      status: o.status,
+      stage: o.stage,
+      company: o.company,
+      firstName: o.firstName,
+      lastName: o.lastName,
+      createdDate: o.createdDate,
+      dispatchedDate: o.dispatchedDate, // null by filter above
+      deliveryDate: o.estimatedDeliveryDate || null,
+      lineItems: Array.isArray(o.lineItems) ? o.lineItems : [],
+    }));
 }
 
 // ─── Aggregator ────────────────────────────────────────────────────────────
@@ -469,15 +448,11 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
     const cls = classifyDistributor(o);
     if (!cls) continue;
 
-    // Delivery date comes from the new first-class `delivery_date` column
-    // (migration 0007), which is sourced from CIN7's `estimatedDeliveryDate`
-    // API field — the same value shown as "Delivery Date (ETD)" in the
-    // CIN7 Sales Order edit UI. The v2.2.27d theory that createdDate ==
-    // ETD was wrong (createdDate is when the EDI was received; the two
-    // can be days apart, e.g. order 76910 had createdDate 2026-05-03 vs
-    // estimatedDeliveryDate 2026-05-10). Fallback to createdDate if the
-    // new column is null (transition period for rows synced before
-    // migration 0007 — a backfill closes the gap).
+    // Delivery date comes from CIN7's `estimatedDeliveryDate` API field
+    // (mapped to `deliveryDate` in fetchOpenSalesOrdersLive's reshape).
+    // This is the "Delivery Date (ETD)" shown in the CIN7 Sales Order
+    // edit UI. Fallback to createdDate only if estimatedDeliveryDate is
+    // missing (some non-EDI distributor orders don't set it).
     const deliveryDate = parseDeliveryDate(o?.deliveryDate || o?.createdDate);
     const mustShipBy = (cls.shipDayBefore && deliveryDate)
       ? previousBusinessDay(deliveryDate)
@@ -578,11 +553,13 @@ logisticsRoutes.get('/logistics', async (c) => {
   let stockValue = null;
   let stockError = null;
 
-  // SalesOrders comes from D1 (cron-refreshed every 15 minutes). Stock is
-  // a single live CIN7 endpoint call — one /Stock fetch with internal
-  // pagination, well within rate limits.
+  // v2.2.27g: live CIN7 fetch for SalesOrders instead of D1. See the
+  // fetchOpenSalesOrdersLive() docstring for the rationale. Two CIN7 calls
+  // per request total (SalesOrders + Stock), serialized to stay under the
+  // 3-calls-per-second cap. KV cache (60s) keeps total volume well under
+  // CIN7's 60-per-minute and 5000-per-day budgets.
   try {
-    openOrdersValue = await fetchOpenSalesOrdersFromD1(env);
+    openOrdersValue = await fetchOpenSalesOrdersLive(env);
   } catch (e) {
     openOrdersError = redactSecrets(e?.message || String(e));
   }
