@@ -2106,14 +2106,15 @@
 
       /* The giant emoji that sweeps across the screen. Fixed-position,
          starts off-screen-left, ends off-screen-right. 4-second sweep
-         loop, repeats for the full 15s. */
+         loop, repeats for the full 15s. Sits ABOVE the banner (z-index
+         higher) so it flies across the front, not hidden behind it. */
       .bday-milestone-sweep {
         position: fixed;
         left: -200px;
         top: 50%;
         transform: translateY(-50%);
         font-size: 200px;
-        z-index: 99998;
+        z-index: 100000;
         pointer-events: none;
         animation: bday-sweep-across 4s linear infinite;
         filter: drop-shadow(0 8px 24px rgba(0,0,0,0.5));
@@ -2778,9 +2779,13 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.29</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.30</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.30 &mdash; 19 May 2026 (Milestone sweeps now render in front of the banner)</h4>
+    <ul>
+      <li><strong>Z-index fix.</strong> The 🔥 / 🔨 / ⚡ / 🎯 emoji sweeps were rendering behind the milestone banner in v2.2.29 (sweep at <code>z-index: 99998</code>, banner at <code>99999</code>). Bumped <code>.bday-milestone-sweep</code> to <code>z-index: 100000</code> so the emoji flies across the front of the banner, not hidden behind it. The banner stays at <code>99999</code> so it still sits above everything else.</li>
+    </ul>
     <h4>v2.2.29 &mdash; 19 May 2026 (Birthday tab: order-count milestone celebrations 🔥🔨⚡🎯)</h4>
     <ul>
       <li><strong>Four new 15-second milestone celebrations</strong> on the 🎂 11th Birthday tab, triggered off the <em>All orders today</em> counter (<code>data.woo.total_orders_today</code>). When the count crosses each threshold for the first time today, a giant emoji sweeps across the screen, a centred banner bounce-ins, and themed confetti fires from both bottom corners for 15 seconds (same family of effects as the sell-out celebration).</li>
