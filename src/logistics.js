@@ -386,7 +386,10 @@ async function fetchOpenSalesOrdersLive(env, todayLocalDate) {
     'lineItems',
   ].join(',');
 
-  const where = `EstimatedDeliveryDate>='${todayLocalDate}' AND Status='APPROVED'`;
+  // CIN7 Omni v1 requires full ISO 8601 timestamps in `where` clauses —
+  // bare YYYY-MM-DD returns a 400 "not a valid date time" error. Sydney
+  // midnight today, expressed as UTC, captures "ETD on or after today".
+  const where = `EstimatedDeliveryDate>='${todayLocalDate}T00:00:00Z' AND Status='APPROVED'`;
 
   // cin7FetchAll paginates internally with 400ms inter-page sleep. For a
   // 30-day window with No Pong AU volume the response is typically 1-2

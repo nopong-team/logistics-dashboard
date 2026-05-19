@@ -1685,6 +1685,7 @@
     <button class="tab-btn"        data-tab="au-forecast"  onclick="switchAuTab('au-forecast')">Forecasting</button>
     <button class="tab-btn"        data-tab="au-packaging" onclick="switchAuTab('au-packaging')">Packaging</button>
     <button class="tab-btn"        data-tab="au-birthday"  onclick="switchAuTab('au-birthday')" style="background:#FF578A;color:#fff;font-weight:700;">🎂 11th Birthday</button>
+    <button class="tab-btn"        data-tab="au-logistics" onclick="switchAuTab('au-logistics')" style="background:#7B5DD3;color:#fff;font-weight:700;">🚚 Logistics</button>
   </nav>
 </div>
 
@@ -2308,14 +2309,399 @@
     </div>
   </div>
 
+  <!-- ═══════ TAB: LOGISTICS (warehouse TV) ═══════ -->
+  <div class="tab-panel" id="tab-au-logistics">
+    <style>
+      /* ── TV-fit layout: panel fills the viewport, no scroll. Mirrors
+         #tab-au-birthday but tuned for ops (not launch-day). ── */
+      #tab-au-logistics.active {
+        display: flex !important;
+        flex-direction: column;
+        gap: 10px;
+        height: calc(100vh - 200px);
+        min-height: 640px;
+        overflow: hidden;
+      }
+      #tab-au-logistics .log-hero {
+        background: linear-gradient(135deg, #7B5DD3 0%, #A488E0 100%);
+        color: #fff;
+        padding: 14px 22px;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        flex-shrink: 0;
+      }
+      #tab-au-logistics .log-hero h2 { margin: 0 0 4px 0; font-size: 24px; font-weight: 800; letter-spacing: -0.5px; }
+      #tab-au-logistics .log-hero .subtitle { font-size: 12px; opacity: 0.9; font-weight: 500; }
+      #tab-au-logistics .log-hero-stat {
+        text-align: right;
+      }
+      #tab-au-logistics .log-hero-stat-val {
+        font-size: 38px;
+        font-weight: 800;
+        line-height: 1;
+        font-variant-numeric: tabular-nums;
+      }
+      #tab-au-logistics .log-hero-stat-lbl {
+        font-size: 11px;
+        opacity: 0.85;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-top: 4px;
+      }
+
+      /* ── KPI row ── */
+      #tab-au-logistics .log-kpi-row {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 10px;
+        flex-shrink: 0;
+      }
+      #tab-au-logistics .log-card {
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 14px;
+        border-left: 3px solid #7B5DD3;
+      }
+      #tab-au-logistics .log-card-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        color: var(--text-secondary);
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        margin-bottom: 4px;
+      }
+      #tab-au-logistics .log-card-value {
+        font-size: 28px;
+        font-weight: 800;
+        line-height: 1;
+        font-variant-numeric: tabular-nums;
+        color: var(--text-primary);
+      }
+      #tab-au-logistics .log-card-sub {
+        font-size: 10px;
+        color: var(--text-secondary);
+        margin-top: 4px;
+        font-weight: 500;
+      }
+
+      /* ── Main two-column row ── */
+      #tab-au-logistics .log-main-row {
+        display: grid;
+        grid-template-columns: 1fr 1.4fr;
+        gap: 10px;
+        flex: 1;
+        min-height: 0;
+      }
+      #tab-au-logistics .log-col {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        min-height: 0;
+      }
+      #tab-au-logistics .log-section {
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      #tab-au-logistics .log-section.express { border-left: 3px solid #FF578A; }
+      #tab-au-logistics .log-section.wholesale { border-left: 3px solid #7B5DD3; }
+      #tab-au-logistics .log-section.cw { border-left: 3px solid #1F8B4C; }
+      #tab-au-logistics .log-section.other { border-left: 3px solid #5A89C2; }
+      #tab-au-logistics .log-section-title {
+        font-size: 13px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-shrink: 0;
+      }
+      #tab-au-logistics .log-section-title .count-pill {
+        background: var(--bg-soft);
+        color: var(--text-secondary);
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-weight: 600;
+      }
+      #tab-au-logistics .log-section-body {
+        overflow-y: auto;
+        flex: 1;
+        min-height: 0;
+      }
+
+      /* ── Order cards ── */
+      #tab-au-logistics .log-order {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        margin-bottom: 6px;
+        background: #fff;
+      }
+      #tab-au-logistics .log-order.past-due {
+        border-color: #E53935;
+        background: #FFF5F5;
+      }
+      #tab-au-logistics .log-order-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+      #tab-au-logistics .log-order-label {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--text-primary);
+      }
+      #tab-au-logistics .log-order-ref {
+        font-size: 10px;
+        color: var(--text-secondary);
+        font-variant-numeric: tabular-nums;
+      }
+      #tab-au-logistics .log-order-date {
+        font-size: 11px;
+        color: var(--text-secondary);
+        margin-bottom: 6px;
+        font-variant-numeric: tabular-nums;
+      }
+      #tab-au-logistics .log-order.past-due .log-order-date {
+        color: #C62828;
+        font-weight: 700;
+      }
+      #tab-au-logistics .log-line {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        padding: 2px 0;
+      }
+      #tab-au-logistics .log-line .log-line-tick {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
+        flex-shrink: 0;
+        font-size: 11px;
+        font-weight: 800;
+      }
+      #tab-au-logistics .log-line .log-line-tick.ok {
+        background: #1F8B4C;
+        color: #fff;
+      }
+      #tab-au-logistics .log-line .log-line-tick.gap {
+        background: #FFF1F1;
+        color: #C62828;
+        border: 1px solid #E53935;
+        font-size: 9px;
+        width: auto;
+        padding: 0 5px;
+        font-weight: 700;
+      }
+      #tab-au-logistics .log-line-sku {
+        font-family: ui-monospace, monospace;
+        font-size: 10px;
+        color: var(--text-secondary);
+        font-weight: 600;
+      }
+      #tab-au-logistics .log-line-name {
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #tab-au-logistics .log-empty {
+        font-size: 12px;
+        color: var(--text-secondary);
+        text-align: center;
+        padding: 12px;
+        font-style: italic;
+      }
+      #tab-au-logistics .log-alert-row {
+        font-size: 11px;
+        padding: 4px 0;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      #tab-au-logistics .log-alert-row:last-child { border-bottom: none; }
+      #tab-au-logistics .log-alert-row .ord { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+      /* ── Meta bar ── */
+      #tab-au-logistics .log-meta {
+        background: var(--bg-soft);
+        padding: 8px 14px;
+        border-radius: 6px;
+        font-size: 11px;
+        color: var(--text-secondary);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        flex-shrink: 0;
+      }
+      #tab-au-logistics .log-refresh-btn {
+        background: #7B5DD3;
+        color: #fff;
+        border: none;
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #tab-au-logistics .log-refresh-btn:hover { background: #6648C0; }
+      #tab-au-logistics .log-refresh-btn:disabled { background: #ECECEC; color: #999; cursor: wait; }
+      #tab-au-logistics .log-error {
+        background: #FFF5F5;
+        border: 1px solid #E53935;
+        color: #C62828;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+      }
+
+      @media (max-width: 1200px) {
+        #tab-au-logistics.active { height: auto; overflow: visible; }
+        #tab-au-logistics .log-kpi-row { grid-template-columns: repeat(3, 1fr); }
+        #tab-au-logistics .log-main-row { grid-template-columns: 1fr; }
+      }
+    </style>
+
+    <!-- Hero strip -->
+    <div class="log-hero">
+      <div>
+        <h2>🚚 Logistics — Open Orders Watch</h2>
+        <div class="subtitle">Coles + Woolworths + other CIN7 distributors · Live from CIN7 + ShipStation</div>
+      </div>
+      <div class="log-hero-stat">
+        <div class="log-hero-stat-val" id="log-hero-queue">—</div>
+        <div class="log-hero-stat-lbl">ShipStation open queue</div>
+      </div>
+    </div>
+
+    <!-- ShipStation KPI strip -->
+    <div class="log-kpi-row">
+      <div class="log-card">
+        <div class="log-card-label">Open queue</div>
+        <div class="log-card-value" id="log-kpi-open">—</div>
+        <div class="log-card-sub">Awaiting shipment</div>
+      </div>
+      <div class="log-card">
+        <div class="log-card-label">Shipped today</div>
+        <div class="log-card-value" id="log-kpi-shipped-orders">—</div>
+        <div class="log-card-sub">Orders count</div>
+      </div>
+      <div class="log-card">
+        <div class="log-card-label">Items today</div>
+        <div class="log-card-value" id="log-kpi-shipped-items">—</div>
+        <div class="log-card-sub">Total items shipped</div>
+      </div>
+      <div class="log-card">
+        <div class="log-card-label">Express / Intl</div>
+        <div class="log-card-value" id="log-kpi-express">—</div>
+        <div class="log-card-sub">Open orders</div>
+      </div>
+      <div class="log-card">
+        <div class="log-card-label">Wholesale</div>
+        <div class="log-card-value" id="log-kpi-wholesale">—</div>
+        <div class="log-card-sub">Open orders</div>
+      </div>
+    </div>
+
+    <!-- Main two-column row -->
+    <div class="log-main-row">
+      <!-- Left column: ShipStation alerts -->
+      <div class="log-col">
+        <div class="log-section express">
+          <div class="log-section-title">
+            ⚠️ Express / International — still open
+            <span class="count-pill" id="log-express-count">0</span>
+          </div>
+          <div class="log-section-body" id="log-express-list">
+            <div class="log-empty">Loading…</div>
+          </div>
+        </div>
+        <div class="log-section wholesale">
+          <div class="log-section-title">
+            📦 Wholesale — still open
+            <span class="count-pill" id="log-wholesale-count">0</span>
+          </div>
+          <div class="log-section-body" id="log-wholesale-list">
+            <div class="log-empty">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right column: Distributor watch -->
+      <div class="log-col">
+        <div class="log-section cw">
+          <div class="log-section-title">
+            🛒 Coles + Woolworths
+            <span class="count-pill" id="log-cw-count">0</span>
+          </div>
+          <div class="log-section-body" id="log-cw-list">
+            <div class="log-empty">Loading…</div>
+          </div>
+        </div>
+        <div class="log-section other">
+          <div class="log-section-title">
+            🏬 Other distributors
+            <span class="count-pill" id="log-other-count">0</span>
+          </div>
+          <div class="log-section-body" id="log-other-list">
+            <div class="log-empty">Loading…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Meta bar -->
+    <div class="log-meta">
+      <span>
+        Last updated: <span id="log-last-updated">—</span>
+      </span>
+      <span>
+        Auto-refresh: <span id="log-refresh-cadence">60 s</span>
+        <button class="log-refresh-btn" id="log-refresh-btn" onclick="logisticsRefreshNow()" style="margin-left:10px;">Refresh now</button>
+      </span>
+    </div>
+  </div>
+
 </main>
 
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.27h</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.28</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.28 &mdash; 19 May 2026 (🚚 Logistics tab UI &mdash; Ship 2 of 2)</h4>
+    <ul>
+      <li><strong>New <code>🚚 Logistics</code> tab</strong> in the AU tab bar (purple, between 🎂 11th Birthday and the existing tabs). TV-fit 16:9 no-scroll layout sized for the warehouse TV.</li>
+      <li><strong>Hero strip</strong> with a big open-queue counter on the right.</li>
+      <li><strong>ShipStation KPI strip</strong> (5 cards): Open queue · Shipped today (orders) · Shipped today (items) · Express/Intl open · Wholesale open.</li>
+      <li><strong>Two-column main row.</strong> Left: <em>Express/Intl still open</em> (pink stripe) + <em>Wholesale still open</em> (purple stripe), both with the order list inline. Right: <em>Coles + Woolworths</em> (green stripe) + <em>Other distributors</em> (blue stripe), each with order cards showing distributor label · reference · must-ship-by date · per-line tick (green ✓) or gap (red "X / Y cartons").</li>
+      <li><strong>Past-due rows go red</strong> (light red background + red border + "PAST DUE" suffix on the distributor label + red bolded date line).</li>
+      <li><strong>60-second auto-refresh</strong> while the tab is active; pauses when you switch away.</li>
+      <li><strong>Refresh-now button</strong> in the meta bar for immediate updates.</li>
+      <li>Backend was Ship 1 (v2.2.27 through v2.2.27i — see entries below for that iteration). This is Ship 2 closing out the workstream.</li>
+    </ul>
+    <h4>v2.2.27i &mdash; 19 May 2026 (Hotfix: CIN7 where clause needs full ISO 8601 timestamp)</h4>
+    <ul>
+      <li><strong>Fixed CIN7 400 "not a valid date time" error</strong> in v2.2.27h's <code>EstimatedDeliveryDate&gt;='2026-05-19'</code> where clause. CIN7 Omni v1 requires <code>yyyy-MM-ddTHH:mm:ssZ</code> format, not bare YYYY-MM-DD. Now passes <code>${todayLocalDate}T00:00:00Z</code> (Sydney midnight today, expressed in UTC).</li>
+    </ul>
     <h4>v2.2.27h &mdash; 19 May 2026 (Logistics: filter by EstimatedDeliveryDate &gt;= today)</h4>
     <ul>
       <li><strong>Per Melanie:</strong> "just look for orders with an estimated due date of today or in the future." Server-side <code>where</code> in <code>fetchOpenSalesOrdersLive()</code> simplified from <code>CreatedDate&gt;='&lt;30 days ago&gt;'</code> to <code>EstimatedDeliveryDate&gt;='&lt;today Sydney&gt;'</code>. Much cleaner than chasing status + stage + dispatchedDate semantics &mdash; the warehouse only acts on orders whose ETD is upcoming, anything overdue is a separate ops conversation. Client-side <code>dispatchedDate IS NULL</code> filter retained to hide in-transit orders that no longer need warehouse action. <code>OPEN_ORDER_WINDOW_DAYS</code> constant dropped &mdash; no longer needed.</li>
@@ -6749,6 +7135,9 @@ function switchAuTab(t) {
   if (t === 'au-birthday' && typeof bdayOnTabActivate === 'function') bdayOnTabActivate();
   // Pause the birthday refresh when leaving the tab — saves API calls.
   if (t !== 'au-birthday' && typeof bdayOnTabDeactivate === 'function') bdayOnTabDeactivate();
+  // Logistics tab — same pattern: activate to fetch + schedule, deactivate to pause.
+  if (t === 'au-logistics' && typeof logisticsOnTabActivate === 'function') logisticsOnTabActivate();
+  if (t !== 'au-logistics' && typeof logisticsOnTabDeactivate === 'function') logisticsOnTabDeactivate();
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -7139,6 +7528,169 @@ function _bdayRenderHourlyChart(hourlyBuckets) {
       },
     },
   });
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Logistics tab (v2.2.28) — warehouse-TV view of open distributor orders.
+   Fetches /api/au/logistics, renders ShipStation KPIs + alert cards + two
+   distributor sections (Coles+Woolies, Other). 60-second auto-refresh
+   when the tab is active; pauses on tab deactivate.
+   ════════════════════════════════════════════════════════════════════════ */
+let _logisticsLastPayload = null;
+let _logisticsRefreshTimer = null;
+const LOG_REFRESH_MS = 60 * 1000;
+
+function logisticsOnTabActivate() {
+  logisticsLoad();
+  _scheduleLogisticsRefresh();
+}
+
+function logisticsOnTabDeactivate() {
+  if (_logisticsRefreshTimer) { clearTimeout(_logisticsRefreshTimer); _logisticsRefreshTimer = null; }
+}
+
+function _scheduleLogisticsRefresh() {
+  if (_logisticsRefreshTimer) clearTimeout(_logisticsRefreshTimer);
+  _logisticsRefreshTimer = setTimeout(() => {
+    logisticsLoad().finally(_scheduleLogisticsRefresh);
+  }, LOG_REFRESH_MS);
+}
+
+function logisticsRefreshNow() {
+  const btn = document.getElementById('log-refresh-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  logisticsLoad({ force: true }).finally(() => {
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh now'; }
+    _scheduleLogisticsRefresh();
+  });
+}
+
+async function logisticsLoad({ force = false } = {}) {
+  try {
+    const url = '/api/au/logistics' + (force ? '?refresh=1' : '');
+    const resp = await fetch(url, { credentials: 'include' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    _logisticsLastPayload = data;
+    _logisticsRender(data);
+  } catch (e) {
+    console.warn('logistics load failed', e);
+    const list = document.getElementById('log-cw-list');
+    if (list) list.innerHTML = `<div class="log-error">Couldn't load: ${_logEscape(e?.message || String(e))}</div>`;
+  }
+}
+
+function _logEscape(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+function _logFmt(n) { return n == null ? '—' : Number(n).toLocaleString('en-AU'); }
+
+function _logisticsRender(data) {
+  const ss = data?.shipstation || {};
+  // Hero + KPI cards
+  document.getElementById('log-hero-queue').textContent = ss.connected ? _logFmt(ss.openOrders) : '—';
+  document.getElementById('log-kpi-open').textContent = ss.connected ? _logFmt(ss.openOrders) : '—';
+  document.getElementById('log-kpi-shipped-orders').textContent = ss.connected ? _logFmt(ss.shippedTodayOrders) : '—';
+  document.getElementById('log-kpi-shipped-items').textContent = ss.connected ? _logFmt(ss.shippedTodayItems) : '—';
+  document.getElementById('log-kpi-express').textContent = ss.connected ? _logFmt(ss.expressIntlOpen) : '—';
+  document.getElementById('log-kpi-wholesale').textContent = ss.connected ? _logFmt(ss.wholesaleOpen) : '—';
+
+  // Express / International alert list
+  _logRenderAlertList({
+    listId: 'log-express-list',
+    countId: 'log-express-count',
+    connected: ss.connected,
+    summaries: ss.expressIntlOpenOrders || [],
+    emptyMsg: ss.connected ? '✅ No express or international orders waiting' : 'ShipStation not connected',
+    rowFor: (o) => `
+      <div class="log-alert-row">
+        <span><span class="ord">#${_logEscape(o.order_number)}</span> · ${_logEscape(o.ship_to_country || '')} · ${_logEscape(o.service || '')}</span>
+        <span style="font-size:9px;font-weight:700;color:#FF578A;">${(o.flags || []).map(_logEscape).join(' ')}</span>
+      </div>`,
+  });
+
+  // Wholesale alert list
+  _logRenderAlertList({
+    listId: 'log-wholesale-list',
+    countId: 'log-wholesale-count',
+    connected: ss.connected,
+    summaries: ss.wholesaleOpenOrders || [],
+    emptyMsg: ss.connected ? '✅ No wholesale orders in the ShipStation queue' : 'ShipStation not connected',
+    rowFor: (o) => `
+      <div class="log-alert-row">
+        <span><span class="ord">#${_logEscape(o.order_number)}</span> · ${_logEscape(o.ship_to_country || '')} · ${_logEscape(o.service || '')}</span>
+        <span style="font-size:9px;color:var(--text-secondary);">${(o.wholesale_skus || []).slice(0,3).map(_logEscape).join(', ')}${(o.wholesale_skus || []).length > 3 ? '…' : ''}</span>
+      </div>`,
+  });
+
+  // Distributor sections
+  const dist = data?.distributors || {};
+  const cw = dist.colesWoolies || [];
+  const other = dist.otherDistributors || [];
+  document.getElementById('log-cw-count').textContent = cw.length;
+  document.getElementById('log-other-count').textContent = other.length;
+  _logRenderDistributorList('log-cw-list', cw, '✅ No open Coles or Woolworths orders right now');
+  _logRenderDistributorList('log-other-list', other, '✅ No open distributor orders right now');
+
+  // Meta bar
+  if (dist.error) {
+    const list = document.getElementById('log-cw-list');
+    if (list) list.innerHTML = `<div class="log-error">CIN7 error: ${_logEscape(dist.error)}</div>`;
+  }
+  const stamp = new Date(data?.generated_at_iso || Date.now());
+  document.getElementById('log-last-updated').textContent = stamp.toLocaleTimeString('en-AU', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+}
+
+function _logRenderAlertList({ listId, countId, connected, summaries, emptyMsg, rowFor }) {
+  const list = document.getElementById(listId);
+  const count = document.getElementById(countId);
+  if (count) count.textContent = (summaries || []).length;
+  if (!list) return;
+  if (!connected) {
+    list.innerHTML = `<div class="log-empty">${_logEscape(emptyMsg)}</div>`;
+    return;
+  }
+  if (!summaries || summaries.length === 0) {
+    list.innerHTML = `<div class="log-empty">${_logEscape(emptyMsg)}</div>`;
+    return;
+  }
+  list.innerHTML = summaries.map(rowFor).join('');
+}
+
+function _logRenderDistributorList(listId, orders, emptyMsg) {
+  const list = document.getElementById(listId);
+  if (!list) return;
+  if (!orders || orders.length === 0) {
+    list.innerHTML = `<div class="log-empty">${_logEscape(emptyMsg)}</div>`;
+    return;
+  }
+  list.innerHTML = orders.map((o) => {
+    const cls = o.is_past_due ? 'log-order past-due' : 'log-order';
+    const dateLine = o.must_ship_by
+      ? `Must ship by ${_logEscape(o.must_ship_by)}${o.delivery_date && o.delivery_date !== o.must_ship_by ? ` &middot; delivery ${_logEscape(o.delivery_date)}` : ''}`
+      : (o.delivery_date ? `Delivery ${_logEscape(o.delivery_date)}` : 'No delivery date');
+    const lineRows = (o.line_items || []).map((li) => {
+      const tick = li.is_fulfillable
+        ? `<span class="log-line-tick ok">✓</span>`
+        : `<span class="log-line-tick gap">${_logEscape(li.gap_display)}</span>`;
+      return `
+        <div class="log-line">
+          ${tick}
+          <span class="log-line-sku">${_logEscape(li.sku || '')}</span>
+          <span class="log-line-name">${_logEscape(li.name || '')}</span>
+          ${li.is_fulfillable ? `<span style="font-size:10px;color:var(--text-secondary);font-variant-numeric:tabular-nums;">${_logEscape(li.gap_display)}</span>` : ''}
+        </div>`;
+    }).join('');
+    return `
+      <div class="${cls}">
+        <div class="log-order-head">
+          <span class="log-order-label">${_logEscape(o.distributor_label || o.company || '—')}${o.is_past_due ? ' · PAST DUE' : ''}</span>
+          <span class="log-order-ref">${_logEscape(o.reference || '')}</span>
+        </div>
+        <div class="log-order-date">${dateLine}</div>
+        ${lineRows || '<div class="log-empty" style="padding:4px 0;">No line items</div>'}
+      </div>`;
+  }).join('');
 }
 
 // Tracks which months have had their CIN7 channels (col/woo2/dist + refunds)
