@@ -2313,9 +2313,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.27d</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.27e</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.27e &mdash; 19 May 2026 (Logistics endpoint: live-CIN7 status probe + zero-qty filter)</h4>
+    <ul>
+      <li><strong>Diagnosed why we're seeing weeks-old "open" orders.</strong> The <code>json_extract(raw_json, '$.dispatchedDate') IS NULL</code> filter relies on raw_json being populated &mdash; but raw_json is empty in D1 for most rows, so <code>json_extract(NULL, ...)</code> returns NULL, which IS NULL, which passes the filter for every row. So we're effectively showing all APPROVED orders regardless of dispatch state. Also: Melanie's expected open filter is <code>status = 'Open' AND stage = 'Processing'</code>, but the current SQL has <code>status = 'APPROVED'</code> &mdash; likely reading the wrong CIN7 field. A proper fix needs to promote <code>dispatchedDate</code> + <code>stage</code> to first-class D1 columns (migration + cron change + backfill), but first we need to see exactly what CIN7 returns.</li>
+      <li><strong>Added <code>?debug-live=&lt;orderId&gt;</code> probe.</strong> One-shot live CIN7 SalesOrders fetch by id with no fields filter (returns ALL fields). Surfaces all top-level keys plus the status-ish and date-ish ones explicitly. Lets us inspect a single order to find the right filter fields without a full migration churn. Costs 1 CIN7 call, well within rate limits.</li>
+      <li><strong>Zero-quantity line items now filtered out.</strong> Two of the "stale" orders had <code>qty: 0</code> line items (zeroed by the retailer post-confirmation) that rendered as <code>"0 / 0 cartons"</code> &mdash; visual noise. New filter drops any line item where <code>qty &lt;= 0</code> at the aggregator level.</li>
+    </ul>
     <h4>v2.2.27d &mdash; 19 May 2026 (Logistics endpoint: EDI delivery date = createdDate)</h4>
     <ul>
       <li><strong>Use <code>createdDate</code> as the delivery date for Coles + Woolies orders.</strong> The "Delivery Date (ETD)" Melanie pointed to in CIN7's UI lives there because EDI intake maps the EDI's "start date" (which IS the requested delivery date) into the order's <code>createdDate</code> field. No separate API field to chase &mdash; we already have it. Per-retailer logic: <code>cls.group === 'colesWoolies'</code> uses <code>o.createdDate</code> as the delivery source; other distributors keep the prior <code>deliveryDate</code> path (still null, but sorted by reference so it doesn't matter for them).</li>

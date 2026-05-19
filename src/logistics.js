@@ -41,6 +41,7 @@ import {
   fetchStockBySku,
   attributeCin7Order,
   normalizeAuSku,
+  cin7Fetch,
 } from './cin7.js';
 import { buildShipStationSnapshot } from './shipstation.js';
 import { redactSecrets } from './redact.js';
@@ -488,10 +489,13 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
     const isPastDue = mustShipBy ? dateBefore(mustShipBy, todayLocalDate) : false;
     if (isPastDue) pastDueCount++;
 
-    // Line items: filter children (parentId > 0), then analyse each.
+    // Line items: filter children (parentId > 0) and zero-qty rows (zeroed-
+    // out by the retailer post-confirmation — they're not real picks and
+    // would render as "0 / 0 cartons" on the TV), then analyse each.
     const rawLines = Array.isArray(o?.lineItems) ? o.lineItems : [];
     const lines = rawLines
       .filter((li) => (Number(li?.parentId) || 0) === 0)
+      .filter((li) => (Number(li?.qty ?? li?.quantity ?? 0) || 0) > 0)
       .map((li) => analyseLineItem(li, stockBySku));
 
     const allFulfillable = lines.length > 0 && lines.every((l) => l.is_fulfillable);
@@ -545,10 +549,53 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
 
 // ─── Endpoint ──────────────────────────────────────────────────────────────
 
+/**
+ * Live one-shot CIN7 fetch for a single SalesOrder by id. Used to inspect
+ * the full field set CIN7 returns — including any `stage` / `currentStatus` /
+ * `dispatchedDate` fields the cron's SALES_FIELDS whitelist isn't currently
+ * capturing. Triggered via ?debug-live=<id> on /api/au/logistics.
+ *
+ * Costs 1 CIN7 API call — well within rate limits. Removed once we've
+ * identified the right filter fields.
+ */
+async function fetchOneOrderLive(env, orderId) {
+  if (!env.CIN7_USERNAME || !env.CIN7_CONNECTION_KEY) {
+    return { error: 'CIN7 credentials not configured.' };
+  }
+  try {
+    // No `fields` param = CIN7 returns ALL fields for the order.
+    const rows = await cin7Fetch(env, 'SalesOrders', { where: `Id=${Number(orderId)}` });
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return { error: `No order found with id ${orderId}.` };
+    }
+    const o = rows[0];
+    return {
+      order_id: o.id,
+      reference: o.reference,
+      company: o.company,
+      all_keys: Object.keys(o),
+      // Surface status-ish + date-ish fields explicitly.
+      status_fields: Object.fromEntries(
+        Object.entries(o).filter(([k]) => /status|stage|state|phase/i.test(k)),
+      ),
+      date_fields: Object.fromEntries(
+        Object.entries(o).filter(([k]) => /date|time|eta|deliv|due|ship|despatch|dispatch/i.test(k)),
+      ),
+    };
+  } catch (e) {
+    return { error: redactSecrets(e?.message || String(e)) };
+  }
+}
+
 logisticsRoutes.get('/logistics', async (c) => {
   const env = c.env;
   const forceRefresh = c.req.query('refresh') === '1' || c.req.query('refresh') === 'true';
+  const debugLiveId = c.req.query('debug-live');
   const cache = env.CACHE;
+
+  if (debugLiveId) {
+    return c.json(await fetchOneOrderLive(env, debugLiveId));
+  }
 
   if (!forceRefresh && cache) {
     const cached = await cache.get(KV_KEY, 'json');
