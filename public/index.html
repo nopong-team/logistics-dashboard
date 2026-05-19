@@ -2041,7 +2041,7 @@
     <!-- Orders-per-hour chart -->
     <div class="chart-card" style="margin-top:14px;">
       <div class="chart-card-header">
-        <div class="chart-card-title">Orders per hour today (all orders) — 7am–5pm window highlighted</div>
+        <div class="chart-card-title">Orders per hour — launch window (7am–7pm AEST) — drop hours 7am–5pm highlighted</div>
       </div>
       <div style="position:relative; height:240px; width:100%;">
         <canvas id="bdayHourlyChart"></canvas>
@@ -2094,9 +2094,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.22</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.23</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.23 &mdash; 19 May 2026 (Birthday tab: strict-today Woo window + 12-bar 7am&ndash;7pm chart)</h4>
+    <ul>
+      <li><strong>Woo <code>after</code> filter switched to naive Sydney-local.</strong> v2.2.22 passed a UTC-flavoured ISO (<code>2026-05-19T00:00:00.000Z</code>) to WC's <code>after</code> filter. WC reads <code>after</code> as <em>naive store-local</em> time even when a <code>Z</code> is appended &mdash; so the filter was actually starting from "May 18 at 14:00 Sydney" (yesterday afternoon) instead of Sydney midnight today. Net effect: <code>total_orders_today: 230</code> at 11am Sydney with phantom counts in future hours &mdash; those were yesterday's late orders leaking through. Same naive-local convention is already in <code>src/admin.js</code>'s backfill watermarks. Fix: pass <code>${localDate}T00:00:00</code> (naive) to <code>fetchOrdersSince</code>. UTC equivalent still surfaced in the response's <code>window.from_iso</code> block for debugging. KV TTL is 60s so cached buggy payloads age out within a minute.</li>
+      <li><strong>Hourly chart trimmed to the launch window (12 bars, 7am&ndash;7pm AEST).</strong> 24-bar 0&ndash;23 view was hard to read &mdash; lots of empty pre-7am noise and overnight tails. Chart now shows the launch window only: 12 bars labelled <em>7am, 8am, ..., 6pm</em>, drop hours 7am&ndash;5pm in No Pong pink, post-drop bar (6pm) in grey. Backend still returns the full 24-bucket payload so we can widen the window later without a Worker redeploy &mdash; just a frontend slice change. <code>total_orders_today</code> on the cards continues to count <em>every</em> order since Sydney midnight regardless of the chart slice, so pre-7am stragglers are still in the headline number.</li>
+      <li><strong>Verify after deploy.</strong> Hit <code>https://logistics.apps.nopong.com/api/au/birthday-launch?refresh=1</code> and look at <code>orders_per_hour</code> &mdash; hours past the current Sydney clock-time should be <code>0</code>. On the dashboard, the bar chart should have 12 bars from 7am to 6pm.</li>
+    </ul>
     <h4>v2.2.22 &mdash; 19 May 2026 (ShipStation client swapped to v1 &mdash; basic auth + API Key/Secret pair)</h4>
     <ul>
       <li><strong>Fix: ShipStation auth scheme corrected.</strong> v2.2.21 built the ShipStation client against API v2 (single API key, <code>API-Key</code> header, <code>api.shipstation.com</code>). Melanie confirmed on launch-eve that No Pong's ShipStation account uses v1 instead — HTTP Basic auth with both an API Key and an API Secret, against <code>ssapi.shipstation.com</code>. Without the fix, every ShipStation call would have 401'd on Thursday.</li>
@@ -6625,11 +6631,24 @@ function _bdayUpdateCountdown() {
 function _bdayRenderHourlyChart(hourlyBuckets) {
   const canvas = document.getElementById('bdayHourlyChart');
   if (!canvas || typeof Chart === 'undefined') return;
-  const labels = hourlyBuckets.map(b => `${b.hour}:00`);
-  const data   = hourlyBuckets.map(b => b.count);
-  // Highlight the 7am–5pm drop window with the No Pong pink, hours outside
-  // that window dim grey.
-  const colours = hourlyBuckets.map(b => (b.hour >= 7 && b.hour <= 17) ? '#FF578A' : '#D0D0D0');
+  // Narrow to the launch window — 7am through 7pm AEST (12 bars: hours
+  // 7,8,...,18). Pre-7am and post-7pm orders still count toward
+  // total_orders_today on the card; this chart is the launch-window view.
+  // Backend still returns the full 24-bucket payload so we can widen the
+  // window later without a Worker redeploy.
+  const launchBuckets = hourlyBuckets.filter(b => b.hour >= 7 && b.hour <= 18);
+  // Hour label formatter — "7am, 8am, 12pm, 1pm, 6pm" reads better than 7:00.
+  const fmtHour = (h) => {
+    if (h === 0)  return '12am';
+    if (h === 12) return '12pm';
+    return h < 12 ? `${h}am` : `${h - 12}pm`;
+  };
+  const labels = launchBuckets.map(b => fmtHour(b.hour));
+  const data   = launchBuckets.map(b => b.count);
+  // Drops happen 7am–5pm (hour 7 through hour 17 inclusive — bar 17 captures
+  // 5–6pm orders, which is the last drop's window). Bar 18 (6–7pm) is the
+  // post-drop tail and shows in grey.
+  const colours = launchBuckets.map(b => (b.hour >= 7 && b.hour <= 17) ? '#FF578A' : '#D0D0D0');
   if (_bdayChart) {
     _bdayChart.data.labels = labels;
     _bdayChart.data.datasets[0].data = data;

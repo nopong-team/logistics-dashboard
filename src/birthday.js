@@ -176,15 +176,26 @@ async function wooFetch(env, endpoint, params = {}) {
 }
 
 /**
- * Fetch every Woo order with date_created >= `afterIsoUtc` (paginated).
- * `afterIsoUtc` is a UTC ISO string — we convert to the WC `after` filter
- * format (which accepts ISO 8601). Stops at MAX_PAGES as a safety belt.
+ * Fetch every Woo order with date_created >= `afterNaiveLocal` (paginated).
+ *
+ * WooCommerce's REST API takes `after` as an ISO 8601 string BUT interprets
+ * it as naive store-local time — even if a `Z` is appended, the offset is
+ * ignored. (Cross-referenced against src/admin.js's `runBackfillChunk`,
+ * which also uses naive-local watermarks like `1970-01-01T00:00:00`.)
+ *
+ * So `afterNaiveLocal` must be a naive ISO string in the store's timezone
+ * (Australia/Sydney for AU). Passing a UTC-flavoured `...Z` here makes Woo
+ * read it as the same wall-clock moment in Sydney, which is wrong by the
+ * AEST/AEDT offset — produces a window that starts 10–11 hours earlier than
+ * intended and leaks the previous day's late-afternoon orders into "today".
+ *
+ * Stops at MAX_PAGES as a safety belt.
  */
-async function fetchOrdersSince(env, afterIsoUtc, { perPage = 100, maxPages = 10 } = {}) {
+async function fetchOrdersSince(env, afterNaiveLocal, { perPage = 100, maxPages = 10 } = {}) {
   const all = [];
   for (let page = 1; page <= maxPages; page++) {
     const { data, totalPages } = await wooFetch(env, '/orders', {
-      after: afterIsoUtc,
+      after: afterNaiveLocal,
       status: 'any',
       per_page: perPage,
       page,
@@ -292,13 +303,17 @@ birthdayRoutes.get('/birthday-launch', async (c) => {
 
   const now = new Date();
   const syd = sydneyParts(now);
+  // Sydney midnight today, in naive-local format (no Z, no offset) — see
+  // fetchOrdersSince header for why WC needs this and not a UTC ISO.
+  const todayStartLocalNaive = `${syd.localDate}T00:00:00`;
+  // UTC equivalent — surfaced in the response's `window` block for debugging.
   const todayStartUtcIso = sydneyToUtcIso(syd.localDate, '00:00:00', syd.tzOffsetMinutes);
   const drop = computeNextDrop(now);
 
   // Run Woo orders + Woo product (soap lifetime) + ShipStation concurrently.
   // All three are independent reads against independent upstreams.
   const [ordersResult, soapLifetimeResult, shipstationSnap] = await Promise.allSettled([
-    fetchOrdersSince(env, todayStartUtcIso),
+    fetchOrdersSince(env, todayStartLocalNaive),
     fetchLifetimeSoldForSku(env, SOAP_SKU),
     buildShipStationSnapshot(env, {
       localDate: syd.localDate,
