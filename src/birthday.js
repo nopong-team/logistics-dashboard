@@ -209,29 +209,48 @@ async function fetchOrdersSince(env, afterNaiveLocal, { perPage = 100, maxPages 
 }
 
 /**
- * Read Woo's product info for a single SKU — used for two birthday-tab
+ * Read Woo's product info for a single SKU — used for three birthday-tab
  * needs:
  *   - lifetime sold (`total_sales`) for the soap stock-tracker card
  *   - featured image URL for the TV view thumbnails (v2.2.25)
+ *   - stock_quantity for the "X in stock" readout + sell-out confetti
+ *     trigger (v2.2.26)
  *
  * Woo's product object carries `total_sales` which increments as orders
  * move into processing / completed status — close enough to "lifetime sold"
  * for a stock-tracker read-out (Melanie's call on 2026-05-19). The
  * `images` array holds the gallery; we take `images[0].src` as the
- * featured image.
+ * featured image. `stock_quantity` is only meaningful when `manage_stock`
+ * is true; we pass both through so the frontend can render "not tracked"
+ * vs "0 left" appropriately.
  *
- * Returns { totalSales, imageUrl }. Both default to safe values if the
- * SKU isn't found or the product has no image.
+ * Returns { totalSales, imageUrl, stockQuantity, stockStatus, manageStock }.
+ * All default to safe values if the SKU isn't found.
  */
 async function fetchWooProductInfo(env, sku) {
   const { data } = await wooFetch(env, '/products', { sku, per_page: 5 });
-  if (!Array.isArray(data) || data.length === 0) return { totalSales: 0, imageUrl: null };
+  if (!Array.isArray(data) || data.length === 0) {
+    return { totalSales: 0, imageUrl: null, stockQuantity: null, stockStatus: null, manageStock: false };
+  }
   // Sum total_sales across matches (covers variations / multi-product SKU collisions).
   const totalSales = data.reduce((acc, p) => acc + Number(p?.total_sales || 0), 0);
   // First product with a non-empty image wins. Most cases there's only one
   // match anyway; this is just defensive.
   const imageUrl = data.find(p => p?.images?.[0]?.src)?.images?.[0]?.src || null;
-  return { totalSales, imageUrl };
+  // Stock fields — use the first product's values. If multiple match (rare),
+  // sum stock_quantity so a parent + variant collision doesn't hide stock.
+  const primary = data[0] || {};
+  const manageStock = !!primary.manage_stock;
+  const stockStatus = primary.stock_status || null;
+  // Sum stock_quantity across managed products (null values skipped). If
+  // none of the matches manage stock, stockQuantity is null (= not tracked).
+  let stockQuantity = null;
+  for (const p of data) {
+    if (p?.manage_stock && p?.stock_quantity != null) {
+      stockQuantity = (stockQuantity || 0) + Number(p.stock_quantity);
+    }
+  }
+  return { totalSales, imageUrl, stockQuantity, stockStatus, manageStock };
 }
 
 // ─── Order analysis ────────────────────────────────────────────────────────
@@ -351,15 +370,12 @@ birthdayRoutes.get('/birthday-launch', async (c) => {
   // Soap + tin product info — soft-degrade: if either errors, fall back to
   // zeros / null image and surface the error message rather than blowing up
   // the whole tab.
-  const soapInfo = soapInfoResult.status === 'fulfilled'
-    ? soapInfoResult.value
-    : { totalSales: 0, imageUrl: null };
+  const FALLBACK_INFO = { totalSales: 0, imageUrl: null, stockQuantity: null, stockStatus: null, manageStock: false };
+  const soapInfo = soapInfoResult.status === 'fulfilled' ? soapInfoResult.value : FALLBACK_INFO;
   const soapLifetimeError = soapInfoResult.status === 'rejected'
     ? redactSecrets(soapInfoResult.reason?.message || String(soapInfoResult.reason))
     : null;
-  const tinInfo = tinInfoResult.status === 'fulfilled'
-    ? tinInfoResult.value
-    : { totalSales: 0, imageUrl: null };
+  const tinInfo = tinInfoResult.status === 'fulfilled' ? tinInfoResult.value : FALLBACK_INFO;
   const tinInfoError = tinInfoResult.status === 'rejected'
     ? redactSecrets(tinInfoResult.reason?.message || String(tinInfoResult.reason))
     : null;
@@ -392,6 +408,15 @@ birthdayRoutes.get('/birthday-launch', async (c) => {
       tin_sku:  TIN_SKU,
       soap_image_url: soapInfo.imageUrl,
       tin_image_url:  tinInfo.imageUrl,
+      // v2.2.26 — stock_quantity readout + sell-out confetti trigger.
+      // `null` means stock isn't being tracked for this SKU in Woo; the
+      // frontend treats that as a non-actionable state (no confetti).
+      soap_stock_quantity: soapInfo.stockQuantity,
+      soap_stock_status:   soapInfo.stockStatus,
+      soap_manage_stock:   soapInfo.manageStock,
+      tin_stock_quantity:  tinInfo.stockQuantity,
+      tin_stock_status:    tinInfo.stockStatus,
+      tin_manage_stock:    tinInfo.manageStock,
       soap_lifetime_error: soapLifetimeError,
       tin_info_error: tinInfoError,
     },

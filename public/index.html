@@ -2001,14 +2001,67 @@
       #tab-au-birthday .bday-card--with-img .bday-product-img {
         width: 64px; height: 64px; object-fit: contain;
         border-radius: 6px; background: #F8F8F8;
-        grid-row: span 3;
+        /* v2.2.26: card now has 4 rows (label / value / stock / sub) so
+           the image spans 4 to keep it centred vertically. */
+        grid-row: span 4;
       }
       #tab-au-birthday .bday-card--with-img .bday-card-label { margin-bottom: 0; }
-      #tab-au-birthday .bday-card--with-img .bday-card-value { font-size: 32px; margin-top: 2px; }
+      #tab-au-birthday .bday-card--with-img .bday-card-value { font-size: 30px; margin-top: 2px; line-height: 1; }
       #tab-au-birthday .bday-card--with-img .bday-card-sub { margin-top: 0; }
       #tab-au-birthday .bday-product-img.empty {
         background: linear-gradient(135deg, #FFEEF3 0%, #FFD8E5 100%);
       }
+      /* ── Stock line (v2.2.26) ── Blue, sits between value and sub. */
+      #tab-au-birthday .bday-stock-line {
+        font-size: 12px; font-weight: 700;
+        color: #1976D2;
+        margin-top: 2px;
+        line-height: 1.2;
+        font-variant-numeric: tabular-nums;
+      }
+      #tab-au-birthday .bday-stock-line.sold-out {
+        color: #D32F2F;   /* red when 0 — the sell-out moment */
+        animation: bday-stock-pulse 1.6s ease-in-out infinite;
+      }
+      #tab-au-birthday .bday-stock-line.unmanaged {
+        color: var(--text-secondary);
+        font-weight: 500;
+      }
+      @keyframes bday-stock-pulse {
+        0%, 100% { opacity: 1; }
+        50%      { opacity: 0.55; }
+      }
+
+      /* ── Sell-out celebration banner (v2.2.26) ── Fixed-position, centred,
+         huge text, fades out after 14s. Confetti runs alongside via JS. */
+      .bday-sellout-banner {
+        position: fixed;
+        top: 32%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 99999;
+        background: linear-gradient(135deg, #FF578A 0%, #FFD700 100%);
+        color: #fff;
+        padding: 28px 56px;
+        font-size: 38px;
+        font-weight: 900;
+        letter-spacing: -0.5px;
+        border-radius: 18px;
+        box-shadow: 0 12px 48px rgba(0,0,0,0.35);
+        animation: bday-bounce-in 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+        text-align: center;
+        white-space: nowrap;
+        pointer-events: none;
+      }
+      .bday-sellout-banner.fade-out { opacity: 0; transition: opacity 1s ease; }
+      @keyframes bday-bounce-in {
+        0%   { transform: translate(-50%, -50%) scale(0.4); opacity: 0; }
+        70%  { transform: translate(-50%, -50%) scale(1.08); opacity: 1; }
+        100% { transform: translate(-50%, -50%) scale(1);    opacity: 1; }
+      }
+      /* Stack a second banner below the first if both products sell out in
+         the same render cycle. */
+      .bday-sellout-banner.second { top: 50%; }
 
       /* ── Main row: chart + alerts column ── */
       #tab-au-birthday .bday-main-row {
@@ -2160,19 +2213,21 @@
         <div class="bday-card-sub">contains soap or tin</div>
       </div>
 
-      <!-- 3: Soap (lifetime, with product image) -->
+      <!-- 3: Soap (lifetime, with product image + Woo stock) -->
       <div class="bday-card bday-card--woo bday-card--with-img">
         <img class="bday-product-img empty" id="bday-soap-img" src="" alt="Soap" />
         <div class="bday-card-label">Soap units (lifetime)</div>
         <div class="bday-card-value" id="bday-soap-lifetime">--</div>
+        <div class="bday-stock-line" id="bday-soap-stock">Stock: --</div>
         <div class="bday-card-sub" id="bday-soap-sub">AU-BD-NPS-100 · all-time</div>
       </div>
 
-      <!-- 4: Tin (today, with product image) -->
+      <!-- 4: Tin (today, with product image + Woo stock) -->
       <div class="bday-card bday-card--woo bday-card--with-img">
         <img class="bday-product-img empty" id="bday-tin-img" src="" alt="11th Birthday Tin" />
         <div class="bday-card-label">11th Birthday Tin (today)</div>
         <div class="bday-card-value" id="bday-tin-today">--</div>
+        <div class="bday-stock-line" id="bday-tin-stock">Stock: --</div>
         <div class="bday-card-sub" id="bday-tin-sub">AU-BD-NBF-35 · today</div>
       </div>
 
@@ -2258,9 +2313,18 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.25</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.26</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.26 &mdash; 19 May 2026 (Birthday tab: Woo stock-quantity readout + sell-out confetti 🎉)</h4>
+    <ul>
+      <li><strong>Woo stock-quantity readout</strong> on the Soap + Tin KPI cards. New blue line ("Stock left: 47") sits between the units-sold value and the SKU sub-line. Backend pulls <code>stock_quantity</code>, <code>stock_status</code>, and <code>manage_stock</code> from the same Woo <code>/products?sku=...</code> call we were already making &mdash; no new API hits. When Woo's stock management is off for a SKU, the readout shows "Stock: not tracked in Woo" in grey so the team knows it's a Woo config thing, not a dashboard bug.</li>
+      <li><strong>Sell-out confetti 🎉.</strong> When stock transitions from positive to zero between refreshes, the tab fires a 15-second canvas-confetti shower from both bottom corners plus a centred "SOLD OUT!" banner with the product name. Lazy-loads <code>canvas-confetti@1.9.3</code> from jsdelivr (~5 KB minified) the first time the bday tab is activated, so it's pre-warmed by the time the first drop sells out. If the CDN load fails (offline / CSP) the banner still renders without particles &mdash; graceful degrade.</li>
+      <li><strong>Per-SKU transition tracking.</strong> Soap and tin track independently in <code>_bdayPrevStock</code>. On the first load (where <code>prev === undefined</code>), no confetti even if stock is at 0 &mdash; otherwise opening the dashboard mid-launch when a drop has already sold out would auto-fire celebrations on every refresh. Confetti only fires on the actual <code>&gt;0 → 0</code> transition. Subsequent refreshes while still at 0 do nothing, and the next drop's <code>0 → 50</code> transition (refilling stock for the next hour) also doesn't fire &mdash; that's a drop, not a sell-out. When tin and soap sell out in the same refresh, both banners stack vertically and one confetti shower covers both.</li>
+      <li><strong>"SOLD OUT" stock-line state.</strong> When stock hits 0, the inline readout switches from blue "Stock left: N" to red "🎉 SOLD OUT 🎉" with a slow pulse animation. Acts as a persistent indicator after the banner fades, so the warehouse team can see at a glance which drops are still active vs gone.</li>
+      <li><strong>Image-card layout bumped to 4 rows.</strong> Card was 3 rows (label / value / sub); v2.2.26 adds the stock line as row 3, pushing sub to row 4. <code>grid-row: span 4</code> on the thumbnail keeps it centred vertically across all four rows.</li>
+      <li><strong>Verify after deploy.</strong> Hit <code>/api/au/birthday-launch?refresh=1</code> &mdash; payload should now include <code>woo.soap_stock_quantity</code>, <code>woo.soap_manage_stock</code>, <code>woo.tin_stock_quantity</code>, <code>woo.tin_manage_stock</code>. On the dashboard, soap + tin cards show a blue stock line; once Woo has stock management turned on for those SKUs and stock is loaded for the first drop, refreshes will tick the number down and the sell-out moment will trigger the celebration.</li>
+    </ul>
     <h4>v2.2.25 &mdash; 19 May 2026 (Birthday tab: TV-fit 16:9 no-scroll layout + product images + envelope icons)</h4>
     <ul>
       <li><strong>TV-fit no-scroll layout.</strong> The tab now goes on a warehouse TV (1920×1080, 16:9) and needs to fit a single viewport &mdash; no one's scrolling on a TV from across the warehouse floor. Panel restructured as a 4-row flex column: hero / 7-card KPI strip / chart-and-alerts main row (flex:1 to fill remaining vertical space) / compact meta bar. Below 1200px wide the layout falls back to scrollable so it still works on a laptop.</li>
@@ -6640,12 +6704,32 @@ let _bdayLastPayload = null;
 let _bdayRefreshTimer = null;
 let _bdayCountdownTimer = null;
 let _bdayChart = null;
+// v2.2.26 — per-SKU previous stock for sell-out transition detection.
+// `undefined` = not seen yet (first load — don't trigger on initial state).
+const _bdayPrevStock = { soap: undefined, tin: undefined };
 
 function bdayOnTabActivate() {
+  _bdayLoadConfettiLib();  // kick off CDN load early so it's ready by sell-out time
   bdayLoad(); // fire immediately
   _scheduleBdayRefresh();
   if (_bdayCountdownTimer) clearInterval(_bdayCountdownTimer);
   _bdayCountdownTimer = setInterval(_bdayUpdateCountdown, 1000);
+}
+
+/**
+ * Lazy-load canvas-confetti from jsdelivr the first time the bday tab is
+ * activated. ~5KB minified, used only for sell-out celebrations. Becomes
+ * available as `window.confetti(opts)` once loaded. If the load fails
+ * (offline / CDN down / CSP), the sell-out banner still renders without
+ * particles — graceful degrade.
+ */
+function _bdayLoadConfettiLib() {
+  if (window.confetti || document.getElementById('bday-confetti-script')) return;
+  const s = document.createElement('script');
+  s.id = 'bday-confetti-script';
+  s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js';
+  s.async = true;
+  document.head.appendChild(s);
 }
 
 function bdayOnTabDeactivate() {
@@ -6736,6 +6820,74 @@ function _bdayFmt(n) {
   return Number(n).toLocaleString();
 }
 
+function _bdayRenderStockLine(elId, quantity, manageStock, productLabel) {
+  // Render the blue stock readout below the value, and report the
+  // numeric state so the caller can drive the transition tracker.
+  // States:
+  //   manage_stock === false     → "Stock: not tracked" (grey, no confetti)
+  //   manage_stock + quantity null → "Stock: ?" (grey, no confetti)
+  //   quantity > 0               → "Stock left: N" (blue)
+  //   quantity === 0             → "SOLD OUT" (red, pulsing)
+  const el = document.getElementById(elId);
+  if (!el) return null;
+  el.classList.remove('sold-out', 'unmanaged');
+  if (!manageStock) {
+    el.textContent = `Stock: not tracked in Woo`;
+    el.classList.add('unmanaged');
+    return null;
+  }
+  if (quantity === null || quantity === undefined) {
+    el.textContent = `Stock: —`;
+    el.classList.add('unmanaged');
+    return null;
+  }
+  const q = Number(quantity);
+  if (q <= 0) {
+    el.textContent = `🎉 SOLD OUT 🎉`;
+    el.classList.add('sold-out');
+    return 0;
+  }
+  el.textContent = `Stock left: ${_bdayFmt(q)}`;
+  return q;
+}
+
+function _bdayCheckSellOutTransition(skuKey, currentStock, displayName) {
+  // Fire confetti + banner when stock goes from positive to zero. Skip on
+  // first-ever load (prev === undefined) so we don't celebrate a product
+  // that was already at 0 when the tab opened.
+  const prev = _bdayPrevStock[skuKey];
+  if (prev !== undefined && prev !== null && prev > 0 && currentStock === 0) {
+    _bdayCelebrateSellOut(displayName, skuKey === 'tin');
+  }
+  // Persist current as the new previous. null (untracked) overwrites prev
+  // intentionally — if stock management is toggled off mid-launch, the next
+  // toggle-on shouldn't auto-fire.
+  _bdayPrevStock[skuKey] = currentStock;
+}
+
+function _bdayCelebrateSellOut(productName, isSecond) {
+  // 1. Drop the centred banner.
+  const banner = document.createElement('div');
+  banner.className = 'bday-sellout-banner' + (isSecond ? ' second' : '');
+  banner.textContent = `🎉 ${productName} SOLD OUT! 🎉`;
+  document.body.appendChild(banner);
+  setTimeout(() => banner.classList.add('fade-out'), 14000);
+  setTimeout(() => banner.remove(), 15500);
+
+  // 2. Fire confetti from both bottom corners for 15s. Burst rate is
+  // intentionally modest so the warehouse TV doesn't melt.
+  const duration = 15 * 1000;
+  const end = Date.now() + duration;
+  const colours = ['#FF578A', '#FF8FB3', '#FFD700', '#7B5DD3', '#1976D2', '#fff'];
+  function frame() {
+    if (typeof window.confetti !== 'function') return;  // CDN didn't load — silent skip
+    window.confetti({ particleCount: 5, angle: 60,  spread: 60, origin: { x: 0, y: 0.8 }, colors: colours });
+    window.confetti({ particleCount: 5, angle: 120, spread: 60, origin: { x: 1, y: 0.8 }, colors: colours });
+    if (Date.now() < end) requestAnimationFrame(frame);
+  }
+  frame();
+}
+
 function _bdaySetProductImg(imgId, url) {
   const img = document.getElementById(imgId);
   if (!img) return;
@@ -6815,6 +6967,15 @@ function _bdayRender(data) {
   // when the image URL is missing or the SKU doesn't exist yet.
   _bdaySetProductImg('bday-soap-img', data.woo?.soap_image_url);
   _bdaySetProductImg('bday-tin-img',  data.woo?.tin_image_url);
+
+  // Stock readouts (v2.2.26) — blue line below the value. Returns the
+  // numeric stock for the transition tracker, or null when untracked.
+  const soapStock = _bdayRenderStockLine('bday-soap-stock', data.woo?.soap_stock_quantity, data.woo?.soap_manage_stock, 'Soap');
+  const tinStock  = _bdayRenderStockLine('bday-tin-stock',  data.woo?.tin_stock_quantity,  data.woo?.tin_manage_stock,  'Tin');
+  // Sell-out detection. Fires confetti + banner on the >0 → 0 transition.
+  // Tin first so soap (if also dropping) renders as the second banner.
+  _bdayCheckSellOutTransition('tin',  tinStock,  '11TH BIRTHDAY TIN');
+  _bdayCheckSellOutTransition('soap', soapStock, 'BIRTHDAY SOAP');
 
   // Alert cards — Express/Intl (left) and Wholesale (right). One helper
   // function handles both; per-card differences are passed in as args.
