@@ -2124,16 +2124,18 @@
         50%  { transform: translateY(-50%) rotate(8deg); }
         100% { left: calc(100vw + 200px); transform: translateY(-50%) rotate(-8deg); }
       }
-      /* Hammer swings instead of just rotating gently. */
+      /* Hammer swings instead of just rotating gently. scaleX(-1) on every
+         keyframe so the hammer head faces the direction of travel (left→right)
+         rather than looking like it's flying backwards. */
       .bday-milestone-sweep.hammer-anim {
         animation: bday-hammer-swing 4s linear infinite;
       }
       @keyframes bday-hammer-swing {
-        0%   { left: -200px; transform: translateY(-50%) rotate(-45deg); }
-        25%  { transform: translateY(-50%) rotate(35deg); }
-        50%  { transform: translateY(-50%) rotate(-45deg); }
-        75%  { transform: translateY(-50%) rotate(35deg); }
-        100% { left: calc(100vw + 200px); transform: translateY(-50%) rotate(-45deg); }
+        0%   { left: -200px; transform: translateY(-50%) scaleX(-1) rotate(-45deg); }
+        25%  { transform: translateY(-50%) scaleX(-1) rotate(35deg); }
+        50%  { transform: translateY(-50%) scaleX(-1) rotate(-45deg); }
+        75%  { transform: translateY(-50%) scaleX(-1) rotate(35deg); }
+        100% { left: calc(100vw + 200px); transform: translateY(-50%) scaleX(-1) rotate(-45deg); }
       }
       /* Lightning flashes — fast sweep + opacity strobe. */
       .bday-milestone-sweep.lightning-anim {
@@ -2146,17 +2148,19 @@
         60%  { opacity: 0.3; transform: translateY(-50%) rotate(8deg) scale(1.15); }
         100% { left: calc(100vw + 200px); opacity: 1; transform: translateY(-50%) rotate(-12deg) scale(1); }
       }
-      /* Bullseye — arrow flies in from left, stops centred, pulses. */
+      /* Bullseye — arrow flies in from left, stops centred, pulses.
+         scaleX(-1) on every keyframe so the target faces the direction
+         of travel rather than looking like it's flying backwards. */
       .bday-milestone-sweep.bullseye-anim {
         animation: bday-bullseye-hit 5s ease-out infinite;
       }
       @keyframes bday-bullseye-hit {
-        0%   { left: -200px;     transform: translateY(-50%) scale(0.6); }
-        30%  { left: calc(50vw - 100px); transform: translateY(-50%) scale(1.2); }
-        45%  { left: calc(50vw - 100px); transform: translateY(-50%) scale(1) rotate(-10deg); }
-        60%  { left: calc(50vw - 100px); transform: translateY(-50%) scale(1.15) rotate(10deg); }
-        75%  { left: calc(50vw - 100px); transform: translateY(-50%) scale(1); }
-        100% { left: calc(100vw + 200px); transform: translateY(-50%) scale(0.8); }
+        0%   { left: -200px;     transform: translateY(-50%) scaleX(-1) scale(0.6); }
+        30%  { left: calc(50vw - 100px); transform: translateY(-50%) scaleX(-1) scale(1.2); }
+        45%  { left: calc(50vw - 100px); transform: translateY(-50%) scaleX(-1) scale(1) rotate(-10deg); }
+        60%  { left: calc(50vw - 100px); transform: translateY(-50%) scaleX(-1) scale(1.15) rotate(10deg); }
+        75%  { left: calc(50vw - 100px); transform: translateY(-50%) scaleX(-1) scale(1); }
+        100% { left: calc(100vw + 200px); transform: translateY(-50%) scaleX(-1) scale(0.8); }
       }
 
       /* ── Main row: chart + alerts column ── */
@@ -2779,9 +2783,13 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.30</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.31</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.31 &mdash; 19 May 2026 (Flip hammer + bullseye horizontally so they face the direction of travel)</h4>
+    <ul>
+      <li><strong>Hammer + bullseye now face forwards.</strong> v2.2.29's sweep animations had the 🔨 hammer and 🎯 bullseye facing left while the sweep travels left→right, so they looked like they were flying backwards. Added <code>scaleX(-1)</code> to every keyframe in <code>@keyframes bday-hammer-swing</code> and <code>@keyframes bday-bullseye-hit</code> so the hammer head + the bullseye both face the direction of travel. Flame and lightning bolt sweeps untouched (they're already symmetric enough that the flip wasn't needed).</li>
+    </ul>
     <h4>v2.2.30 &mdash; 19 May 2026 (Milestone sweeps now render in front of the banner)</h4>
     <ul>
       <li><strong>Z-index fix.</strong> The 🔥 / 🔨 / ⚡ / 🎯 emoji sweeps were rendering behind the milestone banner in v2.2.29 (sweep at <code>z-index: 99998</code>, banner at <code>99999</code>). Bumped <code>.bday-milestone-sweep</code> to <code>z-index: 100000</code> so the emoji flies across the front of the banner, not hidden behind it. The banner stays at <code>99999</code> so it still sits above everything else.</li>
