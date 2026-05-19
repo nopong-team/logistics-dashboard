@@ -53,13 +53,6 @@ export const logisticsRoutes = new Hono();
 const KV_KEY = 'au:logistics:v1';
 const KV_TTL_SECONDS = 60;
 
-// How recent an order must be to count as "actually open" on the warehouse
-// TV. CIN7 has 6-month-old SalesOrders that are technically `dispatchedDate
-// IS NULL` but were despatched outside CIN7 and never closed — those aren't
-// real warehouse work. 30 days is well within ops reality for any active
-// distributor order.
-const OPEN_ORDER_WINDOW_DAYS = 30;
-
 // DC → label + state + must-ship-by-business-day-before rule.
 //
 // Both Coles AND Woolies have a "Redbank" DC, so the matcher MUST run
@@ -372,17 +365,17 @@ function analyseLineItem(item, stockBySku) {
  * dispatched_date, delivery_date) get populated on every cron tick now,
  * so other endpoints can use them; just this one bypasses D1.
  */
-async function fetchOpenSalesOrdersLive(env) {
-  // 30-day window — same OPEN_ORDER_WINDOW_DAYS used previously. Computed
-  // as YYYY-MM-DD for the where clause.
-  const cutoffDate = new Date();
-  cutoffDate.setUTCDate(cutoffDate.getUTCDate() - OPEN_ORDER_WINDOW_DAYS);
-  const pad = (n) => String(n).padStart(2, '0');
-  const cutoff = `${cutoffDate.getUTCFullYear()}-${pad(cutoffDate.getUTCMonth() + 1)}-${pad(cutoffDate.getUTCDate())}`;
-
-  // Field whitelist — mirror cin7-sync.js SALES_FIELDS so we capture
-  // stage + estimatedDeliveryDate + dispatchedDate + lineItems. CIN7 only
-  // returns what we ask for.
+async function fetchOpenSalesOrdersLive(env, todayLocalDate) {
+  // Per Melanie 2026-05-19: "just look for orders with an estimated due
+  // date of today or in the future". Much simpler than chasing
+  // workflow-state semantics across createdDate + status + stage +
+  // dispatchedDate. If the warehouse hasn't acted on an order whose ETD
+  // has already passed, that's a separate ops conversation — the TV
+  // surfaces what's actionable from today onwards.
+  //
+  // Server-side where: EstimatedDeliveryDate >= today (Sydney) AND
+  // Status='APPROVED'. Client-side: drop rows with dispatchedDate set
+  // (already in transit, no warehouse action needed).
   const fields = [
     'id', 'reference', 'createdDate', 'modifiedDate', 'dispatchedDate',
     'channel', 'branchName',
@@ -393,7 +386,7 @@ async function fetchOpenSalesOrdersLive(env) {
     'lineItems',
   ].join(',');
 
-  const where = `CreatedDate>='${cutoff}' AND Status='APPROVED'`;
+  const where = `EstimatedDeliveryDate>='${todayLocalDate}' AND Status='APPROVED'`;
 
   // cin7FetchAll paginates internally with 400ms inter-page sleep. For a
   // 30-day window with No Pong AU volume the response is typically 1-2
@@ -559,7 +552,7 @@ logisticsRoutes.get('/logistics', async (c) => {
   // 3-calls-per-second cap. KV cache (60s) keeps total volume well under
   // CIN7's 60-per-minute and 5000-per-day budgets.
   try {
-    openOrdersValue = await fetchOpenSalesOrdersLive(env);
+    openOrdersValue = await fetchOpenSalesOrdersLive(env, syd.localDate);
   } catch (e) {
     openOrdersError = redactSecrets(e?.message || String(e));
   }
