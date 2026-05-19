@@ -2064,6 +2064,100 @@
          the same render cycle. */
       .bday-sellout-banner.second { top: 50%; }
 
+      /* ── Order-count milestone celebrations (v2.2.29) ──
+         Four cheesy 15-second celebrations fire as total_orders_today
+         crosses 500 / 1,000 / 1,500 / 1,733. Each has its own banner
+         gradient + a giant emoji that sweeps across the screen. Same
+         15s duration + bounce-in + fade-out pattern as the sell-out
+         banner, so they feel like the same family of effects. */
+      .bday-milestone-banner {
+        position: fixed;
+        top: 38%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 99999;
+        color: #fff;
+        padding: 30px 60px;
+        font-size: 42px;
+        font-weight: 900;
+        letter-spacing: -0.5px;
+        border-radius: 18px;
+        box-shadow: 0 12px 48px rgba(0,0,0,0.4);
+        animation: bday-bounce-in 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+        text-align: center;
+        white-space: nowrap;
+        pointer-events: none;
+      }
+      .bday-milestone-banner.fade-out { opacity: 0; transition: opacity 1s ease; }
+      .bday-milestone-banner.fire {
+        background: linear-gradient(135deg, #FF4500 0%, #FFA500 50%, #FFD700 100%);
+      }
+      .bday-milestone-banner.hammer {
+        background: linear-gradient(135deg, #7B5DD3 0%, #4A2FA8 100%);
+      }
+      .bday-milestone-banner.lightning {
+        background: linear-gradient(135deg, #FFD700 0%, #1E90FF 50%, #4B0082 100%);
+      }
+      .bday-milestone-banner.bullseye {
+        background: linear-gradient(135deg, #FF1744 0%, #FFD700 50%, #FF1744 100%);
+        font-size: 46px;
+        padding: 36px 72px;
+      }
+
+      /* The giant emoji that sweeps across the screen. Fixed-position,
+         starts off-screen-left, ends off-screen-right. 4-second sweep
+         loop, repeats for the full 15s. */
+      .bday-milestone-sweep {
+        position: fixed;
+        left: -200px;
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 200px;
+        z-index: 99998;
+        pointer-events: none;
+        animation: bday-sweep-across 4s linear infinite;
+        filter: drop-shadow(0 8px 24px rgba(0,0,0,0.5));
+      }
+      @keyframes bday-sweep-across {
+        0%   { left: -200px; transform: translateY(-50%) rotate(-8deg); }
+        50%  { transform: translateY(-50%) rotate(8deg); }
+        100% { left: calc(100vw + 200px); transform: translateY(-50%) rotate(-8deg); }
+      }
+      /* Hammer swings instead of just rotating gently. */
+      .bday-milestone-sweep.hammer-anim {
+        animation: bday-hammer-swing 4s linear infinite;
+      }
+      @keyframes bday-hammer-swing {
+        0%   { left: -200px; transform: translateY(-50%) rotate(-45deg); }
+        25%  { transform: translateY(-50%) rotate(35deg); }
+        50%  { transform: translateY(-50%) rotate(-45deg); }
+        75%  { transform: translateY(-50%) rotate(35deg); }
+        100% { left: calc(100vw + 200px); transform: translateY(-50%) rotate(-45deg); }
+      }
+      /* Lightning flashes — fast sweep + opacity strobe. */
+      .bday-milestone-sweep.lightning-anim {
+        animation: bday-lightning-flash 2s linear infinite;
+      }
+      @keyframes bday-lightning-flash {
+        0%   { left: -200px; opacity: 1; transform: translateY(-50%) rotate(-12deg) scale(1); }
+        20%  { opacity: 0.2; transform: translateY(-50%) rotate(8deg) scale(1.2); }
+        40%  { opacity: 1;   transform: translateY(-50%) rotate(-12deg) scale(1); }
+        60%  { opacity: 0.3; transform: translateY(-50%) rotate(8deg) scale(1.15); }
+        100% { left: calc(100vw + 200px); opacity: 1; transform: translateY(-50%) rotate(-12deg) scale(1); }
+      }
+      /* Bullseye — arrow flies in from left, stops centred, pulses. */
+      .bday-milestone-sweep.bullseye-anim {
+        animation: bday-bullseye-hit 5s ease-out infinite;
+      }
+      @keyframes bday-bullseye-hit {
+        0%   { left: -200px;     transform: translateY(-50%) scale(0.6); }
+        30%  { left: calc(50vw - 100px); transform: translateY(-50%) scale(1.2); }
+        45%  { left: calc(50vw - 100px); transform: translateY(-50%) scale(1) rotate(-10deg); }
+        60%  { left: calc(50vw - 100px); transform: translateY(-50%) scale(1.15) rotate(10deg); }
+        75%  { left: calc(50vw - 100px); transform: translateY(-50%) scale(1); }
+        100% { left: calc(100vw + 200px); transform: translateY(-50%) scale(0.8); }
+      }
+
       /* ── Main row: chart + alerts column ── */
       #tab-au-birthday .bday-main-row {
         display: grid;
@@ -2684,9 +2778,21 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.28</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.29</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.29 &mdash; 19 May 2026 (Birthday tab: order-count milestone celebrations 🔥🔨⚡🎯)</h4>
+    <ul>
+      <li><strong>Four new 15-second milestone celebrations</strong> on the 🎂 11th Birthday tab, triggered off the <em>All orders today</em> counter (<code>data.woo.total_orders_today</code>). When the count crosses each threshold for the first time today, a giant emoji sweeps across the screen, a centred banner bounce-ins, and themed confetti fires from both bottom corners for 15 seconds (same family of effects as the sell-out celebration).</li>
+      <li><strong>500 orders &mdash; 🔥 "You're on fire!"</strong> Flame sweeps across with a gentle rotation. Orange &rarr; gold gradient banner. Warm-coloured confetti.</li>
+      <li><strong>1,000 orders &mdash; 🔨 "You're nailing it!"</strong> Hammer swings back and forth as it sweeps. Purple gradient banner. Purple + gold + silver confetti.</li>
+      <li><strong>1,500 orders &mdash; ⚡ "You're electrifying!"</strong> Lightning bolt strobes across with a flash effect. Gold &rarr; electric-blue &rarr; indigo gradient banner. Cyan + gold confetti.</li>
+      <li><strong>1,733 orders (last year's total) &mdash; 🎯 "You've hit the bull's-eye!"</strong> Bullseye flies in from the left, lands centre-stage with a satisfying scale-bounce, then exits stage right. Red &rarr; gold &rarr; red gradient banner (slightly larger than the others &mdash; this is THE moment). Red + gold + pink confetti.</li>
+      <li><strong>Per-day localStorage persistence</strong> keyed by <code>bday-milestones-fired-YYYY-MM-DD</code> (Sydney-local date). If a browser tab reload happens after a milestone fires, it won't re-fire on the next refresh. Date key resets at Sydney midnight so tomorrow starts fresh.</li>
+      <li><strong>First-load suppression.</strong> Same pattern as the sell-out detector &mdash; on the very first load (where <code>_bdayPrevOrderCount === undefined</code>), no milestones fire even if the count is already past one. Otherwise opening the dashboard mid-day at 1,200 orders would fire 500 + 1,000 instantly. Already-crossed thresholds get silently marked as "fired today" so they don't fire later either.</li>
+      <li><strong>Highest-threshold-wins on a surge.</strong> If a single refresh crosses two thresholds at once (e.g. count jumps from 480 to 1,050 between ticks), only the higher one fires &mdash; the lower one is silently marked fired. Keeps the screen sane and the warehouse TV from playing back-to-back celebrations.</li>
+      <li><strong>Independent of sell-out confetti.</strong> Both can fire on the same refresh cycle; banners stack vertically (milestone at 38%, sell-out at 32% / 50%). Confetti from both events overlap &mdash; intentional, more party.</li>
+    </ul>
     <h4>v2.2.28 &mdash; 19 May 2026 (🚚 Logistics tab UI &mdash; Ship 2 of 2)</h4>
     <ul>
       <li><strong>New <code>🚚 Logistics</code> tab</strong> in the AU tab bar (purple, between 🎂 11th Birthday and the existing tabs). TV-fit 16:9 no-scroll layout sized for the warehouse TV.</li>
@@ -7333,6 +7439,163 @@ function _bdayCelebrateSellOut(productName, isSecond) {
   frame();
 }
 
+/* ════════════════════════════════════════════════════════════════════════
+   Order-count milestones (v2.2.29) — Fires a 15-second celebration when
+   total_orders_today crosses each of 500 / 1,000 / 1,500 / 1,733 for the
+   first time today. Per-day localStorage persistence so a browser reload
+   mid-day doesn't re-fire a celebration that already happened.
+   ════════════════════════════════════════════════════════════════════════ */
+let _bdayPrevOrderCount = undefined;  // undefined = first load, don't auto-fire
+
+const _BDAY_MILESTONES = [
+  {
+    threshold: 500,
+    klass: 'fire',
+    emoji: '🔥',
+    sweepClass: '',
+    text: '🔥 500 ORDERS — YOU’RE ON FIRE! 🔥',
+    confettiColours: ['#FF4500', '#FFA500', '#FFD700', '#FF6347', '#fff'],
+  },
+  {
+    threshold: 1000,
+    klass: 'hammer',
+    emoji: '🔨',
+    sweepClass: 'hammer-anim',
+    text: '🔨 OVER 1,000 ORDERS — YOU’RE NAILING IT! 🔨',
+    confettiColours: ['#7B5DD3', '#A78BFA', '#FFD700', '#fff', '#C0C0C0'],
+  },
+  {
+    threshold: 1500,
+    klass: 'lightning',
+    emoji: '⚡',
+    sweepClass: 'lightning-anim',
+    text: '⚡ 1,500 ORDERS — YOU’RE ELECTRIFYING! ⚡',
+    confettiColours: ['#FFD700', '#1E90FF', '#4B0082', '#fff', '#00FFFF'],
+  },
+  {
+    threshold: 1733,
+    klass: 'bullseye',
+    emoji: '🎯',
+    sweepClass: 'bullseye-anim',
+    text: '🎯 OVER 1,733 ORDERS — YOU’VE HIT THE BULL’S-EYE! 🎯',
+    confettiColours: ['#FF1744', '#FFD700', '#FF578A', '#fff', '#FFA500'],
+  },
+];
+
+/**
+ * Returns the date key used for the milestone-fired localStorage flag.
+ * Use Sydney-local date (from the payload's tz_offset_minutes if available,
+ * else the wall clock) so the flag resets at Sydney midnight. Otherwise a
+ * dashboard opened just before midnight UTC would forget yesterday's fires.
+ */
+function _bdayMilestoneDateKey() {
+  let offMin = 600;
+  if (_bdayLastPayload?.sydney_now?.tz_offset_minutes != null) {
+    offMin = _bdayLastPayload.sydney_now.tz_offset_minutes;
+  }
+  const shifted = new Date(Date.now() + offMin * 60 * 1000);
+  const y = shifted.getUTCFullYear();
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(shifted.getUTCDate()).padStart(2, '0');
+  return `bday-milestones-fired-${y}-${m}-${d}`;
+}
+
+function _bdayLoadFiredMilestones() {
+  try {
+    const raw = localStorage.getItem(_bdayMilestoneDateKey());
+    return raw ? JSON.parse(raw) : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function _bdaySaveFiredMilestone(threshold) {
+  try {
+    const key = _bdayMilestoneDateKey();
+    const fired = _bdayLoadFiredMilestones();
+    fired[String(threshold)] = true;
+    localStorage.setItem(key, JSON.stringify(fired));
+  } catch (_) { /* silent — celebration still fires, just won't persist across reloads */ }
+}
+
+function _bdayCheckMilestoneTransitions(currentCount) {
+  if (typeof currentCount !== 'number' || !Number.isFinite(currentCount)) return;
+
+  const prev = _bdayPrevOrderCount;
+  const fired = _bdayLoadFiredMilestones();
+
+  // First load: just record state, don't auto-celebrate. Same logic as
+  // the sell-out detector — opening the tab partway through a launch
+  // shouldn't fire all the milestones we've already crossed.
+  if (prev === undefined) {
+    _bdayPrevOrderCount = currentCount;
+    // Also mark any already-crossed thresholds as fired today, so we
+    // never accidentally fire them later in the day (e.g. after a
+    // browser reload). This persists the "we've already passed this"
+    // signal even if localStorage was empty before.
+    for (const m of _BDAY_MILESTONES) {
+      if (currentCount >= m.threshold && !fired[String(m.threshold)]) {
+        _bdaySaveFiredMilestone(m.threshold);
+      }
+    }
+    return;
+  }
+
+  // Walk thresholds low-to-high. Fire each one that we've crossed AND
+  // haven't already fired today. If multiple cross in a single tick
+  // (massive surge between refreshes), only the highest fires — keeps
+  // the screen sane.
+  let toFire = null;
+  for (const m of _BDAY_MILESTONES) {
+    const crossed = prev < m.threshold && currentCount >= m.threshold;
+    const alreadyFired = !!fired[String(m.threshold)];
+    if (crossed && !alreadyFired) {
+      toFire = m;  // keep the latest match — highest threshold wins
+    } else if (currentCount >= m.threshold && !alreadyFired) {
+      // Edge case: count is past threshold but prev wasn't < threshold
+      // (e.g. a refill or correction). Mark as fired so we don't fire
+      // later when prev finally < threshold (which shouldn't happen,
+      // but defence in depth).
+      _bdaySaveFiredMilestone(m.threshold);
+    }
+  }
+  if (toFire) {
+    _bdayCelebrateMilestone(toFire);
+    _bdaySaveFiredMilestone(toFire.threshold);
+  }
+  _bdayPrevOrderCount = currentCount;
+}
+
+function _bdayCelebrateMilestone(milestone) {
+  // 1. Centred banner — bounce in, fade out at 14s, remove at 15.5s
+  const banner = document.createElement('div');
+  banner.className = `bday-milestone-banner ${milestone.klass}`;
+  banner.textContent = milestone.text;
+  document.body.appendChild(banner);
+  setTimeout(() => banner.classList.add('fade-out'), 14000);
+  setTimeout(() => banner.remove(), 15500);
+
+  // 2. Giant emoji sweeping across the screen (loops for 15s)
+  const sweep = document.createElement('div');
+  sweep.className = `bday-milestone-sweep ${milestone.sweepClass}`.trim();
+  sweep.textContent = milestone.emoji;
+  document.body.appendChild(sweep);
+  setTimeout(() => sweep.remove(), 15000);
+
+  // 3. Themed confetti from both bottom corners for 15s (reuses the
+  // already-loaded canvas-confetti library)
+  const duration = 15 * 1000;
+  const end = Date.now() + duration;
+  const colours = milestone.confettiColours;
+  function frame() {
+    if (typeof window.confetti !== 'function') return;
+    window.confetti({ particleCount: 5, angle: 60,  spread: 60, origin: { x: 0, y: 0.8 }, colors: colours });
+    window.confetti({ particleCount: 5, angle: 120, spread: 60, origin: { x: 1, y: 0.8 }, colors: colours });
+    if (Date.now() < end) requestAnimationFrame(frame);
+  }
+  frame();
+}
+
 function _bdaySetProductImg(imgId, url) {
   const img = document.getElementById(imgId);
   if (!img) return;
@@ -7421,6 +7684,9 @@ function _bdayRender(data) {
   // Tin first so soap (if also dropping) renders as the second banner.
   _bdayCheckSellOutTransition('tin',  tinStock,  '11TH BIRTHDAY TIN');
   _bdayCheckSellOutTransition('soap', soapStock, 'BIRTHDAY SOAP');
+  // Order-count milestones (v2.2.29) — fires 500 / 1000 / 1500 / 1733
+  // celebrations off the All-orders-today counter. Independent of sell-out.
+  _bdayCheckMilestoneTransitions(data.woo?.total_orders_today);
 
   // Alert cards — Express/Intl (left) and Wholesale (right). One helper
   // function handles both; per-card differences are passed in as args.
