@@ -476,21 +476,44 @@ logisticsRoutes.get('/logistics', async (c) => {
   const now = new Date();
   const syd = sydneyParts(now);
 
-  // ShipStation + CIN7 SalesOrders + CIN7 Stock run concurrently — three
-  // independent reads against independent upstreams. Per the CIN7 rate-limit
-  // rule (3/sec, 60/min) the two CIN7 calls within a single request are fine
-  // — they're separate endpoints and we don't fire more than one of each.
-  const [shipstationSnap, openOrdersResult, stockResult] = await Promise.allSettled([
-    buildShipStationSnapshot(env, {
-      localDate: syd.localDate,
-      tzOffsetMinutes: syd.tzOffsetMinutes,
-    }),
-    fetchOpenSalesOrders(env, { todayLocalDate: syd.localDate }),
-    fetchStockBySku(env),
-  ]);
+  // ShipStation runs in parallel with the CIN7 work (separate API, no shared
+  // rate budget). The two CIN7 calls themselves run STRICTLY SEQUENTIALLY:
+  // CIN7 Omni v1 limits to 3 calls/sec, and each cin7FetchAll can paginate
+  // internally, so firing SalesOrders + Stock concurrently easily blows past
+  // the per-second budget and returns a 429 (observed empirically v2.2.27a).
+  // See memory: project_cin7_omni_constraints.md.
+  const shipstationPromise = buildShipStationSnapshot(env, {
+    localDate: syd.localDate,
+    tzOffsetMinutes: syd.tzOffsetMinutes,
+  });
 
-  const shipstation = shipstationSnap.status === 'fulfilled'
-    ? shipstationSnap.value
+  let openOrdersValue = null;
+  let openOrdersError = null;
+  let stockValue = null;
+  let stockError = null;
+
+  try {
+    openOrdersValue = await fetchOpenSalesOrders(env, { todayLocalDate: syd.localDate });
+  } catch (e) {
+    openOrdersError = redactSecrets(e?.message || String(e));
+  }
+  // Only attempt stock if the first call returned cleanly — back-to-back
+  // failures usually mean a wider CIN7 outage and a second fetch will just
+  // burn rate-limit budget for nothing.
+  if (!openOrdersError) {
+    try {
+      stockValue = await fetchStockBySku(env);
+    } catch (e) {
+      stockError = redactSecrets(e?.message || String(e));
+    }
+  }
+
+  const shipstationSettled = await shipstationPromise.then(
+    (v) => ({ status: 'fulfilled', value: v }),
+    (e) => ({ status: 'rejected', reason: e }),
+  );
+  const shipstation = shipstationSettled.status === 'fulfilled'
+    ? shipstationSettled.value
     : { connected: false, error: 'ShipStation aggregator threw.' };
 
   // CIN7 fetches: if either fails, surface the error inside the distributors
@@ -499,14 +522,14 @@ logisticsRoutes.get('/logistics', async (c) => {
   let distributors = { colesWoolies: [], otherDistributors: [], totals: { open_orders: 0, coles_woolies_count: 0, other_count: 0, past_due_count: 0 } };
   let distributorsError = null;
 
-  if (openOrdersResult.status === 'rejected') {
-    distributorsError = `CIN7 SalesOrders fetch failed: ${redactSecrets(openOrdersResult.reason?.message || String(openOrdersResult.reason))}`;
-  } else if (stockResult.status === 'rejected') {
-    distributorsError = `CIN7 Stock fetch failed: ${redactSecrets(stockResult.reason?.message || String(stockResult.reason))}`;
+  if (openOrdersError) {
+    distributorsError = `CIN7 SalesOrders fetch failed: ${openOrdersError}`;
+  } else if (stockError) {
+    distributorsError = `CIN7 Stock fetch failed: ${stockError}`;
   } else {
     distributors = aggregateDistributorOrders(
-      openOrdersResult.value,
-      stockResult.value,
+      openOrdersValue,
+      stockValue,
       syd.localDate,
     );
   }
