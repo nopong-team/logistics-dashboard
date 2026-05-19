@@ -2313,9 +2313,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.27a</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.27b</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.27b &mdash; 19 May 2026 (Hotfix #2: read SalesOrders from D1 instead of live CIN7)</h4>
+    <ul>
+      <li><strong>Switched <code>/api/au/logistics</code> SalesOrders fetch to D1.</strong> v2.2.27a's serialisation fixed the per-second 429 but the CIN7 5000-call daily budget was already crowded (existing cron + on-demand tabs + my two earlier smoke tests). New helper <code>fetchOpenSalesOrdersFromD1()</code> reads from <code>cin7_sales_orders</code> + <code>cin7_sales_order_items</code> (already kept fresh every 15 min by <code>runCin7SalesOrdersChunk</code>). <code>dispatchedDate</code> and <code>deliveryDate</code> aren't first-class columns &mdash; they live inside <code>raw_json</code> &mdash; so the query uses SQLite's <code>json_extract</code> to filter on them at read time. No migration needed.</li>
+      <li><strong>Stock stays live.</strong> One single <code>/Stock</code> endpoint call with internal pagination &mdash; well within rate limits, and the warehouse needs current-moment stock for the green-tick fulfilment check. The 15-min D1 lag on SalesOrders is acceptable for permanent warehouse-TV ops (vs the launch-day birthday tab where we needed real-time).</li>
+      <li><strong>Removed.</strong> <code>fetchOpenSalesOrders</code> (live CIN7 fetcher), unused <code>OPEN_ORDER_LOOKBACK_DAYS</code> + <code>VOID_STATUSES</code> constants, and the <code>cin7FetchAll</code> import &mdash; all replaced by the SQL path.</li>
+    </ul>
     <h4>v2.2.27a &mdash; 19 May 2026 (Hotfix: serialise CIN7 calls in /api/au/logistics)</h4>
     <ul>
       <li><strong>Fixed CIN7 429 on the new logistics endpoint.</strong> v2.2.27 ran <code>fetchOpenSalesOrders</code> and <code>fetchStockBySku</code> concurrently via <code>Promise.allSettled</code>, which trips CIN7 Omni's 3-calls-per-second cap once internal pagination kicks in (Stock alone returns several pages). Serialised the two CIN7 calls: SalesOrders first, then Stock only if SalesOrders succeeded (back-to-back failures usually mean a wider outage; skipping the second call avoids burning rate budget for nothing). ShipStation still runs in parallel with the CIN7 work &mdash; it's a separate API and doesn't share a rate-limit bucket. Matches the existing memory <code>project_cin7_omni_constraints.md</code>: "don't run endpoints concurrently".</li>

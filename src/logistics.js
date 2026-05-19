@@ -2,8 +2,14 @@
  * AU Logistics tab — endpoint + helpers.
  *
  * Drives the warehouse TV (1920×1080, 16:9, no-scroll) for the AU
- * fulfilment team. Patterns mirror src/birthday.js: live data only (no D1),
- * KV-cached 60s, ShipStation snapshot reused as-is.
+ * fulfilment team. Patterns mirror src/birthday.js (KV-cached 60s,
+ * ShipStation snapshot reused as-is), with one difference: SalesOrders
+ * come from the D1 cache (cron-refreshed every 15 min) rather than live
+ * CIN7. The birthday tab bypassed D1 for launch-day real-time signal;
+ * the logistics tab is permanent ops where 15-min lag is acceptable and
+ * the daily 5000-call CIN7 budget gets crowded otherwise. Stock is still
+ * live (single endpoint, one call, current-moment numbers for the
+ * green-tick fulfilment check).
  *
  * Surfaces:
  *   1. ShipStation snapshot — open queue, shipped-today counts, express/intl
@@ -32,7 +38,6 @@
 
 import { Hono } from 'hono';
 import {
-  cin7FetchAll,
   fetchStockBySku,
   attributeCin7Order,
   normalizeAuSku,
@@ -46,16 +51,6 @@ export const logisticsRoutes = new Hono();
 
 const KV_KEY = 'au:logistics:v1';
 const KV_TTL_SECONDS = 60;
-
-// How far back to look for open orders by createdDate. Anything older than
-// 60 days that's still "open" in CIN7 is almost certainly stale data, not a
-// live warehouse problem. Cap keeps the CIN7 page count small (No Pong AU
-// volume is well under one page per week).
-const OPEN_ORDER_LOOKBACK_DAYS = 60;
-
-// CIN7 SalesOrder statuses considered "open" — i.e. not voided/cancelled.
-// Anything despatched is filtered out separately via dispatchedDate.
-const VOID_STATUSES = new Set(['VOID', 'VOIDED', 'CANCELLED']);
 
 // DC → label + state + must-ship-by-business-day-before rule.
 //
@@ -335,41 +330,98 @@ function analyseLineItem(item, stockBySku) {
   };
 }
 
-// ─── CIN7 fetcher: open SalesOrders only ───────────────────────────────────
+// ─── D1 fetcher: open SalesOrders ──────────────────────────────────────────
 
 /**
- * Fetch CIN7 SalesOrders created in the last OPEN_ORDER_LOOKBACK_DAYS days,
- * filter in-memory to "open" (no dispatchedDate, not voided), and return
- * the raw rows. We filter post-fetch rather than via the `where` clause
- * because CIN7 Omni v1's where-clause IS NULL support is inconsistent across
- * accounts; in-memory filtering against a 60-day window is cheap.
+ * Read open AU SalesOrders from D1's `cin7_sales_orders` cache rather than
+ * hitting CIN7 Omni live. v2.2.27 and v2.2.27a tried to fetch live but kept
+ * hitting CIN7's 429 (most likely the 5000-calls-per-day budget — the
+ * `*/15 *` cron plus the existing on-demand tabs eat most of it). D1 is
+ * refreshed every 15 minutes by `runCin7SalesOrdersChunk`, which is
+ * acceptable lag for warehouse-TV ops (vs the launch-day birthday tab where
+ * we deliberately bypassed D1 for real-time signal).
+ *
+ * `dispatchedDate` and `deliveryDate` aren't promoted to first-class columns
+ * — they live inside `raw_json`. SQLite's `json_extract` handles the
+ * filter and projection without a schema migration.
+ *
+ * Stock comes from the live `fetchStockBySku()` (a single Stock endpoint
+ * call) — the warehouse green-tick needs current-moment stock, and one
+ * endpoint per request stays well within rate limits.
+ *
+ * Returns an array of objects matching the shape `aggregateDistributorOrders`
+ * expects: `{ id, reference, createdDate, dispatchedDate, deliveryDate,
+ * company, status, lineItems: [...] }`.
  */
-async function fetchOpenSalesOrders(env, { todayLocalDate }) {
-  // Window start: today − OPEN_ORDER_LOOKBACK_DAYS, as a calendar date.
-  const [y, m, d] = todayLocalDate.split('-').map(Number);
-  const start = new Date(Date.UTC(y, m - 1, d));
-  start.setUTCDate(start.getUTCDate() - OPEN_ORDER_LOOKBACK_DAYS);
-  const pad = (n) => String(n).padStart(2, '0');
-  const dateFrom = `${start.getUTCFullYear()}-${pad(start.getUTCMonth() + 1)}-${pad(start.getUTCDate())}T00:00:00Z`;
-  const where = `CreatedDate>='${dateFrom}'`;
+async function fetchOpenSalesOrdersFromD1(env) {
+  if (!env.DB) {
+    throw new Error('D1 binding (env.DB) not available — cannot read cached SalesOrders.');
+  }
 
-  const fields = [
-    'id', 'reference', 'createdDate', 'dispatchedDate', 'deliveryDate',
-    'channel', 'branchName',
-    'firstName', 'lastName', 'company',
-    'status', 'invoiceStatus',
-    'total', 'subTotal',
-    'lineItems',
-  ].join(',');
+  // Pull the order rows. The `channel_attr IS NOT NULL` filter drops the
+  // rows the cron flagged as "not a distributor sale" (Stock Adjustments,
+  // Amazon mirrors, redacted retail) so we don't even attribute-classify
+  // them downstream.
+  const ordersStmt = env.DB.prepare(
+    `SELECT id, reference, status, channel_attr, company,
+            first_name, last_name, created_date,
+            json_extract(raw_json, '$.deliveryDate')   AS delivery_date,
+            json_extract(raw_json, '$.dispatchedDate') AS dispatched_date
+       FROM cin7_sales_orders
+      WHERE market = 'AU'
+        AND status NOT IN ('VOID', 'VOIDED', 'CANCELLED')
+        AND json_extract(raw_json, '$.dispatchedDate') IS NULL
+        AND channel_attr IS NOT NULL
+      ORDER BY created_date DESC`,
+  );
+  const { results: orderRows } = await ordersStmt.all();
+  if (!orderRows || orderRows.length === 0) return [];
 
-  const rows = await cin7FetchAll(env, 'SalesOrders', { fields, where });
+  // Pull the matching line items in a single follow-up query. parent_id = 0
+  // filter happens at the SQL layer for efficiency (the read-side rule).
+  const ids = orderRows.map((r) => r.id);
+  const placeholders = ids.map(() => '?').join(',');
+  const itemsStmt = env.DB.prepare(
+    `SELECT order_id, parent_id, code, base_sku, multiplier, uom_size,
+            qty, unit_price, total, name
+       FROM cin7_sales_order_items
+      WHERE order_id IN (${placeholders})
+        AND parent_id = 0
+      ORDER BY order_id`,
+  ).bind(...ids);
+  const { results: itemRows } = await itemsStmt.all();
 
-  return rows.filter((o) => {
-    if (o?.dispatchedDate) return false;
-    const status = String(o?.status || '').toUpperCase();
-    if (VOID_STATUSES.has(status)) return false;
-    return true;
-  });
+  // Bucket items by order_id.
+  const itemsByOrder = new Map();
+  for (const it of (itemRows || [])) {
+    const arr = itemsByOrder.get(it.order_id) || [];
+    arr.push({
+      code: it.code,
+      name: it.name,
+      qty: Number(it.qty) || 0,
+      uomSize: Number(it.uom_size) || 1,
+      parentId: Number(it.parent_id) || 0,
+      unitPrice: Number(it.unit_price) || 0,
+      total: Number(it.total) || 0,
+    });
+    itemsByOrder.set(it.order_id, arr);
+  }
+
+  // Reshape to the same shape the live CIN7 path returned, so the rest of
+  // the pipeline (classifyDistributor + aggregateDistributorOrders) doesn't
+  // change.
+  return orderRows.map((o) => ({
+    id: o.id,
+    reference: o.reference,
+    status: o.status,
+    company: o.company,
+    firstName: o.first_name,
+    lastName: o.last_name,
+    createdDate: o.created_date,
+    dispatchedDate: o.dispatched_date, // null by construction (filter above)
+    deliveryDate: o.delivery_date,
+    lineItems: itemsByOrder.get(o.id) || [],
+  }));
 }
 
 // ─── Aggregator ────────────────────────────────────────────────────────────
@@ -476,12 +528,11 @@ logisticsRoutes.get('/logistics', async (c) => {
   const now = new Date();
   const syd = sydneyParts(now);
 
-  // ShipStation runs in parallel with the CIN7 work (separate API, no shared
-  // rate budget). The two CIN7 calls themselves run STRICTLY SEQUENTIALLY:
-  // CIN7 Omni v1 limits to 3 calls/sec, and each cin7FetchAll can paginate
-  // internally, so firing SalesOrders + Stock concurrently easily blows past
-  // the per-second budget and returns a 429 (observed empirically v2.2.27a).
-  // See memory: project_cin7_omni_constraints.md.
+  // ShipStation runs in parallel with the CIN7+D1 work (separate API). The
+  // SalesOrders side now reads from D1 (no CIN7 call) — see memory note
+  // `project_cin7_omni_constraints.md`. Stock is the only remaining live
+  // CIN7 hit: a single endpoint with internal pagination, comfortably
+  // within rate limits even when the cron is running.
   const shipstationPromise = buildShipStationSnapshot(env, {
     localDate: syd.localDate,
     tzOffsetMinutes: syd.tzOffsetMinutes,
@@ -492,20 +543,18 @@ logisticsRoutes.get('/logistics', async (c) => {
   let stockValue = null;
   let stockError = null;
 
+  // SalesOrders comes from D1 (cron-refreshed every 15 minutes). Stock is
+  // a single live CIN7 endpoint call — one /Stock fetch with internal
+  // pagination, well within rate limits.
   try {
-    openOrdersValue = await fetchOpenSalesOrders(env, { todayLocalDate: syd.localDate });
+    openOrdersValue = await fetchOpenSalesOrdersFromD1(env);
   } catch (e) {
     openOrdersError = redactSecrets(e?.message || String(e));
   }
-  // Only attempt stock if the first call returned cleanly — back-to-back
-  // failures usually mean a wider CIN7 outage and a second fetch will just
-  // burn rate-limit budget for nothing.
-  if (!openOrdersError) {
-    try {
-      stockValue = await fetchStockBySku(env);
-    } catch (e) {
-      stockError = redactSecrets(e?.message || String(e));
-    }
+  try {
+    stockValue = await fetchStockBySku(env);
+  } catch (e) {
+    stockError = redactSecrets(e?.message || String(e));
   }
 
   const shipstationSettled = await shipstationPromise.then(
