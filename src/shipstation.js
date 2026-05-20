@@ -272,11 +272,21 @@ export async function buildShipStationSnapshot(env, { localDate /*, tzOffsetMinu
       }
       const wsSkus = wholesaleSkusFor(o);
       if (wsSkus.length > 0) {
+        // Company comes from billTo.company first (the invoiced entity, which
+        // is what wholesale flags like Waiva Clark care about), falling back
+        // to shipTo.company (some orders only set the destination side) and
+        // finally customerUsername (rare, but covers the legacy import path).
+        const company =
+          o?.billTo?.company ||
+          o?.shipTo?.company ||
+          o?.customerUsername ||
+          null;
         wholesaleSummaries.push({
           order_number: o?.orderNumber || o?.orderId || null,
           ship_to_country: country || null,
           service: o?.requestedShippingService || o?.serviceCode || null,
           wholesale_skus: wsSkus,
+          company,
         });
       }
     }

@@ -2487,31 +2487,25 @@
         font-weight: 500;
       }
 
-      /* ── Main two-column row ── */
+      /* ── Main row: Coles+Woolies (2fr) + Other Distributors (1fr) ──
+         Per Melanie 2026-05-19: split makes the busier CW section get more
+         horizontal room, with Other Distributors sitting on the right. */
       #tab-au-logistics .log-main-row {
         display: grid;
-        grid-template-columns: 1fr 1.4fr;
+        grid-template-columns: 2fr 1fr;
         gap: 10px;
         flex: 1;
-        min-height: 0;
-      }
-      #tab-au-logistics .log-col {
-        display: flex;
-        flex-direction: column;
-        gap: 10px;
         min-height: 0;
       }
       #tab-au-logistics .log-section {
         background: #fff;
         border: 1px solid var(--border);
         border-radius: 8px;
-        padding: 12px 14px;
+        padding: 10px 12px;
         display: flex;
         flex-direction: column;
         min-height: 0;
       }
-      #tab-au-logistics .log-section.express { border-left: 3px solid #FF578A; }
-      #tab-au-logistics .log-section.wholesale { border-left: 3px solid #7B5DD3; }
       #tab-au-logistics .log-section.cw { border-left: 3px solid #1F8B4C; }
       #tab-au-logistics .log-section.other { border-left: 3px solid #5A89C2; }
       #tab-au-logistics .log-section-title {
@@ -2537,14 +2531,18 @@
         min-height: 0;
       }
 
-      /* ── Order cards ── */
+      /* ── Order cards — tightened in v2.2.29 to fit 4-6 per section ──
+         Padding shrunk from 8px/10px → 5px/8px, line padding 2px → 1px,
+         and the line-item .name column was dropped (the short-SKU display
+         carries the variant info on its own). */
       #tab-au-logistics .log-order {
         border: 1px solid var(--border);
         border-radius: 6px;
-        padding: 8px 10px;
-        margin-bottom: 6px;
+        padding: 5px 8px;
+        margin-bottom: 5px;
         background: #fff;
       }
+      #tab-au-logistics .log-order:last-child { margin-bottom: 0; }
       #tab-au-logistics .log-order.past-due {
         border-color: #E53935;
         background: #FFF5F5;
@@ -2554,10 +2552,10 @@
         justify-content: space-between;
         align-items: baseline;
         gap: 8px;
-        margin-bottom: 4px;
+        margin-bottom: 2px;
       }
       #tab-au-logistics .log-order-label {
-        font-size: 13px;
+        font-size: 12px;
         font-weight: 700;
         color: var(--text-primary);
       }
@@ -2567,9 +2565,9 @@
         font-variant-numeric: tabular-nums;
       }
       #tab-au-logistics .log-order-date {
-        font-size: 11px;
+        font-size: 10px;
         color: var(--text-secondary);
-        margin-bottom: 6px;
+        margin-bottom: 3px;
         font-variant-numeric: tabular-nums;
       }
       #tab-au-logistics .log-order.past-due .log-order-date {
@@ -2581,17 +2579,17 @@
         align-items: center;
         gap: 6px;
         font-size: 11px;
-        padding: 2px 0;
+        padding: 1px 0;
       }
       #tab-au-logistics .log-line .log-line-tick {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 16px;
-        height: 16px;
+        width: 14px;
+        height: 14px;
         border-radius: 3px;
         flex-shrink: 0;
-        font-size: 11px;
+        font-size: 10px;
         font-weight: 800;
       }
       #tab-au-logistics .log-line .log-line-tick.ok {
@@ -2604,20 +2602,27 @@
         border: 1px solid #E53935;
         font-size: 9px;
         width: auto;
+        height: 14px;
         padding: 0 5px;
         font-weight: 700;
       }
       #tab-au-logistics .log-line-sku {
         font-family: ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--text-primary);
+        font-weight: 700;
+        letter-spacing: -0.2px;
+      }
+      #tab-au-logistics .log-line-qty {
+        margin-left: auto;
         font-size: 10px;
         color: var(--text-secondary);
+        font-variant-numeric: tabular-nums;
         font-weight: 600;
       }
-      #tab-au-logistics .log-line-name {
-        flex: 1;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+      #tab-au-logistics .log-line.gap .log-line-qty {
+        color: #C62828;
+        font-weight: 700;
       }
       #tab-au-logistics .log-empty {
         font-size: 12px;
@@ -2626,16 +2631,28 @@
         padding: 12px;
         font-style: italic;
       }
-      #tab-au-logistics .log-alert-row {
-        font-size: 11px;
-        padding: 4px 0;
-        border-bottom: 1px solid var(--border);
-        display: flex;
-        justify-content: space-between;
-        gap: 8px;
+
+      /* ── Wholesale KPI Waiva Clark flag (v2.2.29) ──
+         When ss.waiva_clark_open is true, the wholesale KPI card paints red
+         and the sub-line switches to "⚠ Waiva Clark order open" so the
+         warehouse spots it from across the floor. */
+      #tab-au-logistics .log-card.waiva-flag {
+        background: #FFF5F5;
+        border-color: #E53935;
+        border-left-color: #C62828;
+        border-left-width: 4px;
+        animation: log-waiva-pulse 2s ease-in-out infinite;
       }
-      #tab-au-logistics .log-alert-row:last-child { border-bottom: none; }
-      #tab-au-logistics .log-alert-row .ord { font-weight: 700; font-variant-numeric: tabular-nums; }
+      #tab-au-logistics .log-card.waiva-flag .log-card-sub {
+        color: #C62828;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+      @keyframes log-waiva-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(229, 57, 53, 0.0); }
+        50%      { box-shadow: 0 0 0 4px rgba(229, 57, 53, 0.18); }
+      }
 
       /* ── Meta bar ── */
       #tab-au-logistics .log-meta {
@@ -2712,56 +2729,34 @@
         <div class="log-card-value" id="log-kpi-express">—</div>
         <div class="log-card-sub">Open orders</div>
       </div>
-      <div class="log-card">
+      <div class="log-card" id="log-kpi-wholesale-card">
         <div class="log-card-label">Wholesale</div>
         <div class="log-card-value" id="log-kpi-wholesale">—</div>
-        <div class="log-card-sub">Open orders</div>
+        <div class="log-card-sub" id="log-kpi-wholesale-sub">Open orders</div>
       </div>
     </div>
 
-    <!-- Main two-column row -->
+    <!-- Main row: Coles+Woolies (2/3) side-by-side with Other Distributors (1/3).
+         Left column with ShipStation alert lists was removed in v2.2.29 — those
+         counts already live on the KPI strip, and the warehouse needs the
+         vertical real estate for 4-6 distributor orders without scrolling. -->
     <div class="log-main-row">
-      <!-- Left column: ShipStation alerts -->
-      <div class="log-col">
-        <div class="log-section express">
-          <div class="log-section-title">
-            ⚠️ Express / International — still open
-            <span class="count-pill" id="log-express-count">0</span>
-          </div>
-          <div class="log-section-body" id="log-express-list">
-            <div class="log-empty">Loading…</div>
-          </div>
+      <div class="log-section cw">
+        <div class="log-section-title">
+          🛒 Coles + Woolworths
+          <span class="count-pill" id="log-cw-count">0</span>
         </div>
-        <div class="log-section wholesale">
-          <div class="log-section-title">
-            📦 Wholesale — still open
-            <span class="count-pill" id="log-wholesale-count">0</span>
-          </div>
-          <div class="log-section-body" id="log-wholesale-list">
-            <div class="log-empty">Loading…</div>
-          </div>
+        <div class="log-section-body" id="log-cw-list">
+          <div class="log-empty">Loading…</div>
         </div>
       </div>
-
-      <!-- Right column: Distributor watch -->
-      <div class="log-col">
-        <div class="log-section cw">
-          <div class="log-section-title">
-            🛒 Coles + Woolworths
-            <span class="count-pill" id="log-cw-count">0</span>
-          </div>
-          <div class="log-section-body" id="log-cw-list">
-            <div class="log-empty">Loading…</div>
-          </div>
+      <div class="log-section other">
+        <div class="log-section-title">
+          🏬 Other distributors
+          <span class="count-pill" id="log-other-count">0</span>
         </div>
-        <div class="log-section other">
-          <div class="log-section-title">
-            🏬 Other distributors
-            <span class="count-pill" id="log-other-count">0</span>
-          </div>
-          <div class="log-section-body" id="log-other-list">
-            <div class="log-empty">Loading…</div>
-          </div>
+        <div class="log-section-body" id="log-other-list">
+          <div class="log-empty">Loading…</div>
         </div>
       </div>
     </div>
@@ -2783,9 +2778,19 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.31</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.32</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.32 &mdash; 19 May 2026 (🚚 Logistics tab: TV-density rework + Waiva Clark flag)</h4>
+    <ul>
+      <li><strong>Removed the left column from the Logistics tab.</strong> The two ShipStation alert sections (<em>Express/Intl still open</em>, <em>Wholesale still open</em>) were duplicating counts already shown on the KPI strip and eating ~42% of the horizontal space. Per Melanie 2026-05-19: "I just want a number of orders. I don't need the actual order numbers." Both order lists deleted; the KPI strip retains the counts.</li>
+      <li><strong>Distributor row now Coles+Woolies (2/3) + Other Distributors (1/3) side-by-side.</strong> The full TV width is reclaimed for distributor orders so 4-6 orders can fit per section without scrolling (the warehouse TV can't scroll). <code>.log-main-row</code> grid moves from <code>1fr 1.4fr</code> (split between alerts and distributors) to <code>2fr 1fr</code> (CW:Other).</li>
+      <li><strong>Line-item SKU display stripped to fragrance+formula.</strong> Per Melanie: "I really just need the variant, so the fragrance and the formula part of it." New <code>_logShortSku()</code> helper drops the <code>AU-</code> prefix and the trailing <code>-CTN-NN</code> / <code>-xNN</code> / <code>-NN</code> pack-size suffix. So <code>AU-FF-NPV-CTN-48</code> → <code>FF-NPV</code>, <code>AU-OG-NPO-35</code> → <code>OG-NPO</code>, <code>AU-BD-NBF-35</code> → <code>BD-NBF</code>. <code>WC-</code> prefix is preserved (wholesale signal). The wordy product-name field on each line is gone — the short SKU carries the variant info on its own.</li>
+      <li><strong>Order-card density tightened.</strong> Card padding 8px/10px → 5px/8px, card margin 6px → 5px, line padding 2px → 1px, line height shrunk via 14px ticks (down from 16px), order-label 13px → 12px, date line 11px → 10px. Roughly 50% denser per order — 4-6 orders per section now fits 1080p comfortably.</li>
+      <li><strong>New right-aligned qty column on each line.</strong> Each line now reads <code>✓ FF-NPV ........ 100 cartons</code> (fulfillable) or <code>60/100 FF-NPV ........ cartons</code> (short, with the gap inside the red pill). The qty pushes to the right via <code>margin-left: auto</code> so the SKU column lines up cleanly across multiple lines.</li>
+      <li><strong>Waiva Clark wholesale flag.</strong> Per Melanie: "if it's an order from Waiva Clark... put an extra asterisk or something, a flag." Backend <code>buildShipStationSnapshot()</code> now emits <code>company</code> on each wholesale summary (from <code>billTo.company</code> with <code>shipTo.company</code> fallback); the logistics endpoint runs a case-insensitive <code>/waiva\s*clark/i</code> match across them and sets <code>shipstation.waiva_clark_open</code> + <code>shipstation.waiva_clark_open_count</code> on the payload. Frontend paints the Wholesale KPI card red with a pulsing box-shadow and swaps the sub-line to <code>⚠ WAIVA CLARK ORDER OPEN</code> (or <code>⚠ Waiva Clark — N orders open</code> if there's more than one) so it pops from across the warehouse floor.</li>
+      <li><strong>Verify after deploy.</strong> Hit <code>/api/au/logistics?refresh=1</code> — payload's <code>shipstation</code> block should now include <code>waiva_clark_open</code> + <code>waiva_clark_open_count</code> fields, and each entry in <code>wholesaleOpenOrders</code> should include a <code>company</code> field. On the dashboard, open the 🚚 Logistics tab and confirm: no left column, Coles+Woolies on the left 2/3, Other on the right 1/3, line items show short SKUs only (e.g. <code>OG-NPO</code> not <code>AU-OG-NPO-CTN-48</code>).</li>
+    </ul>
     <h4>v2.2.31 &mdash; 19 May 2026 (Flip hammer + bullseye horizontally so they face the direction of travel)</h4>
     <ul>
       <li><strong>Hammer + bullseye now face forwards.</strong> v2.2.29's sweep animations had the 🔨 hammer and 🎯 bullseye facing left while the sweep travels left→right, so they looked like they were flying backwards. Added <code>scaleX(-1)</code> to every keyframe in <code>@keyframes bday-hammer-swing</code> and <code>@keyframes bday-bullseye-hit</code> so the hammer head + the bullseye both face the direction of travel. Flame and lightning bolt sweeps untouched (they're already symmetric enough that the flip wasn't needed).</li>
@@ -7874,35 +7879,27 @@ function _logisticsRender(data) {
   document.getElementById('log-kpi-express').textContent = ss.connected ? _logFmt(ss.expressIntlOpen) : '—';
   document.getElementById('log-kpi-wholesale').textContent = ss.connected ? _logFmt(ss.wholesaleOpen) : '—';
 
-  // Express / International alert list
-  _logRenderAlertList({
-    listId: 'log-express-list',
-    countId: 'log-express-count',
-    connected: ss.connected,
-    summaries: ss.expressIntlOpenOrders || [],
-    emptyMsg: ss.connected ? '✅ No express or international orders waiting' : 'ShipStation not connected',
-    rowFor: (o) => `
-      <div class="log-alert-row">
-        <span><span class="ord">#${_logEscape(o.order_number)}</span> · ${_logEscape(o.ship_to_country || '')} · ${_logEscape(o.service || '')}</span>
-        <span style="font-size:9px;font-weight:700;color:#FF578A;">${(o.flags || []).map(_logEscape).join(' ')}</span>
-      </div>`,
-  });
+  // Waiva Clark flag — backend sets ss.waiva_clark_open when any open wholesale
+  // order has Waiva Clark in the company field. Paints the Wholesale KPI card
+  // red and swaps the sub-line so the warehouse sees it from across the floor.
+  const wsCard = document.getElementById('log-kpi-wholesale-card');
+  const wsSub  = document.getElementById('log-kpi-wholesale-sub');
+  if (wsCard && wsSub) {
+    if (ss.waiva_clark_open) {
+      wsCard.classList.add('waiva-flag');
+      const n = Number(ss.waiva_clark_open_count) || 0;
+      wsSub.textContent = n > 1
+        ? `⚠ Waiva Clark — ${n} orders open`
+        : '⚠ Waiva Clark order open';
+    } else {
+      wsCard.classList.remove('waiva-flag');
+      wsSub.textContent = 'Open orders';
+    }
+  }
 
-  // Wholesale alert list
-  _logRenderAlertList({
-    listId: 'log-wholesale-list',
-    countId: 'log-wholesale-count',
-    connected: ss.connected,
-    summaries: ss.wholesaleOpenOrders || [],
-    emptyMsg: ss.connected ? '✅ No wholesale orders in the ShipStation queue' : 'ShipStation not connected',
-    rowFor: (o) => `
-      <div class="log-alert-row">
-        <span><span class="ord">#${_logEscape(o.order_number)}</span> · ${_logEscape(o.ship_to_country || '')} · ${_logEscape(o.service || '')}</span>
-        <span style="font-size:9px;color:var(--text-secondary);">${(o.wholesale_skus || []).slice(0,3).map(_logEscape).join(', ')}${(o.wholesale_skus || []).length > 3 ? '…' : ''}</span>
-      </div>`,
-  });
-
-  // Distributor sections
+  // Distributor sections — the left column (ShipStation alert lists) was
+  // removed in v2.2.29; counts for Express/Intl + Wholesale already live on
+  // the KPI strip above.
   const dist = data?.distributors || {};
   const cw = dist.colesWoolies || [];
   const other = dist.otherDistributors || [];
@@ -7920,20 +7917,25 @@ function _logisticsRender(data) {
   document.getElementById('log-last-updated').textContent = stamp.toLocaleTimeString('en-AU', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
 }
 
-function _logRenderAlertList({ listId, countId, connected, summaries, emptyMsg, rowFor }) {
-  const list = document.getElementById(listId);
-  const count = document.getElementById(countId);
-  if (count) count.textContent = (summaries || []).length;
-  if (!list) return;
-  if (!connected) {
-    list.innerHTML = `<div class="log-empty">${_logEscape(emptyMsg)}</div>`;
-    return;
-  }
-  if (!summaries || summaries.length === 0) {
-    list.innerHTML = `<div class="log-empty">${_logEscape(emptyMsg)}</div>`;
-    return;
-  }
-  list.innerHTML = summaries.map(rowFor).join('');
+/**
+ * Strip a CIN7/Woo SKU down to its fragrance + formula core for the warehouse
+ * TV. Examples:
+ *   AU-FF-NPV-CTN-48  → FF-NPV
+ *   AU-OG-NPO-35      → OG-NPO
+ *   AU-OG-NPO-CTN-48  → OG-NPO
+ *   AU-BD-NBF-35      → BD-NBF
+ *   AU-SRT-x12        → SRT
+ *   WC-OG-NPO-35      → WC-OG-NPO   (WC- prefix preserved as a wholesale signal)
+ * Rule: drop a leading AU- prefix, then drop a trailing -CTN-NN / -xNN / -NN.
+ */
+function _logShortSku(sku) {
+  if (!sku) return '';
+  let s = String(sku).trim().toUpperCase();
+  if (s.startsWith('AU-')) s = s.slice(3);
+  s = s.replace(/-CTN-\d+$/, '');
+  s = s.replace(/-X\d+$/, '');
+  s = s.replace(/-\d+$/, '');
+  return s;
 }
 
 function _logRenderDistributorList(listId, orders, emptyMsg) {
@@ -7949,15 +7951,23 @@ function _logRenderDistributorList(listId, orders, emptyMsg) {
       ? `Must ship by ${_logEscape(o.must_ship_by)}${o.delivery_date && o.delivery_date !== o.must_ship_by ? ` &middot; delivery ${_logEscape(o.delivery_date)}` : ''}`
       : (o.delivery_date ? `Delivery ${_logEscape(o.delivery_date)}` : 'No delivery date');
     const lineRows = (o.line_items || []).map((li) => {
+      const shortSku = _logShortSku(li.sku || '') || _logEscape(li.sku || '—');
+      const unit = li.unit_label || 'cartons';
+      // Tick: green ✓ when fulfillable, red "X/Y" pill when short. The
+      // right-aligned qty mirrors the same source field so a green row reads
+      // "✓ FF-NPV ... 100 cartons" and a red row reads "60/100 FF-NPV ... cartons".
       const tick = li.is_fulfillable
         ? `<span class="log-line-tick ok">✓</span>`
-        : `<span class="log-line-tick gap">${_logEscape(li.gap_display)}</span>`;
+        : `<span class="log-line-tick gap">${_logEscape(`${li.cartons_available}/${li.cartons_needed}`)}</span>`;
+      const qty = li.is_fulfillable
+        ? `${_logFmt(li.cartons_needed)} ${_logEscape(unit)}`
+        : _logEscape(unit);
+      const rowCls = li.is_fulfillable ? 'log-line' : 'log-line gap';
       return `
-        <div class="log-line">
+        <div class="${rowCls}">
           ${tick}
-          <span class="log-line-sku">${_logEscape(li.sku || '')}</span>
-          <span class="log-line-name">${_logEscape(li.name || '')}</span>
-          ${li.is_fulfillable ? `<span style="font-size:10px;color:var(--text-secondary);font-variant-numeric:tabular-nums;">${_logEscape(li.gap_display)}</span>` : ''}
+          <span class="log-line-sku">${_logEscape(shortSku)}</span>
+          <span class="log-line-qty">${qty}</span>
         </div>`;
     }).join('');
     return `

@@ -573,6 +573,24 @@ logisticsRoutes.get('/logistics', async (c) => {
     ? shipstationSettled.value
     : { connected: false, error: 'ShipStation aggregator threw.' };
 
+  // ─── Waiva Clark flag ───────────────────────────────────────────────────
+  //
+  // Per Melanie 2026-05-19: when a Waiva Clark wholesale order is open, the
+  // warehouse needs a visual flag on the Wholesale KPI card. Detection runs
+  // over the wholesale summaries already produced by buildShipStationSnapshot
+  // and matches on company name, case-insensitive, with whitespace tolerance.
+  // Waiva Clark is a company name (not a person) so we only check the
+  // company field — billTo.company first, shipTo.company fallback, surfaced
+  // as `summary.company` by the snapshot.
+  const waivaClarkRegex = /waiva\s*clark/i;
+  const waivaClarkSummaries = Array.isArray(shipstation?.wholesaleOpenOrders)
+    ? shipstation.wholesaleOpenOrders.filter(
+        (s) => s?.company && waivaClarkRegex.test(String(s.company)),
+      )
+    : [];
+  shipstation.waiva_clark_open = waivaClarkSummaries.length > 0;
+  shipstation.waiva_clark_open_count = waivaClarkSummaries.length;
+
   // CIN7 fetches: if either fails, surface the error inside the distributors
   // block so the rest of the tab (ShipStation + KPIs) still renders. The
   // warehouse can still work off ShipStation alone if CIN7 hiccups.
