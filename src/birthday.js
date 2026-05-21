@@ -189,9 +189,16 @@ async function wooFetch(env, endpoint, params = {}) {
  * AEST/AEDT offset — produces a window that starts 10–11 hours earlier than
  * intended and leaks the previous day's late-afternoon orders into "today".
  *
- * Stops at MAX_PAGES as a safety belt.
+ * Stops at MAX_PAGES as a safety belt. v2.2.32 bumped maxPages 10→100
+ * after the 11th-birthday launch hit the 1,000-order cap mid-morning
+ * (10 pages × 100 per_page = 1,000); the dashboard froze at exactly 1,000
+ * while real Woo orders kept climbing. The Woo totalPages header drives
+ * the actual loop exit (we break as soon as we've fetched everything), so
+ * the maxPages cap is only a runaway-loop backstop — bumping it to 100
+ * (10,000-order ceiling) gives generous headroom without changing the
+ * real per-request cost.
  */
-async function fetchOrdersSince(env, afterNaiveLocal, { perPage = 100, maxPages = 10 } = {}) {
+async function fetchOrdersSince(env, afterNaiveLocal, { perPage = 100, maxPages = 100 } = {}) {
   const all = [];
   for (let page = 1; page <= maxPages; page++) {
     const { data, totalPages } = await wooFetch(env, '/orders', {

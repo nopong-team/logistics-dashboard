@@ -2778,9 +2778,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.32</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.33</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.33 &mdash; 21 May 2026 (🚨 Launch-day hotfix: birthday endpoint was capped at 1,000 orders)</h4>
+    <ul>
+      <li><strong>Bug.</strong> <code>fetchOrdersSince()</code> in <code>src/birthday.js</code> had a hardcoded <code>maxPages: 10</code> safety belt &mdash; combined with <code>per_page: 100</code> this capped <code>total_orders_today</code> at exactly 1,000. The dashboard froze at 1,000 mid-morning during the 11th-birthday launch while real Woo orders kept climbing past it. Confirmed via DevTools: <code>Fresh total_orders_today: 1000</code> on a <code>?refresh=1</code> bypass of the KV cache, with no error in the payload &mdash; the endpoint was happily returning a truncated count as if it were complete.</li>
+      <li><strong>Fix.</strong> Bumped <code>maxPages</code> from 10 to 100 (10,000-order ceiling). The Woo <code>x-wp-totalpages</code> header already drives the actual loop exit (<code>if (page >= totalPages) break</code>), so the cap is purely a runaway-loop backstop &mdash; raising it has zero impact on cost when daily volume is below the new ceiling.</li>
+      <li><strong>Why keep a cap at all.</strong> Defence against an upstream bug where Woo reports a wrong totalPages count and we end up fetching forever. 100 is high enough to cover any conceivable No Pong day and low enough to surface as a runaway loop rather than burning the worker's full CPU budget.</li>
+      <li><strong>Knock-on effect.</strong> The 🎂 11th Birthday tab's milestone celebrations (🔥 500 / 🔨 1,000 / ⚡ 1,500 / 🎯 1,733) couldn't fire above 1,000 with the bug in place. Now unblocked &mdash; 1,500 and 1,733 will trigger correctly as the day continues.</li>
+    </ul>
     <h4>v2.2.32 &mdash; 19 May 2026 (🚚 Logistics tab: TV-density rework + Waiva Clark flag)</h4>
     <ul>
       <li><strong>Removed the left column from the Logistics tab.</strong> The two ShipStation alert sections (<em>Express/Intl still open</em>, <em>Wholesale still open</em>) were duplicating counts already shown on the KPI strip and eating ~42% of the horizontal space. Per Melanie 2026-05-19: "I just want a number of orders. I don't need the actual order numbers." Both order lists deleted; the KPI strip retains the counts.</li>
