@@ -2814,9 +2814,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.34</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.35</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.35 &mdash; 21 May 2026 (Mic-drop milestone bumped 2,000 → 2,100)</h4>
+    <ul>
+      <li><strong>2,000 mic-drop milestone never fired</strong> because the All-orders-today count had already crossed 2,000 by the time v2.2.34 deployed (~14:13 AEST). The first-load suppression logic correctly marked it as already-fired silently &mdash; the celebration was lost. Per Melanie: rather than retroactively replay it, bump the threshold so we get a fresh crossing to celebrate.</li>
+      <li><strong>Fix.</strong> <code>_BDAY_MILESTONES</code> entry #4 (mic-drop) threshold 2,000 → 2,100; banner text updated to "🎤 2,100 ORDERS — MIC DROP! 🎤". No other state changes &mdash; the localStorage flag for "2000" is now harmless dead data and will be ignored.</li>
+      <li><strong>Now reads:</strong> 500 🔥 &rarr; 1,000 🔨 &rarr; 1,500 ⚡ &rarr; 1,733 🎯 &rarr; <strong>2,100 🎤</strong> &rarr; 2,500 🚀.</li>
+    </ul>
     <h4>v2.2.34 &mdash; 21 May 2026 (Birthday tab: two more milestones beyond the goal 🎤🚀)</h4>
     <ul>
       <li><strong>Two new milestone celebrations</strong> on the 🎂 11th Birthday tab, sitting above the 1,733 bullseye for when we blow past last year's total.</li>
@@ -7550,11 +7556,11 @@ const _BDAY_MILESTONES = [
     confettiColours: ['#FF1744', '#FFD700', '#FF578A', '#fff', '#FFA500'],
   },
   {
-    threshold: 2000,
+    threshold: 2100,
     klass: 'mic-drop',
     emoji: '🎤',
     sweepClass: 'mic-drop-anim',
-    text: '🎤 2,000 ORDERS — MIC DROP! 🎤',
+    text: '🎤 2,100 ORDERS — MIC DROP! 🎤',
     confettiColours: ['#4B0082', '#7B5DD3', '#FFD700', '#fff', '#2E0854'],
   },
   {
