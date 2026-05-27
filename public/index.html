@@ -1869,19 +1869,20 @@
       <div class="table-card-header">
         <div class="table-card-title">Incoming stock by SKU</div>
         <span id="au-incoming-source-chip" class="source-chip" style="display:none;" title="Source of the run-rate basis"></span>
-        <div class="table-hint">Stock = base SKU SOH + carton tins (×48) · Run rate = trailing 3 complete months ÷ days · Days left = stock ÷ run rate · Discontinued SKUs excluded · <em>Run rate covers all 5 channels (Coles + Woolies + Distributors + Woo + Amazon) — full demand picture as of v2.2.20.</em></div>
+        <div class="table-hint">Stock = base SKU SOH + carton tins (×48) · Run rate = trailing 3 complete months ÷ days · Days left = stock ÷ run rate · Next PO (days) = earliest open-PO expected_date − today · Discontinued SKUs excluded · <em>Run rate covers all 5 channels (Coles + Woolies + Distributors + Woo + Amazon). v2.2.36: incoming now includes raw tins (T-AU-...) with a 'raw' badge when that's all that's on order.</em></div>
         <button class="btn-csv" onclick="downloadAuIncomingCSV()">Export CSV</button>
       </div>
       <div class="table-scroll"><table>
         <thead>
           <tr>
-            <th title="Base AU SKU. Cartons are rolled up to this base × 48 tins.">SKU ⓘ</th>
+            <th title="Base AU SKU. Cartons (AU-CTN-...×48) and raw tins (T-AU-...) are rolled up to this base.">SKU ⓘ</th>
             <th class="num" title="Sellable tins on hand right now: base SKU SOH plus all cartons of this SKU rolled up at ×48 tins each.">Current stock ⓘ</th>
-            <th class="num" title="Average tins sold per day. Live (v2.2.20+): trailing 3 complete months across all 5 channels (Coles + Woolies + Distributors + Woo + Amazon). Full demand picture. Static fallback: April 2026 ÷ 30 days, all 5 channels.">Run rate (tins/day) ⓘ</th>
+            <th class="num" title="Average units sold per day. Live (v2.2.20+): trailing 3 complete months across all 5 channels (Coles + Woolies + Distributors + Woo + Amazon). Static fallback: April 2026 ÷ 30 days, all 5 channels.">Run rate (units/day) ⓘ</th>
             <th class="num" title="Days of stock remaining at the current run rate. Blank if no sales in the period.">Days left ⓘ</th>
-            <th class="num" title="Total tins on order across all open POs for this SKU. Includes finished tins (AU-...) and any carton lines (AU-CTN-...×48). Excludes raw tins (T-AU-...) which need manufacturing first.">Incoming ⓘ</th>
-            <th title="PO references where this SKU appears.">Next PO(s) ⓘ</th>
-            <th title="Risk status: Critical = &lt;14 days left; Low = &lt;30 days left; Monitor = &lt;60 days; Stable ≥ 60 days. '-incoming' suffix means a PO is on the way. 'Days until arrival' column will activate when CIN7 export gains expected-date fields.">Status ⓘ</th>
+            <th class="num" title="Days from today until the next open PO for this SKU arrives. Earliest future expected_date wins. Negative = overdue and shown in red. Blank if no PO has a date set in CIN7.">Next PO (days) ⓘ</th>
+            <th class="num" title="Total tins on order across all open POs for this SKU. Includes finished tins (AU-...), carton lines (AU-CTN-...×48), and raw tins (T-AU-...). Raw-only rows are badged 'raw' — those tins still need filling before they're ready to sell.">Incoming qty ⓘ</th>
+            <th title="The PO reference behind the 'Next PO (days)' value. Other open POs for this SKU may exist — see the open-PO table above.">PO ref ⓘ</th>
+            <th title="Risk status: Critical = &lt;14 days left; Low = &lt;30 days left; Monitor = &lt;60 days; Stable ≥ 60 days. '-incoming' suffix means a PO is on the way.">Risk status ⓘ</th>
           </tr>
         </thead>
         <tbody id="au-po-sku-tbody"></tbody>
@@ -2814,9 +2815,21 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.35</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.36</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.36 &mdash; 27 May 2026 (AU PO &mdash; per-SKU table reshaped to mirror CA + Next PO (days) column + raw-tin rollup)</h4>
+    <ul>
+      <li><strong>"Incoming stock by SKU" table now matches the CA layout.</strong> Columns: SKU / Current stock / Run rate (units/day) / Days left / <strong>Next PO (days)</strong> / Incoming qty / PO ref / Risk status. Previously AU was missing the per-SKU days-until-arrival readout entirely &mdash; the only "when" signal was the risk badge's "-incoming" suffix, which doesn't tell you whether the next PO is 3 days away or 3 months. Mel called this out as not useful versus the CA equivalent.</li>
+      <li><strong>New "Next PO (days)" column.</strong> Backend (<code>buildIncomingBySku</code> in <code>src/cin7.js</code>) now joins each base SKU to its open POs and picks the earliest future <code>expected_date</code>. The value is days from today. Overdue POs (negative days) surface in red &mdash; "the PO you were expecting hasn't landed yet" is still information Mel needs to see. If no PO for this SKU has any date set in CIN7, the cell is blank rather than a misleading zero. Future-dated POs always win over overdue ones if both exist.</li>
+      <li><strong>Raw tins (T-AU-...) now fold into the matching finished SKU row.</strong> Previously raw-tin POs were excluded from the per-SKU view entirely &mdash; if the only thing on order was raw tins, the SKU showed "Incoming: &mdash;" even though supply was genuinely en route. Now T-AU-OG-NPO-35 contributes to the AU-OG-NPO-35 row's <code>incoming_qty</code> and <code>next_po_days</code>. To keep the distinction honest, rows where ALL incoming is still raw get a yellow <em>raw</em> badge next to the qty (those tins still need filling before they're sellable). Mixed rows (some finished + some raw) get a subtle asterisk + tooltip.</li>
+      <li><strong>Packaging (P-...) deferred.</strong> CIN7 packaging SKUs don't have a clean machine-readable mapping to a single finished SKU &mdash; they're named by human-readable description ("SRTs for CL-VLB"). Folding them in needs Mel's mapping rules; tracking as a separate follow-up so we don't ship a half-mapping.</li>
+      <li><strong>New backend fields on each row:</strong> <code>next_po_days</code>, <code>next_po_ref</code>, <code>raw_incoming_qty</code>, <code>has_raw_only</code>. <code>next_po_refs</code> kept for back-compat (now an array of ref strings, not objects).</li>
+      <li><strong>Column rename:</strong> "Run rate (tins/day)" &rarr; "Run rate (units/day)" for CA parity. Tooltip still notes it's tins (AU only ships tins).</li>
+      <li><strong>CSV export updated to match.</strong> 8 on-screen columns plus 3 drill-down columns on the right edge: <code>Raw incoming qty</code>, <code>Raw only</code>, <code>All open POs</code> (semicolon-joined).</li>
+      <li><strong>Table-hint and tooltips refreshed</strong> to explain the new column + the raw-tin behaviour.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
     <h4>v2.2.35 &mdash; 21 May 2026 (Mic-drop milestone bumped 2,000 → 2,100)</h4>
     <ul>
       <li><strong>2,000 mic-drop milestone never fired</strong> because the All-orders-today count had already crossed 2,000 by the time v2.2.34 deployed (~14:13 AEST). The first-load suppression logic correctly marked it as already-fired silently &mdash; the celebration was lost. Per Melanie: rather than retroactively replay it, bump the threshold so we get a fresh crossing to celebrate.</li>
@@ -8967,25 +8980,61 @@ function renderAuIncomingBySku() {
   const tb = document.getElementById('au-po-sku-tbody');
   if (!tb) return;
   if (!AU_INCOMING_BY_SKU || AU_INCOMING_BY_SKU.length === 0) {
-    tb.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:24px;color:var(--text-secondary);">No per-SKU view yet.</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-secondary);">No per-SKU view yet.</td></tr>`;
     return;
   }
   tb.innerHTML = AU_INCOMING_BY_SKU.map(r => {
+    // Days-left cell — red <14, amber <30, plain otherwise.
     const daysCell = r.days_left == null
       ? '<span style="color:var(--text-light)">—</span>'
       : (r.days_left < 14 ? `<strong style="color:#A32D2D;">${r.days_left}</strong>`
         : r.days_left < 30 ? `<strong style="color:#854F0B;">${r.days_left}</strong>`
         : r.days_left.toString());
-    const poRefs = (r.next_po_refs || []).length
-      ? r.next_po_refs.map(p => `<code style="font-size:11px;background:#FFF5F7;padding:1px 4px;border-radius:3px;">${p}</code>`).join(' ')
+
+    // Next PO (days) cell — v2.2.36. Negative = overdue (red). Zero = today
+    // (slight emphasis). Otherwise plain integer. Blank if no PO had a date.
+    let nextDaysCell;
+    if (r.next_po_days == null) {
+      nextDaysCell = '<span style="color:var(--text-light)">—</span>';
+    } else if (r.next_po_days < 0) {
+      nextDaysCell = `<strong style="color:#A32D2D;" title="PO is past its expected arrival date">${r.next_po_days}</strong>`;
+    } else if (r.next_po_days === 0) {
+      nextDaysCell = `<strong style="color:#854F0B;">0</strong>`;
+    } else {
+      nextDaysCell = r.next_po_days.toString();
+    }
+
+    // Incoming qty cell — v2.2.36. Append a 'raw' badge if the only supply
+    // on order is still in raw-tin form (T-AU-...) — those need filling
+    // before they're ready to sell, so it's a meaningful distinction.
+    let incCell;
+    if (!r.incoming_qty) {
+      incCell = '<span style="color:var(--text-light)">—</span>';
+    } else if (r.has_raw_only) {
+      incCell = `${fmtAuNum(r.incoming_qty)} <span class="badge" style="background:#FEF3C7;color:#92400E;border-color:#FCD34D;font-size:10px;padding:0 5px;margin-left:4px;" title="All ${fmtAuNum(r.raw_incoming_qty)} of these tins are still raw (T-AU-...) and need filling before they become sellable stock.">raw</span>`;
+    } else if (r.raw_incoming_qty > 0) {
+      // Mixed: some finished, some raw. Subtle hint via title only.
+      incCell = `<span title="${fmtAuNum(r.raw_incoming_qty)} of ${fmtAuNum(r.incoming_qty)} tins are raw (T-AU-...) — the rest are finished/cartoned and ready to sell on arrival.">${fmtAuNum(r.incoming_qty)}*</span>`;
+    } else {
+      incCell = fmtAuNum(r.incoming_qty);
+    }
+
+    // PO ref cell — show the PO behind the 'Next PO (days)' value. Fall back
+    // to the first next_po_refs entry if no dated PO exists (so the cell
+    // isn't blank when there IS open supply, just undated).
+    const poRef = r.next_po_ref || (r.next_po_refs && r.next_po_refs[0]) || null;
+    const poRefCell = poRef
+      ? `<code style="font-size:11px;background:#FFF5F7;padding:1px 4px;border-radius:3px;">${poRef}</code>`
       : '<span style="color:var(--text-light)">—</span>';
+
     return `<tr>
       <td><div class="sku-name">${r.sku}</div></td>
       <td class="num">${fmtAuNum(r.current_stock)}</td>
       <td class="num">${r.run_rate_per_day > 0 ? r.run_rate_per_day.toFixed(1) : '<span style="color:var(--text-light)">—</span>'}</td>
       <td class="num">${daysCell}</td>
-      <td class="num">${r.incoming_qty ? fmtAuNum(r.incoming_qty) : '<span style="color:var(--text-light)">—</span>'}</td>
-      <td>${poRefs}</td>
+      <td class="num">${nextDaysCell}</td>
+      <td class="num">${incCell}</td>
+      <td>${poRefCell}</td>
       <td>${AU_RISK_BADGE[r.risk] || r.risk}</td>
     </tr>`;
   }).join('');
@@ -9065,8 +9114,28 @@ function downloadAuPosCSV() {
 }
 function downloadAuIncomingCSV() {
   if (!AU_HAS_REAL) { alert('AU data not loaded.'); return; }
-  const lines = [['SKU','Current stock','Run rate (tins/day)','Days left','Incoming qty','Next PO(s)','Risk']];
-  AU_INCOMING_BY_SKU.forEach(r => lines.push([r.sku, r.current_stock||0, (r.run_rate_per_day||0).toFixed(1), r.days_left==null?'':r.days_left, r.incoming_qty||0, (r.next_po_refs||[]).join('; '), r.risk||'']));
+  // v2.2.36: columns mirror the on-screen layout — SKU / Current stock /
+  // Run rate / Days left / Next PO (days) / Incoming qty / PO ref / Risk.
+  // Extra columns kept on the right edge for spreadsheet drill-down:
+  // raw_incoming_qty, has_raw_only, all open PO refs for this SKU.
+  const lines = [[
+    'SKU', 'Current stock', 'Run rate (units/day)', 'Days left',
+    'Next PO (days)', 'Incoming qty', 'PO ref', 'Risk',
+    'Raw incoming qty', 'Raw only', 'All open POs',
+  ]];
+  AU_INCOMING_BY_SKU.forEach(r => lines.push([
+    r.sku,
+    r.current_stock || 0,
+    (r.run_rate_per_day || 0).toFixed(1),
+    r.days_left == null ? '' : r.days_left,
+    r.next_po_days == null ? '' : r.next_po_days,
+    r.incoming_qty || 0,
+    r.next_po_ref || (r.next_po_refs && r.next_po_refs[0]) || '',
+    r.risk || '',
+    r.raw_incoming_qty || 0,
+    r.has_raw_only ? 'yes' : '',
+    (r.next_po_refs || []).join('; '),
+  ]));
   downloadCSV('au-incoming-by-sku.csv', lines.map(r => r.map(toCsvField).join(',')).join('\r\n'));
 }
 

@@ -1679,28 +1679,88 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
     }
   }
 
-  // Sum incoming finished tins per base SKU (raw tins + packaging excluded
-  // — they're not ready-to-sell stock).
-  const incoming = new Map(); // base → { qty, pos: [] }
+  // Sum incoming tins per base SKU. v2.2.36: raw tins (T-AU-XXX-NPO-35) are
+  // now ALSO rolled into the finished base they map to (AU-XXX-NPO-35) —
+  // tracked as `raw_qty` alongside the existing `qty`. Packaging (P-...) is
+  // still excluded because there's no clean SKU→finished-tin mapping in the
+  // codebase (packaging SKUs are named by human-readable description, not
+  // machine-mappable). Surface raw-only rows with a visual badge in the UI.
+  //
+  // Each PO contributes `{ ref, date, isRaw }` to `pos[]` so the front-end
+  // can compute next-PO-days (earliest future expected_date) and tag the
+  // incoming column when all the inbound supply is still raw.
+  const incoming = new Map(); // base → { qty, raw_qty, pos: [{ref,date,isRaw}] }
   for (const p of posRows) {
     for (const line of p.lines) {
       const code = String(line?.code || '').trim();
-      if (!code.startsWith('AU-')) continue;
-      let base, qtyTins;
+      if (!code) continue;
+      let base, qtyTins, isRaw = false;
       if (code.startsWith('AU-CTN-') || code.startsWith('AU-SRT-')) {
         const [b, mult] = normalizeAuSku(code);
         if (!b) continue;
         base = b;
         qtyTins = (line.qty || 0) * mult;
-      } else {
+      } else if (code.startsWith('AU-')) {
         base = code;
         qtyTins = line.qty || 0;
+      } else if (code.startsWith('T-AU-')) {
+        // Raw printed-but-unfilled tin. T-AU-OG-NPO-35 → AU-OG-NPO-35.
+        base = code.slice(2);
+        qtyTins = line.qty || 0;
+        isRaw = true;
+      } else {
+        // T-... non-AU, P-... packaging, fee lines, other — skip
+        continue;
       }
-      const acc = incoming.get(base) || { qty: 0, pos: [] };
+      const acc = incoming.get(base) || { qty: 0, raw_qty: 0, pos: [] };
       acc.qty += qtyTins;
-      if (!acc.pos.includes(p.po)) acc.pos.push(p.po);
+      if (isRaw) acc.raw_qty += qtyTins;
+      if (!acc.pos.some(x => x.ref === p.po)) {
+        acc.pos.push({ ref: p.po, date: p.expected_date || null, isRaw });
+      }
       incoming.set(base, acc);
     }
+  }
+
+  // v2.2.36: derive next-PO arrival per base SKU. Pick the earliest open PO
+  // whose expected_date is today-or-future. Negative-days (overdue) are
+  // included separately so the UI can render them in red — overdue supply is
+  // still information Mel needs to see. Returns { days: null, ref: null } if
+  // no PO for this SKU has any dated expected_date set in CIN7 at all.
+  const todayUtcMs = (() => {
+    const d = new Date();
+    d.setUTCHours(0, 0, 0, 0);
+    return d.getTime();
+  })();
+  function deriveNextPo(posList) {
+    let bestDays = null;
+    let bestRef = null;
+    let earliestOverdueDays = null;
+    let earliestOverdueRef = null;
+    for (const p of posList) {
+      if (!p.date) continue;
+      const ts = Date.parse(String(p.date).slice(0, 10) + 'T00:00:00Z');
+      if (!Number.isFinite(ts)) continue;
+      const days = Math.round((ts - todayUtcMs) / 86400000);
+      if (days >= 0) {
+        if (bestDays == null || days < bestDays) {
+          bestDays = days;
+          bestRef = p.ref;
+        }
+      } else {
+        // Overdue. Keep the LEAST overdue (largest negative number = closest
+        // to today) — that's the next one likely to actually land.
+        if (earliestOverdueDays == null || days > earliestOverdueDays) {
+          earliestOverdueDays = days;
+          earliestOverdueRef = p.ref;
+        }
+      }
+    }
+    // Future PO wins. Only fall back to overdue if there's literally no
+    // future-dated PO for this SKU.
+    if (bestDays != null) return { days: bestDays, ref: bestRef };
+    if (earliestOverdueDays != null) return { days: earliestOverdueDays, ref: earliestOverdueRef };
+    return { days: null, ref: null };
   }
 
   // Eligible universe: only finished-tin base SKUs that exist in inventory
@@ -1731,13 +1791,23 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
     else if (daysLeft !== null && daysLeft < 60) risk = 'monitor';
     else risk = 'stable';
 
+    const nextPo = deriveNextPo(inc.pos);
+    // has_raw_only: every incoming tin for this SKU is still raw (T-AU-...)
+    // and so isn't yet ready-to-sell. Used by the UI to badge the Incoming
+    // qty column. If there's any finished/carton supply mixed in, drop the
+    // badge — the finished portion IS ready stock.
+    const hasRawOnly = inc.qty > 0 && Math.abs(inc.qty - inc.raw_qty) < 0.001;
     out.push({
       sku,
       current_stock:    Math.round(stock),
       run_rate_per_day: Math.round(rate * 10) / 10,
       days_left:        daysLeft !== null ? Math.round(daysLeft * 10) / 10 : null,
+      next_po_days:     nextPo.days,
+      next_po_ref:      nextPo.ref,
       incoming_qty:     Math.round(inc.qty),
-      next_po_refs:     inc.pos.slice(0, 3),
+      raw_incoming_qty: Math.round(inc.raw_qty || 0),
+      has_raw_only:     hasRawOnly,
+      next_po_refs:     inc.pos.slice(0, 3).map(p => p.ref), // back-compat
       risk,
     });
   }
