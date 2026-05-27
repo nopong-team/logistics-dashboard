@@ -1914,18 +1914,24 @@
         </div>
         <div class="table-hint">48 tins per carton (4 &times; 12 SRT trays) &middot; Sold via Coles / Woolworths / Distributor channels &middot; Equivalent tins = cartons in stock &times; 48</div>
       </div>
-      <div class="table-scroll"><table style="table-layout:fixed;">
+      <div class="table-scroll"><table style="table-layout:fixed; width:100%;">
         <colgroup>
-          <!-- v2.2.40: explicit widths so the Contents column doesn't soak up
-               all the slack and slam the numeric columns against the right
-               edge. SKU is fixed (cleanly fits 'AU-CTN-OG-NPO-48'), Contents
-               flexes, the two numeric columns get equal mid-width slots so
-               the headers and values sit at a comfortable distance from the
-               edge. ~7% right padding via padding-right on .au-cartons-num. -->
-          <col style="width:180px;">
+          <!-- v2.2.41: rebalance the column widths so the numeric columns
+               sit closer to the middle of the table, not the right edge.
+               v2.2.40 left the Contents column flexing, which absorbed the
+               full ~1300px of remaining width on a wide monitor and pushed
+               the numbers to the far right. Now Contents is capped at a
+               sensible width via the colgroup, and the numeric columns
+               flex to share whatever's left, which centres them visually.
+               Renderer strips the boilerplate "CARTON OF 4 SRT'S - 48 X NO
+               PONG " prefix from CIN7 names so what shows is just the
+               variant (e.g. "ORIGINAL 35G"), matching the CA tab's tidier
+               "Original — Original formula" feel. Full CIN7 name lives in
+               the cell's title attribute as a tooltip. -->
+          <col style="width:200px;">
+          <col style="width:340px;">
           <col>
-          <col style="width:170px;">
-          <col style="width:180px;">
+          <col>
         </colgroup>
         <thead>
           <tr>
@@ -2866,9 +2872,20 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.40</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.41</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.41 &mdash; 27 May 2026 (AU PO &mdash; Carton SKUs table: actually fix the column spacing this time)</h4>
+    <ul>
+      <li><strong>v2.2.40 didn't actually fix the spacing</strong> — the numeric columns were still slammed against the right edge of the table. Root cause: AU's CIN7 product names are 50–60 chars long and all start with the same boilerplate ("CARTON OF 4 SRT'S - 48 X NO PONG …"). The Contents column was flexing to absorb that, soaking up the full ~1300 px of remaining table width on a wide monitor and pushing the two numeric columns into a thin ribbon at the far right.</li>
+      <li><strong>Real fix, two parts:</strong>
+        <ol>
+          <li><strong>Strip the boilerplate</strong> in the renderer via regex <code>/NO\s*PONG\s+(.+)$/i</code>. So "CARTON OF 4 SRT'S - 48 X NO PONG ORIGINAL 35G" displays as just "ORIGINAL 35G" — matches the visual rhythm of the CA tab's "Original — Original formula" entries. Full CIN7 name lives in the cell's <code>title</code> tooltip for anyone who needs to verify.</li>
+          <li><strong>Rebalance the colgroup widths</strong>: SKU 200 px, Contents 340 px (fixed — no longer flexes), numeric columns share whatever's left. Numeric headers and values now sit at roughly the middle-right of the table rather than the far edge.</li>
+        </ol>
+      </li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
     <h4>v2.2.40 &mdash; 27 May 2026 (AU PO &mdash; Carton SKUs table: column spacing fix)</h4>
     <ul>
       <li><strong>Numeric columns no longer slam against the right edge.</strong> v2.2.39's Carton SKUs table inherited the default <code>td.num</code> right-alignment with only 6 px right padding, so on AU (which has fewer carton SKUs than CA) the Contents column absorbed all the slack and the "Cartons in stock" / "Equivalent tins" numbers ended up as a tiny ribbon hugging the right edge of the table.</li>
@@ -9272,9 +9289,18 @@ function renderAuCartonsTable() {
   tb.innerHTML = rows.map(r => {
     const cartons = auWhSoh(r);
     const tins    = cartons * (r.mult || 48);
+    // v2.2.41: strip "CARTON OF 4 SRT'S - 48 X NO PONG " (with or without
+    // the dash, with or without trailing 35G / "3" garbage) from the CIN7
+    // name so the Contents column shows just the variant. Falls back to the
+    // raw name if the prefix doesn't match. Full name preserved as a title-
+    // attribute tooltip on the cell so the original CIN7 string is one
+    // hover away.
+    const fullName  = String(r.name || '');
+    const m         = /NO\s*PONG\s+(.+)$/i.exec(fullName);
+    const shortName = m ? m[1].replace(/\s+\d+\s*$/, '').trim() : fullName;
     return `<tr>
       <td><div class="sku-name">${r.sku}</div></td>
-      <td>${escapeHtml(r.name || '')}</td>
+      <td title="${escapeHtml(fullName)}">${escapeHtml(shortName)}</td>
       <td class="num au-cartons-num">${fmtAuNum(cartons)}</td>
       <td class="num au-cartons-num">${fmtAuNum(tins)}</td>
     </tr>`;
