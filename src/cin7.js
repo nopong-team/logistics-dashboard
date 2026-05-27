@@ -1665,16 +1665,29 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
   // Roll up carton stock into base-SKU tin equivalents (cartons of 48 each
   // contribute 48 tins to the base; SRTs are already folded into base in
   // buildInventory upstream).
-  const baseStock = new Map();
+  //
+  // v2.2.42: track loose tins vs cartons separately on each base, so the
+  // front-end can show a breakdown tooltip on the Current stock cell —
+  // e.g. "5,123 loose + 551 cartons × 48 = 31,571 tins". Total stock is
+  // still the sum of both; the breakdown is purely additional metadata.
+  const baseStock = new Map(); // base → { loose, fromCartons, cartonCount }
+  function _bumpBase(sku, looseDelta, cartonDelta) {
+    const cur = baseStock.get(sku) || { loose: 0, fromCartons: 0, cartonCount: 0 };
+    cur.loose       += looseDelta;
+    cur.fromCartons += cartonDelta;
+    if (cartonDelta > 0) cur.cartonCount += cartonDelta / 48;
+    baseStock.set(sku, cur);
+  }
   for (const r of inventory) {
     if (r?.discontinued) continue;
+    const soh = r.warehouse_soh ?? r.soh ?? 0;
     if (r.kind === 'base' || r.kind === 'base-b') {
-      baseStock.set(r.sku, (baseStock.get(r.sku) || 0) + (r.warehouse_soh ?? r.soh ?? 0));
+      _bumpBase(r.sku, soh, 0);
     } else if (r.kind === 'carton') {
       const m = /^AU-CTN-(.+)-48$/.exec(r.sku);
       if (m) {
         const base = `AU-${m[1]}-35`;
-        baseStock.set(base, (baseStock.get(base) || 0) + ((r.warehouse_soh ?? r.soh ?? 0) * 48));
+        _bumpBase(base, 0, soh * 48);
       }
     }
   }
@@ -1776,7 +1789,8 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
 
   const out = [];
   for (const sku of universe) {
-    const stock = baseStock.get(sku) || 0;
+    const stockBreakdown = baseStock.get(sku) || { loose: 0, fromCartons: 0, cartonCount: 0 };
+    const stock = stockBreakdown.loose + stockBreakdown.fromCartons;
     const tins  = tinsByBase.get(sku) || 0;
     const rate  = totalDays > 0 ? tins / totalDays : 0;
     const daysLeft = rate > 0 ? stock / rate : null;
@@ -1794,6 +1808,11 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
     out.push({
       sku,
       current_stock:    Math.round(stock),
+      // v2.2.42: breakdown so the front-end can show a tooltip on the
+      // Current stock cell — loose base-SKU tins vs cartons rolled up.
+      stock_loose_tins:   Math.round(stockBreakdown.loose),
+      stock_from_cartons: Math.round(stockBreakdown.fromCartons),
+      stock_carton_count: Math.round(stockBreakdown.cartonCount),
       run_rate_per_day: Math.round(rate * 10) / 10,
       days_left:        daysLeft !== null ? Math.round(daysLeft * 10) / 10 : null,
       next_po_days:     nextPo.days,

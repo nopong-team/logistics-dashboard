@@ -1891,7 +1891,7 @@
         <thead>
           <tr>
             <th title="Base AU SKU. Cartons (AU-CTN-...×48) are rolled up to this base. Raw tins (T-AU-...) are tracked separately and don't contribute to this view.">SKU ⓘ</th>
-            <th class="num" title="Sellable tins on hand right now: base SKU SOH plus all cartons of this SKU rolled up at ×48 tins each.">Current stock ⓘ</th>
+            <th class="num" title="Sellable tins on hand right now: base SKU SOH plus all cartons of this SKU rolled up at ×48 tins each. Hover the value in any row to see the loose-vs-carton breakdown (v2.2.42).">Current stock ⓘ</th>
             <th class="num" title="Average units sold per day. Live (v2.2.20+): trailing 3 complete months across all 5 channels (Coles + Woolies + Distributors + Woo + Amazon). Static fallback: April 2026 ÷ 30 days, all 5 channels.">Run rate (units/day) ⓘ</th>
             <th class="num" title="Days of stock remaining at the current run rate. Blank if no sales in the period.">Days left ⓘ</th>
             <th class="num" title="Days from today until the next open PO for this SKU arrives. Earliest future expected_date wins. Negative = overdue and shown in red. Blank if no PO has a date set in CIN7.">Next PO (days) ⓘ</th>
@@ -2872,9 +2872,18 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.41</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.42</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.42 &mdash; 27 May 2026 (AU PO &mdash; Incoming stock by SKU: loose-vs-carton breakdown tooltip on Current stock)</h4>
+    <ul>
+      <li><strong>Hover any Current stock value</strong> in the Incoming stock by SKU table to see the breakdown of loose base-SKU tins vs cartons rolled up at &times; 48 &mdash; e.g. on No Pong Original, the tooltip reads "4,815 loose tins  +  551 cartons &times; 48 = 26,448 tins  =  31,263 total". Helps Mel sanity-check what's behind the headline number without scrolling down to the Carton SKUs table.</li>
+      <li><strong>Backend (<code>buildIncomingBySku</code> in <code>src/cin7.js</code>):</strong> <code>baseStock</code> map changed from a flat number to <code>{ loose, fromCartons, cartonCount }</code> per base SKU. Three new fields on each output row: <code>stock_loose_tins</code>, <code>stock_from_cartons</code>, <code>stock_carton_count</code>. Total <code>current_stock</code> is the sum (unchanged behaviour).</li>
+      <li><strong>Frontend:</strong> Current stock cell wrapped in a <code>&lt;span&gt;</code> with a dotted underline (cursor:help) so the affordance is visible; tooltip text only renders the parts that have non-zero values (a SKU with no cartons just says "X loose tins"; a SKU with only carton stock just says "Y cartons &times; 48 = Z tins"). Graceful fallback to a plain number when the breakdown fields aren't present (older cached responses).</li>
+      <li><strong>CSV export:</strong> three new drill-down columns (<code>Loose tins</code>, <code>Carton count</code>, <code>Tins from cartons</code>) so the spreadsheet view matches the tooltip.</li>
+      <li><strong>Column header tooltip updated</strong> to mention the per-row hover behaviour.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
     <h4>v2.2.41 &mdash; 27 May 2026 (AU PO &mdash; Carton SKUs table: actually fix the column spacing this time)</h4>
     <ul>
       <li><strong>v2.2.40 didn't actually fix the spacing</strong> — the numeric columns were still slammed against the right edge of the table. Root cause: AU's CIN7 product names are 50–60 chars long and all start with the same boilerplate ("CARTON OF 4 SRT'S - 48 X NO PONG …"). The Contents column was flexing to absorb that, soaking up the full ~1300 px of remaining table width on a wide monitor and pushing the two numeric columns into a thin ribbon at the far right.</li>
@@ -9183,9 +9192,30 @@ function renderAuIncomingBySku() {
       ? `<code style="font-size:11px;background:#FFF5F7;padding:1px 4px;border-radius:3px;">${poRef}</code>`
       : '<span style="color:var(--text-light)">—</span>';
 
+    // Current stock cell — v2.2.42 adds a tooltip breaking down the total
+    // into loose base-SKU tins vs cartons rolled up at ×48. Helps Mel sanity
+    // check what's behind the headline number without scrolling down to the
+    // Carton SKUs table. Falls back to a plain number when the breakdown
+    // fields aren't present (older data shapes / cached responses).
+    let stockCell;
+    if (r.stock_loose_tins != null || r.stock_from_cartons != null) {
+      const loose   = r.stock_loose_tins   || 0;
+      const fromCtn = r.stock_from_cartons || 0;
+      const ctnCnt  = r.stock_carton_count || 0;
+      let parts = [];
+      if (loose > 0)   parts.push(`${fmtAuNum(loose)} loose tin${loose === 1 ? '' : 's'}`);
+      if (fromCtn > 0) parts.push(`${fmtAuNum(ctnCnt)} carton${ctnCnt === 1 ? '' : 's'} × 48 = ${fmtAuNum(fromCtn)} tin${fromCtn === 1 ? '' : 's'}`);
+      const breakdown = parts.length
+        ? parts.join('  +  ') + `  =  ${fmtAuNum(r.current_stock || 0)} total`
+        : `${fmtAuNum(r.current_stock || 0)} total`;
+      stockCell = `<span title="${breakdown}" style="cursor:help;border-bottom:1px dotted var(--text-light);">${fmtAuNum(r.current_stock)}</span>`;
+    } else {
+      stockCell = fmtAuNum(r.current_stock);
+    }
+
     return `<tr>
       <td><div class="sku-name">${r.sku}</div></td>
-      <td class="num">${fmtAuNum(r.current_stock)}</td>
+      <td class="num">${stockCell}</td>
       <td class="num">${r.run_rate_per_day > 0 ? r.run_rate_per_day.toFixed(1) : '<span style="color:var(--text-light)">—</span>'}</td>
       <td class="num">${daysCell}</td>
       <td class="num">${nextDaysCell}</td>
@@ -9346,10 +9376,13 @@ function downloadAuIncomingCSV() {
   // not 'all' so multiple exports in a session don't overwrite each other.
   // v2.2.38: raw_incoming_qty + raw_only columns dropped — Incoming qty is
   // finished tins only (raw rollup reverted, see DECISIONS.md 2026-05-27).
+  // v2.2.42: stock_loose_tins + stock_from_cartons + stock_carton_count added
+  // as drill-down columns so the spreadsheet view matches the tooltip.
   const rows = _auFilterIncomingBySize(AU_INCOMING_BY_SKU || []);
   const lines = [[
     'SKU', 'Current stock', 'Run rate (units/day)', 'Days left',
     'Next PO (days)', 'Incoming qty', 'PO ref', 'Risk',
+    'Loose tins', 'Carton count', 'Tins from cartons',
     'All open POs',
   ]];
   rows.forEach(r => lines.push([
@@ -9361,6 +9394,9 @@ function downloadAuIncomingCSV() {
     r.incoming_qty || 0,
     r.next_po_ref || (r.next_po_refs && r.next_po_refs[0]) || '',
     r.risk || '',
+    r.stock_loose_tins   == null ? '' : r.stock_loose_tins,
+    r.stock_carton_count == null ? '' : r.stock_carton_count,
+    r.stock_from_cartons == null ? '' : r.stock_from_cartons,
     (r.next_po_refs || []).join('; '),
   ]));
   const suffix = AU_INCOMING_SIZE_FILTER === 'all' ? '' : `-${AU_INCOMING_SIZE_FILTER}g`;
