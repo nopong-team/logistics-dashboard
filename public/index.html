@@ -1869,7 +1869,7 @@
       <div class="table-card-header">
         <div class="table-card-title">Incoming stock by SKU</div>
         <span id="au-incoming-source-chip" class="source-chip" style="display:none;" title="Source of the run-rate basis"></span>
-        <div class="table-hint">Stock = base SKU SOH + carton tins (×48) · Run rate = trailing 3 complete months ÷ days · Days left = stock ÷ run rate · Next PO (days) = earliest open-PO expected_date − today · Discontinued SKUs excluded · <em>Run rate covers all 5 channels (Coles + Woolies + Distributors + Woo + Amazon). v2.2.36: incoming now includes raw tins (T-AU-...) with a 'raw' badge when that's all that's on order. v2.2.37: size filter (All / 35g / 85g) — choice persists across reloads, CSV export respects the current filter.</em></div>
+        <div class="table-hint">Stock = base SKU SOH + carton tins (×48) · Run rate = trailing 3 complete months ÷ days · Days left = stock ÷ run rate · Next PO (days) = earliest open-PO expected_date − today · Discontinued SKUs excluded · <em>Run rate covers all 5 channels (Coles + Woolies + Distributors + Woo + Amazon). Incoming qty = fully-filled tins only — raw tins (T-AU-...) and packaging (P-...) excluded. Size filter (All / 35 g / 85 g) persists across reloads; CSV export respects the active filter.</em></div>
         <div style="display:flex;align-items:center;gap:10px;margin-left:auto;flex-wrap:wrap;">
           <label style="font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;">Size:</label>
           <div style="display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
@@ -1883,12 +1883,12 @@
       <div class="table-scroll"><table>
         <thead>
           <tr>
-            <th title="Base AU SKU. Cartons (AU-CTN-...×48) and raw tins (T-AU-...) are rolled up to this base.">SKU ⓘ</th>
+            <th title="Base AU SKU. Cartons (AU-CTN-...×48) are rolled up to this base. Raw tins (T-AU-...) are tracked separately and don't contribute to this view.">SKU ⓘ</th>
             <th class="num" title="Sellable tins on hand right now: base SKU SOH plus all cartons of this SKU rolled up at ×48 tins each.">Current stock ⓘ</th>
             <th class="num" title="Average units sold per day. Live (v2.2.20+): trailing 3 complete months across all 5 channels (Coles + Woolies + Distributors + Woo + Amazon). Static fallback: April 2026 ÷ 30 days, all 5 channels.">Run rate (units/day) ⓘ</th>
             <th class="num" title="Days of stock remaining at the current run rate. Blank if no sales in the period.">Days left ⓘ</th>
             <th class="num" title="Days from today until the next open PO for this SKU arrives. Earliest future expected_date wins. Negative = overdue and shown in red. Blank if no PO has a date set in CIN7.">Next PO (days) ⓘ</th>
-            <th class="num" title="Total tins on order across all open POs for this SKU. Includes finished tins (AU-...), carton lines (AU-CTN-...×48), and raw tins (T-AU-...). Raw-only rows are badged 'raw' — those tins still need filling before they're ready to sell.">Incoming qty ⓘ</th>
+            <th class="num" title="Fully-filled tins on order across all open POs for this SKU. Includes finished tins (AU-...) and carton lines (AU-CTN-...×48). Raw tins (T-AU-...) and packaging (P-...) are excluded — only ready-to-sell stock counts here.">Incoming qty ⓘ</th>
             <th title="The PO reference behind the 'Next PO (days)' value. Other open POs for this SKU may exist — see the open-PO table above.">PO ref ⓘ</th>
             <th title="Risk status: Critical = &lt;14 days left; Low = &lt;30 days left; Monitor = &lt;60 days; Stable ≥ 60 days. '-incoming' suffix means a PO is on the way.">Risk status ⓘ</th>
           </tr>
@@ -2823,9 +2823,18 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.37</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.38</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.38 &mdash; 27 May 2026 (AU PO &mdash; revert raw-tin rollup: Incoming qty is now fully-filled tins only)</h4>
+    <ul>
+      <li><strong>Reversing the v2.2.36 raw-tin rollup decision.</strong> Mel's reasoning: the "Incoming qty" column means "ready-to-sell stock arriving" &mdash; raw tins (T-AU-...) still need filling before they belong there, and the runway from current stock is already captured by Days left. Same logic for "Next PO (days)" &mdash; that should be when the next batch of <em>finished</em> tins arrives, not when the next raw-tin batch lands.</li>
+      <li><strong>Backend (<code>buildIncomingBySku</code> in <code>src/cin7.js</code>):</strong> dropped the <code>T-AU-...</code> branch from the line-classification loop. Removed <code>raw_qty</code> from the per-SKU accumulator. Removed <code>raw_incoming_qty</code> and <code>has_raw_only</code> from the output row shape. <code>deriveNextPo</code> now only sees finished-tin POs, so the "Next PO (days)" value reflects ready-to-sell arrivals only.</li>
+      <li><strong>Frontend (<code>public/index.html</code>):</strong> dropped the yellow <em>raw</em> badge and the mixed-row asterisk + tooltip in the Incoming qty cell. Updated the SKU column tooltip and the Incoming qty column tooltip to reflect the new scope. Table-hint refreshed.</li>
+      <li><strong>CSV export:</strong> dropped the <code>Raw incoming qty</code> and <code>Raw only</code> columns. <code>All open POs</code> remains as the right-edge drill-down column.</li>
+      <li><strong>Packaging (P-...) still excluded</strong> &mdash; same reason as before. If a packaging fold-in becomes useful later, it'll need a separate SKU-mapping conversation with Mel.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
     <h4>v2.2.37 &mdash; 27 May 2026 (AU PO &mdash; size filter on the per-SKU table: All / 35 g / 85 g)</h4>
     <ul>
       <li><strong>Segmented control above the "Incoming stock by SKU" table:</strong> All / 35 g / 85 g. Lets Mel narrow the bottom table to just the standard finished-tin sizes when she wants to scan the full-tin pipeline without 100 g birthday soaps / other formats getting in the way.</li>
@@ -9077,20 +9086,13 @@ function renderAuIncomingBySku() {
       nextDaysCell = r.next_po_days.toString();
     }
 
-    // Incoming qty cell — v2.2.36. Append a 'raw' badge if the only supply
-    // on order is still in raw-tin form (T-AU-...) — those need filling
-    // before they're ready to sell, so it's a meaningful distinction.
-    let incCell;
-    if (!r.incoming_qty) {
-      incCell = '<span style="color:var(--text-light)">—</span>';
-    } else if (r.has_raw_only) {
-      incCell = `${fmtAuNum(r.incoming_qty)} <span class="badge" style="background:#FEF3C7;color:#92400E;border-color:#FCD34D;font-size:10px;padding:0 5px;margin-left:4px;" title="All ${fmtAuNum(r.raw_incoming_qty)} of these tins are still raw (T-AU-...) and need filling before they become sellable stock.">raw</span>`;
-    } else if (r.raw_incoming_qty > 0) {
-      // Mixed: some finished, some raw. Subtle hint via title only.
-      incCell = `<span title="${fmtAuNum(r.raw_incoming_qty)} of ${fmtAuNum(r.incoming_qty)} tins are raw (T-AU-...) — the rest are finished/cartoned and ready to sell on arrival.">${fmtAuNum(r.incoming_qty)}*</span>`;
-    } else {
-      incCell = fmtAuNum(r.incoming_qty);
-    }
+    // Incoming qty cell — v2.2.38. Finished tins + cartons only. Raw tins
+    // (T-AU-...) and packaging (P-...) are excluded upstream in
+    // buildIncomingBySku, so anything that shows here is ready-to-sell on
+    // arrival (no badge, no asterisk needed).
+    const incCell = r.incoming_qty
+      ? fmtAuNum(r.incoming_qty)
+      : '<span style="color:var(--text-light)">—</span>';
 
     // PO ref cell — show the PO behind the 'Next PO (days)' value. Fall back
     // to the first next_po_refs entry if no dated PO exists (so the cell
@@ -9187,18 +9189,19 @@ function downloadAuPosCSV() {
 }
 function downloadAuIncomingCSV() {
   if (!AU_HAS_REAL) { alert('AU data not loaded.'); return; }
-  // v2.2.36: columns mirror the on-screen layout — SKU / Current stock /
-  // Run rate / Days left / Next PO (days) / Incoming qty / PO ref / Risk.
-  // Extra columns kept on the right edge for spreadsheet drill-down:
-  // raw_incoming_qty, has_raw_only, all open PO refs for this SKU.
+  // Columns mirror the on-screen layout — SKU / Current stock / Run rate /
+  // Days left / Next PO (days) / Incoming qty / PO ref / Risk. One extra
+  // drill-down column on the right edge: All open POs (semicolon-joined).
   // v2.2.37: CSV honours the current size filter (All / 35 g / 85 g) so the
   // export matches what's on screen. Filename includes the size suffix when
   // not 'all' so multiple exports in a session don't overwrite each other.
+  // v2.2.38: raw_incoming_qty + raw_only columns dropped — Incoming qty is
+  // finished tins only (raw rollup reverted, see DECISIONS.md 2026-05-27).
   const rows = _auFilterIncomingBySize(AU_INCOMING_BY_SKU || []);
   const lines = [[
     'SKU', 'Current stock', 'Run rate (units/day)', 'Days left',
     'Next PO (days)', 'Incoming qty', 'PO ref', 'Risk',
-    'Raw incoming qty', 'Raw only', 'All open POs',
+    'All open POs',
   ]];
   rows.forEach(r => lines.push([
     r.sku,
@@ -9209,8 +9212,6 @@ function downloadAuIncomingCSV() {
     r.incoming_qty || 0,
     r.next_po_ref || (r.next_po_refs && r.next_po_refs[0]) || '',
     r.risk || '',
-    r.raw_incoming_qty || 0,
-    r.has_raw_only ? 'yes' : '',
     (r.next_po_refs || []).join('; '),
   ]));
   const suffix = AU_INCOMING_SIZE_FILTER === 'all' ? '' : `-${AU_INCOMING_SIZE_FILTER}g`;

@@ -1679,22 +1679,28 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
     }
   }
 
-  // Sum incoming tins per base SKU. v2.2.36: raw tins (T-AU-XXX-NPO-35) are
-  // now ALSO rolled into the finished base they map to (AU-XXX-NPO-35) —
-  // tracked as `raw_qty` alongside the existing `qty`. Packaging (P-...) is
-  // still excluded because there's no clean SKU→finished-tin mapping in the
-  // codebase (packaging SKUs are named by human-readable description, not
-  // machine-mappable). Surface raw-only rows with a visual badge in the UI.
+  // Sum incoming finished tins per base SKU. Raw tins (T-AU-XXX-NPO-35) and
+  // packaging (P-...) are deliberately EXCLUDED — only fully-filled, ready-
+  // to-sell stock counts.
   //
-  // Each PO contributes `{ ref, date, isRaw }` to `pos[]` so the front-end
-  // can compute next-PO-days (earliest future expected_date) and tag the
-  // incoming column when all the inbound supply is still raw.
-  const incoming = new Map(); // base → { qty, raw_qty, pos: [{ref,date,isRaw}] }
+  // History: v2.2.36 briefly folded raw tins in with a 'raw' badge for the
+  // end-to-end pipeline view. Reverted in v2.2.38 — Mel's reasoning: this
+  // column means "ready-to-sell tins arriving"; raw tins still need filling
+  // before they belong here, and the runway from current stock is already
+  // captured by Days left. Same logic applies to deriveNextPo — only count
+  // finished-tin POs when computing "Next PO (days)".
+  //
+  // Each PO contributes `{ ref, date }` to `pos[]` so the front-end can
+  // compute next-PO-days (earliest future expected_date).
+  const incoming = new Map(); // base → { qty, pos: [{ref,date}] }
   for (const p of posRows) {
     for (const line of p.lines) {
       const code = String(line?.code || '').trim();
       if (!code) continue;
-      let base, qtyTins, isRaw = false;
+      // Only finished AU-... tins and AU-CTN-/AU-SRT- cartons count. Raw
+      // tins (T-AU-...), packaging (P-...), freight, kitting fees, and any
+      // other line types are skipped.
+      let base, qtyTins;
       if (code.startsWith('AU-CTN-') || code.startsWith('AU-SRT-')) {
         const [b, mult] = normalizeAuSku(code);
         if (!b) continue;
@@ -1703,20 +1709,13 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
       } else if (code.startsWith('AU-')) {
         base = code;
         qtyTins = line.qty || 0;
-      } else if (code.startsWith('T-AU-')) {
-        // Raw printed-but-unfilled tin. T-AU-OG-NPO-35 → AU-OG-NPO-35.
-        base = code.slice(2);
-        qtyTins = line.qty || 0;
-        isRaw = true;
       } else {
-        // T-... non-AU, P-... packaging, fee lines, other — skip
         continue;
       }
-      const acc = incoming.get(base) || { qty: 0, raw_qty: 0, pos: [] };
+      const acc = incoming.get(base) || { qty: 0, pos: [] };
       acc.qty += qtyTins;
-      if (isRaw) acc.raw_qty += qtyTins;
       if (!acc.pos.some(x => x.ref === p.po)) {
-        acc.pos.push({ ref: p.po, date: p.expected_date || null, isRaw });
+        acc.pos.push({ ref: p.po, date: p.expected_date || null });
       }
       incoming.set(base, acc);
     }
@@ -1792,11 +1791,6 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
     else risk = 'stable';
 
     const nextPo = deriveNextPo(inc.pos);
-    // has_raw_only: every incoming tin for this SKU is still raw (T-AU-...)
-    // and so isn't yet ready-to-sell. Used by the UI to badge the Incoming
-    // qty column. If there's any finished/carton supply mixed in, drop the
-    // badge — the finished portion IS ready stock.
-    const hasRawOnly = inc.qty > 0 && Math.abs(inc.qty - inc.raw_qty) < 0.001;
     out.push({
       sku,
       current_stock:    Math.round(stock),
@@ -1805,8 +1799,6 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
       next_po_days:     nextPo.days,
       next_po_ref:      nextPo.ref,
       incoming_qty:     Math.round(inc.qty),
-      raw_incoming_qty: Math.round(inc.raw_qty || 0),
-      has_raw_only:     hasRawOnly,
       next_po_refs:     inc.pos.slice(0, 3).map(p => p.ref), // back-compat
       risk,
     });
