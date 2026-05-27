@@ -1869,8 +1869,16 @@
       <div class="table-card-header">
         <div class="table-card-title">Incoming stock by SKU</div>
         <span id="au-incoming-source-chip" class="source-chip" style="display:none;" title="Source of the run-rate basis"></span>
-        <div class="table-hint">Stock = base SKU SOH + carton tins (×48) · Run rate = trailing 3 complete months ÷ days · Days left = stock ÷ run rate · Next PO (days) = earliest open-PO expected_date − today · Discontinued SKUs excluded · <em>Run rate covers all 5 channels (Coles + Woolies + Distributors + Woo + Amazon). v2.2.36: incoming now includes raw tins (T-AU-...) with a 'raw' badge when that's all that's on order.</em></div>
-        <button class="btn-csv" onclick="downloadAuIncomingCSV()">Export CSV</button>
+        <div class="table-hint">Stock = base SKU SOH + carton tins (×48) · Run rate = trailing 3 complete months ÷ days · Days left = stock ÷ run rate · Next PO (days) = earliest open-PO expected_date − today · Discontinued SKUs excluded · <em>Run rate covers all 5 channels (Coles + Woolies + Distributors + Woo + Amazon). v2.2.36: incoming now includes raw tins (T-AU-...) with a 'raw' badge when that's all that's on order. v2.2.37: size filter (All / 35g / 85g) — choice persists across reloads, CSV export respects the current filter.</em></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-left:auto;flex-wrap:wrap;">
+          <label style="font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;">Size:</label>
+          <div style="display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+            <button id="au-incoming-size-btn-all" class="period-btn active" onclick="setAuIncomingSizeFilter('all')" style="padding:6px 12px;font-size:12px;font-weight:600;border:none;cursor:pointer;background:var(--accent);color:#fff;transition:all .2s;">All</button>
+            <button id="au-incoming-size-btn-35"  class="period-btn"        onclick="setAuIncomingSizeFilter('35')"  style="padding:6px 12px;font-size:12px;font-weight:600;border:none;cursor:pointer;background:var(--bg-card);color:var(--text-secondary);transition:all .2s;">35 g</button>
+            <button id="au-incoming-size-btn-85"  class="period-btn"        onclick="setAuIncomingSizeFilter('85')"  style="padding:6px 12px;font-size:12px;font-weight:600;border:none;cursor:pointer;background:var(--bg-card);color:var(--text-secondary);transition:all .2s;">85 g</button>
+          </div>
+          <button class="btn-csv" onclick="downloadAuIncomingCSV()">Export CSV</button>
+        </div>
       </div>
       <div class="table-scroll"><table>
         <thead>
@@ -2815,9 +2823,18 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.36</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.37</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.37 &mdash; 27 May 2026 (AU PO &mdash; size filter on the per-SKU table: All / 35 g / 85 g)</h4>
+    <ul>
+      <li><strong>Segmented control above the "Incoming stock by SKU" table:</strong> All / 35 g / 85 g. Lets Mel narrow the bottom table to just the standard finished-tin sizes when she wants to scan the full-tin pipeline without 100 g birthday soaps / other formats getting in the way.</li>
+      <li><strong>Filter applies to size derived from the SKU's trailing digits</strong> (e.g. <code>AU-OG-NPO-35</code> &rarr; '35', <code>AU-OG-NPO-85</code> &rarr; '85'). Anything without a clean trailing -35 / -85 (e.g. <code>AU-BD-NPS-100</code> birthday soap, or any future format) shows only when the filter is on "All". No backend change &mdash; size is already encoded in the SKU string from CIN7.</li>
+      <li><strong>Choice persists in <code>localStorage</code></strong> under <code>au_incoming_size_filter</code>, so reload-and-resume keeps your last view. Falls back to 'All' silently if localStorage is unavailable (e.g. private-browsing edge case).</li>
+      <li><strong>CSV export honours the active filter.</strong> Filename gains a <code>-35g</code> / <code>-85g</code> suffix when filtered so you don't accidentally overwrite the previous export.</li>
+      <li><strong>Empty-state copy</strong> for "no SKUs match the 35 g filter" so the table isn't silent when the dataset has no matches.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
     <h4>v2.2.36 &mdash; 27 May 2026 (AU PO &mdash; per-SKU table reshaped to mirror CA + Next PO (days) column + raw-tin rollup)</h4>
     <ul>
       <li><strong>"Incoming stock by SKU" table now matches the CA layout.</strong> Columns: SKU / Current stock / Run rate (units/day) / Days left / <strong>Next PO (days)</strong> / Incoming qty / PO ref / Risk status. Previously AU was missing the per-SKU days-until-arrival readout entirely &mdash; the only "when" signal was the risk badge's "-incoming" suffix, which doesn't tell you whether the next PO is 3 days away or 3 months. Mel called this out as not useful versus the CA equivalent.</li>
@@ -8976,14 +8993,70 @@ const AU_RISK_BADGE = {
   'inactive':           '<span class="badge" style="background:#EFEFEF;color:#6D6D6D;border-color:#D5D5D5;">Inactive</span>',
 };
 
+// v2.2.37: size filter for the "Incoming stock by SKU" table.
+//   'all' — every base SKU in the dataset (default)
+//   '35'  — only SKUs ending in -35 (35g tins, incl. birthday tin)
+//   '85'  — only SKUs ending in -85 (85g tins)
+// Choice persists in localStorage so reload-and-resume Just Works.
+let AU_INCOMING_SIZE_FILTER = (() => {
+  try { return localStorage.getItem('au_incoming_size_filter') || 'all'; }
+  catch (_e) { return 'all'; }
+})();
+
+// Extract the trailing size from a base SKU. AU-OG-NPO-35 → '35',
+// AU-OG-NPO-85 → '85', AU-BD-NPS-100 → '100', AU-... (no trailing digits) → ''.
+function _auSizeFromSku(sku) {
+  const m = /-(\d+)$/.exec(String(sku || ''));
+  return m ? m[1] : '';
+}
+
+// Apply the current size filter to the dataset. 'all' returns the array
+// untouched. '35' or '85' returns only matching base SKUs — anything with
+// no trailing -NN (or a different size, e.g. -100) is dropped.
+function _auFilterIncomingBySize(rows) {
+  if (AU_INCOMING_SIZE_FILTER === 'all') return rows;
+  return rows.filter(r => _auSizeFromSku(r.sku) === AU_INCOMING_SIZE_FILTER);
+}
+
+function setAuIncomingSizeFilter(size) {
+  if (size !== 'all' && size !== '35' && size !== '85') size = 'all';
+  AU_INCOMING_SIZE_FILTER = size;
+  try { localStorage.setItem('au_incoming_size_filter', size); } catch (_e) {}
+  _auRestyleIncomingSizeButtons();
+  renderAuIncomingBySku();
+}
+
+// Repaint the three segmented-control buttons so the active one matches state.
+// Lifted from the same colour rules as the existing period-btn pattern.
+function _auRestyleIncomingSizeButtons() {
+  const map = { 'all': 'au-incoming-size-btn-all', '35': 'au-incoming-size-btn-35', '85': 'au-incoming-size-btn-85' };
+  for (const [k, id] of Object.entries(map)) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    const on = (AU_INCOMING_SIZE_FILTER === k);
+    btn.classList.toggle('active', on);
+    btn.style.background = on ? 'var(--accent)' : 'var(--bg-card)';
+    btn.style.color      = on ? '#fff'          : 'var(--text-secondary)';
+  }
+}
+
 function renderAuIncomingBySku() {
   const tb = document.getElementById('au-po-sku-tbody');
   if (!tb) return;
+  // Apply persisted styling on every render — covers the first-paint case
+  // where renderAuIncomingBySku runs before any button click.
+  _auRestyleIncomingSizeButtons();
   if (!AU_INCOMING_BY_SKU || AU_INCOMING_BY_SKU.length === 0) {
     tb.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-secondary);">No per-SKU view yet.</td></tr>`;
     return;
   }
-  tb.innerHTML = AU_INCOMING_BY_SKU.map(r => {
+  const rows = _auFilterIncomingBySize(AU_INCOMING_BY_SKU);
+  if (rows.length === 0) {
+    const sizeLabel = AU_INCOMING_SIZE_FILTER === 'all' ? 'any size' : `${AU_INCOMING_SIZE_FILTER} g`;
+    tb.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-secondary);">No SKUs match the ${sizeLabel} filter.</td></tr>`;
+    return;
+  }
+  tb.innerHTML = rows.map(r => {
     // Days-left cell — red <14, amber <30, plain otherwise.
     const daysCell = r.days_left == null
       ? '<span style="color:var(--text-light)">—</span>'
@@ -9118,12 +9191,16 @@ function downloadAuIncomingCSV() {
   // Run rate / Days left / Next PO (days) / Incoming qty / PO ref / Risk.
   // Extra columns kept on the right edge for spreadsheet drill-down:
   // raw_incoming_qty, has_raw_only, all open PO refs for this SKU.
+  // v2.2.37: CSV honours the current size filter (All / 35 g / 85 g) so the
+  // export matches what's on screen. Filename includes the size suffix when
+  // not 'all' so multiple exports in a session don't overwrite each other.
+  const rows = _auFilterIncomingBySize(AU_INCOMING_BY_SKU || []);
   const lines = [[
     'SKU', 'Current stock', 'Run rate (units/day)', 'Days left',
     'Next PO (days)', 'Incoming qty', 'PO ref', 'Risk',
     'Raw incoming qty', 'Raw only', 'All open POs',
   ]];
-  AU_INCOMING_BY_SKU.forEach(r => lines.push([
+  rows.forEach(r => lines.push([
     r.sku,
     r.current_stock || 0,
     (r.run_rate_per_day || 0).toFixed(1),
@@ -9136,7 +9213,8 @@ function downloadAuIncomingCSV() {
     r.has_raw_only ? 'yes' : '',
     (r.next_po_refs || []).join('; '),
   ]));
-  downloadCSV('au-incoming-by-sku.csv', lines.map(r => r.map(toCsvField).join(',')).join('\r\n'));
+  const suffix = AU_INCOMING_SIZE_FILTER === 'all' ? '' : `-${AU_INCOMING_SIZE_FILTER}g`;
+  downloadCSV(`au-incoming-by-sku${suffix}.csv`, lines.map(r => r.map(toCsvField).join(',')).join('\r\n'));
 }
 
 // ── Generic helpers kept from the original AU shell — used by the new AU CSV exports
