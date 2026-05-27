@@ -588,6 +588,13 @@
        headers but left-aligned cells. Pin both to right so numbers line up
        under their headers and against each other. */
     #region-au td.num { text-align: right; }
+    /* v2.2.40: pull the Carton SKUs numeric columns inward from the right
+       edge a touch — base .num padding-right is only 6px which leaves
+       numbers slammed against the cell edge. 24px right-padding sits the
+       header and the value at a comfortable distance and matches the
+       proportions of the CA carton table at the same screen width. */
+    #region-au th.au-cartons-num,
+    #region-au td.au-cartons-num { padding-right: 24px; }
   </style>
 </head>
 <body>
@@ -1907,13 +1914,25 @@
         </div>
         <div class="table-hint">48 tins per carton (4 &times; 12 SRT trays) &middot; Sold via Coles / Woolworths / Distributor channels &middot; Equivalent tins = cartons in stock &times; 48</div>
       </div>
-      <div class="table-scroll"><table>
+      <div class="table-scroll"><table style="table-layout:fixed;">
+        <colgroup>
+          <!-- v2.2.40: explicit widths so the Contents column doesn't soak up
+               all the slack and slam the numeric columns against the right
+               edge. SKU is fixed (cleanly fits 'AU-CTN-OG-NPO-48'), Contents
+               flexes, the two numeric columns get equal mid-width slots so
+               the headers and values sit at a comfortable distance from the
+               edge. ~7% right padding via padding-right on .au-cartons-num. -->
+          <col style="width:180px;">
+          <col>
+          <col style="width:170px;">
+          <col style="width:180px;">
+        </colgroup>
         <thead>
           <tr>
             <th title="Carton SKU (AU-CTN-...-48). Each carton holds 48 finished tins (4 SRT trays of 12).">SKU ⓘ</th>
             <th title="Product name from CIN7 — what's actually inside the carton.">Contents ⓘ</th>
-            <th class="num" title="Warehouse cartons on hand right now. Pulled live from CIN7 Stock (excludes FBA, which doesn't hold cartons).">Cartons in stock ⓘ</th>
-            <th class="num" title="Tin equivalents: cartons in stock × 48. This is the same number that's rolled up into the matching base SKU's current stock on the table above.">Equivalent tins ⓘ</th>
+            <th class="num au-cartons-num" title="Warehouse cartons on hand right now. Pulled live from CIN7 Stock (excludes FBA, which doesn't hold cartons).">Cartons in stock ⓘ</th>
+            <th class="num au-cartons-num" title="Tin equivalents: cartons in stock × 48. This is the same number that's rolled up into the matching base SKU's current stock on the table above.">Equivalent tins ⓘ</th>
           </tr>
         </thead>
         <tbody id="au-cartons-tbody"></tbody>
@@ -2847,9 +2866,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.39</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.40</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.40 &mdash; 27 May 2026 (AU PO &mdash; Carton SKUs table: column spacing fix)</h4>
+    <ul>
+      <li><strong>Numeric columns no longer slam against the right edge.</strong> v2.2.39's Carton SKUs table inherited the default <code>td.num</code> right-alignment with only 6 px right padding, so on AU (which has fewer carton SKUs than CA) the Contents column absorbed all the slack and the "Cartons in stock" / "Equivalent tins" numbers ended up as a tiny ribbon hugging the right edge of the table.</li>
+      <li><strong>Fix:</strong> <code>&lt;colgroup&gt;</code> on the table with explicit widths (SKU 180 px fixed, Contents flexes, two numeric columns 170 px / 180 px). New <code>.au-cartons-num</code> class applied to header + data + footer cells bumps the right padding to 24 px, so the headers and values sit at a comfortable distance from the edge instead of being slammed against it. Proportions now match the CA carton table at the same screen width.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
     <h4>v2.2.39 &mdash; 27 May 2026 (AU PO &mdash; new "Carton SKUs" table at the bottom, mirroring the CA tab)</h4>
     <ul>
       <li><strong>New "Carton SKUs &mdash; wholesale / retail packing" table</strong> at the bottom of the AU PO tab, sitting under "Incoming stock by SKU". Same 4-column shape as the CA equivalent: SKU / Contents / Cartons in stock / Equivalent tins.</li>
@@ -9250,8 +9275,8 @@ function renderAuCartonsTable() {
     return `<tr>
       <td><div class="sku-name">${r.sku}</div></td>
       <td>${escapeHtml(r.name || '')}</td>
-      <td class="num">${fmtAuNum(cartons)}</td>
-      <td class="num">${fmtAuNum(tins)}</td>
+      <td class="num au-cartons-num">${fmtAuNum(cartons)}</td>
+      <td class="num au-cartons-num">${fmtAuNum(tins)}</td>
     </tr>`;
   }).join('');
 
@@ -9261,8 +9286,8 @@ function renderAuCartonsTable() {
   if (tf) {
     tf.innerHTML = `<tr style="font-weight:600;border-top:2px solid var(--border);">
       <td colspan="2" style="text-align:right;padding-right:12px;color:var(--text-secondary);">Total</td>
-      <td class="num">${fmtAuNum(totalCartons)}</td>
-      <td class="num">${fmtAuNum(totalTins)}</td>
+      <td class="num au-cartons-num">${fmtAuNum(totalCartons)}</td>
+      <td class="num au-cartons-num">${fmtAuNum(totalTins)}</td>
     </tr>`;
   }
 }
