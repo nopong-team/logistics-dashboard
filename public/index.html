@@ -1896,6 +1896,30 @@
         <tbody id="au-po-sku-tbody"></tbody>
       </table></div>
     </div>
+
+    <!-- Carton SKUs (v2.2.39) — mirrors the CA tab's bottom table so Lauren -->
+    <!-- can sanity-check cartons-in-stock × 48 = tin equivalents at a glance. -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="table-card-title">Carton SKUs &mdash; wholesale / retail packing</div>
+          <button class="btn-csv" onclick="downloadAuCartonCSV()">Export CSV</button>
+        </div>
+        <div class="table-hint">48 tins per carton (4 &times; 12 SRT trays) &middot; Sold via Coles / Woolworths / Distributor channels &middot; Equivalent tins = cartons in stock &times; 48</div>
+      </div>
+      <div class="table-scroll"><table>
+        <thead>
+          <tr>
+            <th title="Carton SKU (AU-CTN-...-48). Each carton holds 48 finished tins (4 SRT trays of 12).">SKU ⓘ</th>
+            <th title="Product name from CIN7 — what's actually inside the carton.">Contents ⓘ</th>
+            <th class="num" title="Warehouse cartons on hand right now. Pulled live from CIN7 Stock (excludes FBA, which doesn't hold cartons).">Cartons in stock ⓘ</th>
+            <th class="num" title="Tin equivalents: cartons in stock × 48. This is the same number that's rolled up into the matching base SKU's current stock on the table above.">Equivalent tins ⓘ</th>
+          </tr>
+        </thead>
+        <tbody id="au-cartons-tbody"></tbody>
+        <tfoot id="au-cartons-tfoot"></tfoot>
+      </table></div>
+    </div>
   </div>
 
   <!-- ═══════ TAB: FORECASTING ═══════ -->
@@ -2823,9 +2847,20 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.38</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.39</span> &middot; May 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.39 &mdash; 27 May 2026 (AU PO &mdash; new "Carton SKUs" table at the bottom, mirroring the CA tab)</h4>
+    <ul>
+      <li><strong>New "Carton SKUs &mdash; wholesale / retail packing" table</strong> at the bottom of the AU PO tab, sitting under "Incoming stock by SKU". Same 4-column shape as the CA equivalent: SKU / Contents / Cartons in stock / Equivalent tins.</li>
+      <li><strong>Why:</strong> when Lauren is looking at total tins on a PO and wants to sanity-check carton stock × 48 = tin equivalents, she can scroll to the bottom of the tab and see it in one place rather than mentally multiplying. The previously-implicit relationship between carton SKU rows and base-SKU rolled-up tins is now explicit.</li>
+      <li><strong>Data source:</strong> reads from <code>AU_INVENTORY_DATA</code> filtered to <code>kind === 'carton'</code> (AU-CTN-...-48 rows). All AU cartons are ×48 multiplier; SRT trays (×12) are already folded into the base SKU's stock upstream, and mixed mega-trays (×72) are filtered out at <code>buildInventory</code>. So this table is 1:1 with the CA pattern &mdash; no behaviour difference between regions.</li>
+      <li><strong>Footer total row</strong> for total cartons in stock + total tin equivalents, so Lauren has the headline number on the same view.</li>
+      <li><strong>Live re-renders</strong> on the live <code>/api/au/inventory</code> response landing &mdash; no static-vs-live lag.</li>
+      <li><strong>CSV export</strong> via the same pattern as the other AU tables. Includes the footer total row so spreadsheet readers don't have to recompute.</li>
+      <li><strong>Discontinued cartons excluded</strong> (matches the rest of the AU dashboard's behaviour).</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
     <h4>v2.2.38 &mdash; 27 May 2026 (AU PO &mdash; revert raw-tin rollup: Incoming qty is now fully-filled tins only)</h4>
     <ul>
       <li><strong>Reversing the v2.2.36 raw-tin rollup decision.</strong> Mel's reasoning: the "Incoming qty" column means "ready-to-sell stock arriving" &mdash; raw tins (T-AU-...) still need filling before they belong there, and the runway from current stock is already captured by Days left. Same logic for "Next PO (days)" &mdash; that should be when the next batch of <em>finished</em> tins arrives, not when the next raw-tin batch lands.</li>
@@ -8297,6 +8332,9 @@ async function loadLiveAuInventory() {
     // first rendered (which it often will — sales is the default landing tab),
     // re-render so the canonical names replace the carton-variant fallbacks.
     if (typeof renderAuMonthlySkuTable === 'function') renderAuMonthlySkuTable();
+    // v2.2.39: same logic for the Carton SKUs table on the PO tab — it reads
+    // from AU_INVENTORY_DATA, so re-render once the live inventory lands.
+    if (typeof renderAuCartonsTable === 'function') renderAuCartonsTable();
 
     if (data.staleFallback) {
       setChip('CIN7 cached (upstream error)', 'gray',
@@ -8485,6 +8523,7 @@ function renderAuAll() {
   renderAuPoKpis();
   renderAuPoTable();
   renderAuIncomingBySku();
+  renderAuCartonsTable();
   const lbl = AU_MONTH_LABELS[AU_SELECTED_MONTH] || AU_SELECTED_MONTH;
   const setText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
   setText('au-sales-table-month', lbl);
@@ -9187,6 +9226,65 @@ function downloadAuPosCSV() {
   });
   downloadCSV('au-purchase-orders.csv', lines.map(r => r.map(toCsvField).join(',')).join('\r\n'));
 }
+// v2.2.39: Carton SKUs table — mirrors the CA tab's bottom table so Lauren
+// can sanity-check carton stock × 48 = tin equivalents. Sources rows from
+// AU_INVENTORY_DATA (kind === 'carton'), so it lights up the moment the
+// live /api/au/inventory fetch lands. Discontinued cartons are excluded.
+function renderAuCartonsTable() {
+  const tb = document.getElementById('au-cartons-tbody');
+  const tf = document.getElementById('au-cartons-tfoot');
+  if (!tb) return;
+  const rows = (AU_INVENTORY_DATA || [])
+    .filter(r => r && r.kind === 'carton' && !r.discontinued)
+    .sort((a, b) => (a.sku || '').localeCompare(b.sku || ''));
+
+  if (rows.length === 0) {
+    tb.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--text-secondary);">No carton SKUs in inventory yet.</td></tr>`;
+    if (tf) tf.innerHTML = '';
+    return;
+  }
+
+  tb.innerHTML = rows.map(r => {
+    const cartons = auWhSoh(r);
+    const tins    = cartons * (r.mult || 48);
+    return `<tr>
+      <td><div class="sku-name">${r.sku}</div></td>
+      <td>${escapeHtml(r.name || '')}</td>
+      <td class="num">${fmtAuNum(cartons)}</td>
+      <td class="num">${fmtAuNum(tins)}</td>
+    </tr>`;
+  }).join('');
+
+  // Totals row — handy when Lauren is doing the carton/tin maths.
+  const totalCartons = rows.reduce((s, r) => s + auWhSoh(r), 0);
+  const totalTins    = rows.reduce((s, r) => s + auWhSoh(r) * (r.mult || 48), 0);
+  if (tf) {
+    tf.innerHTML = `<tr style="font-weight:600;border-top:2px solid var(--border);">
+      <td colspan="2" style="text-align:right;padding-right:12px;color:var(--text-secondary);">Total</td>
+      <td class="num">${fmtAuNum(totalCartons)}</td>
+      <td class="num">${fmtAuNum(totalTins)}</td>
+    </tr>`;
+  }
+}
+
+function downloadAuCartonCSV() {
+  if (!AU_HAS_REAL) { alert('AU data not loaded.'); return; }
+  const rows = (AU_INVENTORY_DATA || [])
+    .filter(r => r && r.kind === 'carton' && !r.discontinued)
+    .sort((a, b) => (a.sku || '').localeCompare(b.sku || ''));
+  const lines = [['SKU', 'Contents', 'Cartons in stock', 'Equivalent tins']];
+  rows.forEach(r => {
+    const cartons = auWhSoh(r);
+    const tins    = cartons * (r.mult || 48);
+    lines.push([r.sku, r.name || '', cartons, tins]);
+  });
+  // Footer total row for spreadsheet readers.
+  const totalCartons = rows.reduce((s, r) => s + auWhSoh(r), 0);
+  const totalTins    = rows.reduce((s, r) => s + auWhSoh(r) * (r.mult || 48), 0);
+  lines.push(['Total', '', totalCartons, totalTins]);
+  downloadCSV('au-carton-skus.csv', lines.map(r => r.map(toCsvField).join(',')).join('\r\n'));
+}
+
 function downloadAuIncomingCSV() {
   if (!AU_HAS_REAL) { alert('AU data not loaded.'); return; }
   // Columns mirror the on-screen layout — SKU / Current stock / Run rate /
