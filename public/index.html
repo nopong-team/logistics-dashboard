@@ -2607,9 +2607,9 @@
       #tab-au-logistics .log-section.woolies { border-left: 3px solid #1F8B4C; }
       #tab-au-logistics .log-section.other   { border-left: 3px solid #5A89C2; }
       #tab-au-logistics .log-section-title {
-        font-size: 17px;
+        font-size: 15px;
         font-weight: 700;
-        margin-bottom: 10px;
+        margin-bottom: 9px;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -2618,8 +2618,8 @@
       #tab-au-logistics .log-section-title .count-pill {
         background: var(--bg-soft);
         color: var(--text-secondary);
-        font-size: 14px;
-        padding: 3px 10px;
+        font-size: 13px;
+        padding: 2px 9px;
         border-radius: 999px;
         font-weight: 600;
       }
@@ -2629,15 +2629,16 @@
         min-height: 0;
       }
 
-      /* ── Order cards — typography sized for the warehouse TV (v2.2.44) ──
-         Bumped from the tight v2.2.29 sizes (10-12px) so the floor can read
-         distributor labels, dates, SKUs and qtys from ~3-5m away. Padding
-         and tick badges scaled to match. */
+      /* ── Order cards — typography sized for the warehouse TV (v2.2.45) ──
+         Dialled halfway between the v2.2.29 tight sizes (10-12px) and the
+         v2.2.44 large sizes (14-18px). Goal: legible from the warehouse
+         floor without scrolling. Coles + Woolies need to fit 3-5 orders
+         per column at 1920×1080. */
       #tab-au-logistics .log-order {
         border: 1px solid var(--border);
         border-radius: 6px;
-        padding: 8px 10px;
-        margin-bottom: 6px;
+        padding: 6px 9px;
+        margin-bottom: 5px;
         background: #fff;
       }
       #tab-au-logistics .log-order:last-child { margin-bottom: 0; }
@@ -2650,22 +2651,22 @@
         justify-content: space-between;
         align-items: baseline;
         gap: 8px;
-        margin-bottom: 3px;
+        margin-bottom: 2px;
       }
       #tab-au-logistics .log-order-label {
-        font-size: 18px;
+        font-size: 15px;
         font-weight: 700;
         color: var(--text-primary);
       }
       #tab-au-logistics .log-order-ref {
-        font-size: 13px;
+        font-size: 12px;
         color: var(--text-secondary);
         font-variant-numeric: tabular-nums;
       }
       #tab-au-logistics .log-order-date {
-        font-size: 14px;
+        font-size: 12px;
         color: var(--text-secondary);
-        margin-bottom: 5px;
+        margin-bottom: 4px;
         font-variant-numeric: tabular-nums;
       }
       #tab-au-logistics .log-order.past-due .log-order-date {
@@ -2675,19 +2676,19 @@
       #tab-au-logistics .log-line {
         display: flex;
         align-items: center;
-        gap: 8px;
-        font-size: 16px;
-        padding: 2px 0;
+        gap: 7px;
+        font-size: 13px;
+        padding: 1px 0;
       }
       #tab-au-logistics .log-line .log-line-tick {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 20px;
-        height: 20px;
+        width: 17px;
+        height: 17px;
         border-radius: 4px;
         flex-shrink: 0;
-        font-size: 14px;
+        font-size: 12px;
         font-weight: 800;
       }
       #tab-au-logistics .log-line .log-line-tick.ok {
@@ -2698,22 +2699,22 @@
         background: #FFF1F1;
         color: #C62828;
         border: 1px solid #E53935;
-        font-size: 12px;
+        font-size: 11px;
         width: auto;
-        height: 20px;
-        padding: 0 7px;
+        height: 17px;
+        padding: 0 6px;
         font-weight: 700;
       }
       #tab-au-logistics .log-line-sku {
         font-family: ui-monospace, monospace;
-        font-size: 16px;
+        font-size: 13px;
         color: var(--text-primary);
         font-weight: 700;
         letter-spacing: -0.2px;
       }
       #tab-au-logistics .log-line-qty {
         margin-left: auto;
-        font-size: 14px;
+        font-size: 12px;
         color: var(--text-secondary);
         font-variant-numeric: tabular-nums;
         font-weight: 600;
@@ -2723,10 +2724,10 @@
         font-weight: 700;
       }
       #tab-au-logistics .log-empty {
-        font-size: 15px;
+        font-size: 13px;
         color: var(--text-secondary);
         text-align: center;
-        padding: 16px;
+        padding: 14px;
         font-style: italic;
       }
 
@@ -2888,9 +2889,17 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.44</span> &middot; June 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.45</span> &middot; June 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.45 &mdash; 1 June 2026 (🚚 Logistics tab: typography dialled halfway to fit without scrolling)</h4>
+    <ul>
+      <li><strong>v2.2.44 was too big &mdash; Coles column needed to scroll.</strong> Per Melanie 2026-06-01, dial back to roughly halfway between the v2.2.43 tight sizes and the v2.2.44 large sizes so all three columns fit at 1920&times;1080 without scroll bars.</li>
+      <li><strong>Order-card text:</strong> labels 18 &rarr; 15px, SKU 16 &rarr; 13px, line text 16 &rarr; 13px, date 14 &rarr; 12px, ref + qty 13-14 &rarr; 12px. Section titles 17 &rarr; 15px, count pills 14 &rarr; 13px.</li>
+      <li><strong>Tick badge 20 &rarr; 17px square</strong>; card padding 8/10 &rarr; 6/9px; margin between orders 6 &rarr; 5px. Net effect: ~25% less vertical space per order.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.44 &mdash; 1 June 2026 (🚚 Logistics tab: bigger typography for warehouse-TV readability)</h4>
     <ul>
       <li><strong>Order-card text resized for ~3-5m viewing distance.</strong> Distributor labels 12 &rarr; 18px, must-ship-by dates 10 &rarr; 14px, SKU codes 11 &rarr; 16px, qty + reference 10 &rarr; 13-14px. Section titles 13 &rarr; 17px, count pills 11 &rarr; 14px. Empty-state copy 12 &rarr; 15px.</li>
