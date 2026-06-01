@@ -1,0 +1,536 @@
+  <!-- ═══════ TAB: 11TH BIRTHDAY LAUNCH (v2.2.21 → v2.2.25 TV layout) ═══════ -->
+  <div class="tab-panel" id="tab-au-birthday">
+    <style>
+      /* ── TV-fit layout: panel fills the viewport, no scroll. ──
+         Sized for warehouse TV (16:9, 1920×1080) but degrades gracefully
+         on smaller screens. The whole tab is a vertical flex column with
+         the chart row using flex:1 to absorb whatever vertical space
+         remains after the hero / KPI / meta bars take their natural sizes. */
+      #tab-au-birthday.active {
+        display: flex !important;
+        flex-direction: column;
+        gap: 10px;
+        /* Reserve room for region bar + AU tab bar + page padding. The
+           exact reserve number is conservative — on a real 1080p TV in
+           fullscreen we get ~900px usable, this gives us 880px. */
+        height: calc(100vh - 200px);
+        min-height: 640px;
+        overflow: hidden;
+      }
+
+      /* ── Hero ── */
+      #tab-au-birthday .bday-hero {
+        background: linear-gradient(135deg, #FF578A 0%, #FF8FB3 100%);
+        color: #fff;
+        border-radius: 12px;
+        padding: 14px 22px;
+        display: grid;
+        grid-template-columns: 2fr 1fr 1fr;
+        gap: 20px;
+        align-items: center;
+        box-shadow: 0 4px 18px rgba(255,87,138,0.25);
+        flex: 0 0 auto;
+      }
+      #tab-au-birthday .bday-hero h2 { margin: 0 0 4px 0; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
+      #tab-au-birthday .bday-hero .subtitle { font-size: 12px; opacity: 0.9; font-weight: 500; }
+      #tab-au-birthday .bday-countdown-big {
+        font-size: 42px; font-weight: 800; line-height: 1;
+        font-variant-numeric: tabular-nums; letter-spacing: -1px;
+        margin-bottom: 2px;
+      }
+      #tab-au-birthday .bday-countdown-label {
+        font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+        opacity: 0.85; font-weight: 600;
+      }
+      #tab-au-birthday .bday-drop-time { font-size: 18px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+
+      /* ── KPI row: 7 cards in one line ── */
+      #tab-au-birthday .bday-kpi-row {
+        display: grid;
+        /* 4 Woo cards + 3 SS cards. Image cards (3rd + 4th) get slightly
+           more width to fit the 64px thumbnail. */
+        grid-template-columns: 1fr 1fr 1.25fr 1.25fr 1fr 1fr 1fr;
+        gap: 10px;
+        flex: 0 0 auto;
+      }
+      #tab-au-birthday .bday-card {
+        background: var(--card-bg, #fff);
+        border: 1px solid var(--border, #E5E7EB);
+        border-radius: 10px;
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        min-width: 0;
+      }
+      #tab-au-birthday .bday-card.bday-card--woo { border-left: 3px solid #FF578A; }
+      #tab-au-birthday .bday-card.bday-card--ss  { border-left: 3px solid #7B5DD3; }
+      #tab-au-birthday .bday-card-icon-row {
+        display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
+      }
+      #tab-au-birthday .bday-mini-icon {
+        flex: 0 0 auto;
+        color: var(--text-secondary);
+      }
+      #tab-au-birthday .bday-card-label {
+        font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
+        color: var(--text-secondary); font-weight: 600; line-height: 1.2;
+      }
+      #tab-au-birthday .bday-card-value {
+        font-size: 36px; font-weight: 800; line-height: 1; color: var(--text-primary);
+        font-variant-numeric: tabular-nums; margin-top: 6px;
+      }
+      #tab-au-birthday .bday-card-sub { font-size: 10px; color: var(--text-secondary); margin-top: 4px; font-weight: 500; line-height: 1.3; }
+
+      /* ── Product-image cards ── */
+      #tab-au-birthday .bday-card--with-img {
+        display: grid;
+        grid-template-columns: 64px 1fr;
+        column-gap: 10px;
+        align-items: center;
+        padding: 10px 12px;
+      }
+      #tab-au-birthday .bday-card--with-img .bday-product-img {
+        width: 64px; height: 64px; object-fit: contain;
+        border-radius: 6px; background: #F8F8F8;
+        /* v2.2.26: card now has 4 rows (label / value / stock / sub) so
+           the image spans 4 to keep it centred vertically. */
+        grid-row: span 4;
+      }
+      #tab-au-birthday .bday-card--with-img .bday-card-label { margin-bottom: 0; }
+      #tab-au-birthday .bday-card--with-img .bday-card-value { font-size: 30px; margin-top: 2px; line-height: 1; }
+      #tab-au-birthday .bday-card--with-img .bday-card-sub { margin-top: 0; }
+      #tab-au-birthday .bday-product-img.empty {
+        background: linear-gradient(135deg, #FFEEF3 0%, #FFD8E5 100%);
+      }
+      /* ── Stock line (v2.2.26) ── Blue, sits between value and sub. */
+      #tab-au-birthday .bday-stock-line {
+        font-size: 12px; font-weight: 700;
+        color: #1976D2;
+        margin-top: 2px;
+        line-height: 1.2;
+        font-variant-numeric: tabular-nums;
+      }
+      #tab-au-birthday .bday-stock-line.sold-out {
+        color: #D32F2F;   /* red when 0 — the sell-out moment */
+        animation: bday-stock-pulse 1.6s ease-in-out infinite;
+      }
+      #tab-au-birthday .bday-stock-line.unmanaged {
+        color: var(--text-secondary);
+        font-weight: 500;
+      }
+      @keyframes bday-stock-pulse {
+        0%, 100% { opacity: 1; }
+        50%      { opacity: 0.55; }
+      }
+
+      /* ── Sell-out celebration banner (v2.2.26) ── Fixed-position, centred,
+         huge text, fades out after 14s. Confetti runs alongside via JS. */
+      .bday-sellout-banner {
+        position: fixed;
+        top: 32%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 99999;
+        background: linear-gradient(135deg, #FF578A 0%, #FFD700 100%);
+        color: #fff;
+        padding: 28px 56px;
+        font-size: 38px;
+        font-weight: 900;
+        letter-spacing: -0.5px;
+        border-radius: 18px;
+        box-shadow: 0 12px 48px rgba(0,0,0,0.35);
+        animation: bday-bounce-in 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+        text-align: center;
+        white-space: nowrap;
+        pointer-events: none;
+      }
+      .bday-sellout-banner.fade-out { opacity: 0; transition: opacity 1s ease; }
+      @keyframes bday-bounce-in {
+        0%   { transform: translate(-50%, -50%) scale(0.4); opacity: 0; }
+        70%  { transform: translate(-50%, -50%) scale(1.08); opacity: 1; }
+        100% { transform: translate(-50%, -50%) scale(1);    opacity: 1; }
+      }
+      /* Stack a second banner below the first if both products sell out in
+         the same render cycle. */
+      .bday-sellout-banner.second { top: 50%; }
+
+      /* ── Order-count milestone celebrations (v2.2.29) ──
+         Four cheesy 15-second celebrations fire as total_orders_today
+         crosses 500 / 1,000 / 1,500 / 1,733. Each has its own banner
+         gradient + a giant emoji that sweeps across the screen. Same
+         15s duration + bounce-in + fade-out pattern as the sell-out
+         banner, so they feel like the same family of effects. */
+      .bday-milestone-banner {
+        position: fixed;
+        top: 38%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 99999;
+        color: #fff;
+        padding: 30px 60px;
+        font-size: 42px;
+        font-weight: 900;
+        letter-spacing: -0.5px;
+        border-radius: 18px;
+        box-shadow: 0 12px 48px rgba(0,0,0,0.4);
+        animation: bday-bounce-in 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+        text-align: center;
+        white-space: nowrap;
+        pointer-events: none;
+      }
+      .bday-milestone-banner.fade-out { opacity: 0; transition: opacity 1s ease; }
+      .bday-milestone-banner.fire {
+        background: linear-gradient(135deg, #FF4500 0%, #FFA500 50%, #FFD700 100%);
+      }
+      .bday-milestone-banner.hammer {
+        background: linear-gradient(135deg, #7B5DD3 0%, #4A2FA8 100%);
+      }
+      .bday-milestone-banner.lightning {
+        background: linear-gradient(135deg, #FFD700 0%, #1E90FF 50%, #4B0082 100%);
+      }
+      .bday-milestone-banner.bullseye {
+        background: linear-gradient(135deg, #FF1744 0%, #FFD700 50%, #FF1744 100%);
+        font-size: 46px;
+        padding: 36px 72px;
+      }
+      .bday-milestone-banner.mic-drop {
+        background: linear-gradient(135deg, #4B0082 0%, #2E0854 50%, #FFD700 100%);
+      }
+      .bday-milestone-banner.rocket {
+        background: linear-gradient(135deg, #FF578A 0%, #FFD700 50%, #1E90FF 100%);
+      }
+
+      /* The giant emoji that sweeps across the screen. Fixed-position,
+         starts off-screen-left, ends off-screen-right. 4-second sweep
+         loop, repeats for the full 15s. Sits ABOVE the banner (z-index
+         higher) so it flies across the front, not hidden behind it. */
+      .bday-milestone-sweep {
+        position: fixed;
+        left: -200px;
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 200px;
+        z-index: 100000;
+        pointer-events: none;
+        animation: bday-sweep-across 4s linear infinite;
+        filter: drop-shadow(0 8px 24px rgba(0,0,0,0.5));
+      }
+      @keyframes bday-sweep-across {
+        0%   { left: -200px; transform: translateY(-50%) rotate(-8deg); }
+        50%  { transform: translateY(-50%) rotate(8deg); }
+        100% { left: calc(100vw + 200px); transform: translateY(-50%) rotate(-8deg); }
+      }
+      /* Hammer swings instead of just rotating gently. scaleX(-1) on every
+         keyframe so the hammer head faces the direction of travel (left→right)
+         rather than looking like it's flying backwards. */
+      .bday-milestone-sweep.hammer-anim {
+        animation: bday-hammer-swing 4s linear infinite;
+      }
+      @keyframes bday-hammer-swing {
+        0%   { left: -200px; transform: translateY(-50%) scaleX(-1) rotate(-45deg); }
+        25%  { transform: translateY(-50%) scaleX(-1) rotate(35deg); }
+        50%  { transform: translateY(-50%) scaleX(-1) rotate(-45deg); }
+        75%  { transform: translateY(-50%) scaleX(-1) rotate(35deg); }
+        100% { left: calc(100vw + 200px); transform: translateY(-50%) scaleX(-1) rotate(-45deg); }
+      }
+      /* Lightning flashes — fast sweep + opacity strobe. */
+      .bday-milestone-sweep.lightning-anim {
+        animation: bday-lightning-flash 2s linear infinite;
+      }
+      @keyframes bday-lightning-flash {
+        0%   { left: -200px; opacity: 1; transform: translateY(-50%) rotate(-12deg) scale(1); }
+        20%  { opacity: 0.2; transform: translateY(-50%) rotate(8deg) scale(1.2); }
+        40%  { opacity: 1;   transform: translateY(-50%) rotate(-12deg) scale(1); }
+        60%  { opacity: 0.3; transform: translateY(-50%) rotate(8deg) scale(1.15); }
+        100% { left: calc(100vw + 200px); opacity: 1; transform: translateY(-50%) rotate(-12deg) scale(1); }
+      }
+      /* Bullseye — arrow flies in from left, stops centred, pulses.
+         scaleX(-1) on every keyframe so the target faces the direction
+         of travel rather than looking like it's flying backwards. */
+      .bday-milestone-sweep.bullseye-anim {
+        animation: bday-bullseye-hit 5s ease-out infinite;
+      }
+      @keyframes bday-bullseye-hit {
+        0%   { left: -200px;     transform: translateY(-50%) scaleX(-1) scale(0.6); }
+        30%  { left: calc(50vw - 100px); transform: translateY(-50%) scaleX(-1) scale(1.2); }
+        45%  { left: calc(50vw - 100px); transform: translateY(-50%) scaleX(-1) scale(1) rotate(-10deg); }
+        60%  { left: calc(50vw - 100px); transform: translateY(-50%) scaleX(-1) scale(1.15) rotate(10deg); }
+        75%  { left: calc(50vw - 100px); transform: translateY(-50%) scaleX(-1) scale(1); }
+        100% { left: calc(100vw + 200px); transform: translateY(-50%) scaleX(-1) scale(0.8); }
+      }
+
+      /* Mic drop — falls from top-left, lands centre with a bounce, then
+         exits stage right with a 360° spin. Uses `top` keyframes for the
+         vertical fall + transform rotate for the spin/tilt. Longer loop
+         (5s) than the others — the drop-and-settle reads better at a
+         slightly slower cadence. */
+      .bday-milestone-sweep.mic-drop-anim {
+        animation: bday-mic-drop 5s ease-in-out infinite;
+      }
+      @keyframes bday-mic-drop {
+        0%   { top: -15%;  left: 28vw; transform: translateY(-50%) rotate(-35deg); }
+        18%  { top: 50%;   left: 28vw; transform: translateY(-50%) rotate(25deg) scale(1.15); } /* impact */
+        26%  { top: 42%;   left: 28vw; transform: translateY(-50%) rotate(-12deg) scale(1); }   /* bounce */
+        38%  { top: 50%;   left: 28vw; transform: translateY(-50%) rotate(6deg); }              /* settle */
+        55%  { top: 50%;   left: 28vw; transform: translateY(-50%) rotate(0deg); }              /* hold (mic dropped) */
+        100% { top: 50%;   left: calc(100vw + 200px); transform: translateY(-50%) rotate(360deg); } /* exit spinning */
+      }
+
+      /* Rocket — flies left→right with a slight upward arc. The 🚀 emoji
+         already points up-right, so a small rotate keeps it angled along
+         the trajectory without looking awkward. Faster sweep (3s) for
+         that "blasting past" energy. */
+      .bday-milestone-sweep.rocket-anim {
+        animation: bday-rocket-zoom 3s linear infinite;
+      }
+      @keyframes bday-rocket-zoom {
+        0%   { left: -200px;             top: 65%; transform: translateY(-50%) rotate(-15deg); }
+        50%  { /* left interpolated */   top: 45%; transform: translateY(-50%) rotate(-15deg) scale(1.05); }
+        100% { left: calc(100vw + 200px); top: 25%; transform: translateY(-50%) rotate(-15deg); }
+      }
+
+      /* ── Main row: chart + alerts column ── */
+      #tab-au-birthday .bday-main-row {
+        display: grid;
+        grid-template-columns: 2fr 1fr;
+        gap: 10px;
+        flex: 1 1 auto;
+        min-height: 0; /* required for the chart canvas to size correctly */
+      }
+      #tab-au-birthday .bday-chart-card {
+        background: var(--card-bg, #fff);
+        border: 1px solid var(--border, #E5E7EB);
+        border-radius: 10px;
+        padding: 14px 16px 10px 16px;
+        display: flex; flex-direction: column;
+        min-height: 0; min-width: 0;
+      }
+      #tab-au-birthday .bday-chart-title {
+        font-size: 13px; font-weight: 700; color: var(--text-primary);
+        margin-bottom: 8px;
+      }
+      #tab-au-birthday .bday-chart-canvas-wrap {
+        position: relative; flex: 1 1 auto; min-height: 0; width: 100%;
+      }
+
+      /* ── Alerts column (2 stacked alert cards in the right column) ── */
+      #tab-au-birthday .bday-alerts-col {
+        display: flex; flex-direction: column; gap: 10px;
+        min-height: 0;
+      }
+      #tab-au-birthday .bday-alert {
+        background: #FFF5F7;
+        border: 2px solid #FF578A;
+        border-radius: 10px;
+        padding: 12px 14px;
+        flex: 1 1 0;
+        min-height: 0;
+        display: flex; flex-direction: column;
+        overflow: hidden;
+      }
+      #tab-au-birthday .bday-alert.wholesale {
+        background: #F4F0FF;
+        border-color: #7B5DD3;
+      }
+      #tab-au-birthday .bday-alert.wholesale .bday-alert-title { color: #4A2C9E; }
+      #tab-au-birthday .bday-alert.wholesale .bday-alert-count { color: #4A2C9E; }
+      #tab-au-birthday .bday-alert.wholesale .bday-alert-row { border-top-color: #D4C8F0; }
+      #tab-au-birthday .bday-alert-header {
+        display: flex; align-items: center; justify-content: space-between;
+        margin-bottom: 8px; flex: 0 0 auto;
+      }
+      #tab-au-birthday .bday-alert-title { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.6px; color: #C8295F; }
+      #tab-au-birthday .bday-alert-count { font-size: 26px; font-weight: 800; color: #C8295F; font-variant-numeric: tabular-nums; line-height: 1; }
+      #tab-au-birthday .bday-alert-list {
+        font-size: 12px; color: var(--text-primary);
+        flex: 1 1 auto; overflow-y: auto; /* scroll within the card if needed */
+        min-height: 0;
+      }
+      #tab-au-birthday .bday-alert-list .bday-alert-row { padding: 3px 0; border-top: 1px dashed #FFCAD8; }
+      #tab-au-birthday .bday-alert-list .bday-alert-row:first-child { border-top: none; }
+
+      /* ── Pills ── */
+      #tab-au-birthday .bday-pill {
+        display: inline-block; font-size: 9px; font-weight: 800; letter-spacing: 0.6px;
+        padding: 2px 6px; border-radius: 4px; margin-right: 4px; vertical-align: middle;
+      }
+      #tab-au-birthday .bday-pill.intl      { background: #FFE0B2; color: #B26500; }
+      #tab-au-birthday .bday-pill.express   { background: #BBDEFB; color: #0D47A1; }
+      #tab-au-birthday .bday-pill.wholesale { background: #DDD0FF; color: #4A2C9E; }
+      #tab-au-birthday .bday-pill.sku       { background: #F0F0F0; color: #444; font-family: 'SF Mono','Fira Code',monospace; font-size: 9px; }
+      #tab-au-birthday .bday-pill.disconnected { background: #ECECEC; color: #555; }
+
+      /* ── Meta bar (compact, always at the bottom) ── */
+      #tab-au-birthday .bday-meta-bar {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 6px 12px;
+        background: var(--card-bg, #fff);
+        border: 1px solid var(--border, #E5E7EB);
+        border-radius: 8px;
+        font-size: 11px; color: var(--text-secondary);
+        flex: 0 0 auto;
+      }
+      #tab-au-birthday .bday-refresh-btn {
+        background: #FF578A; color: #fff; border: none; padding: 4px 12px;
+        border-radius: 6px; font-weight: 700; font-size: 11px; cursor: pointer;
+      }
+      #tab-au-birthday .bday-refresh-btn:hover { background: #E5447A; }
+      #tab-au-birthday .bday-refresh-btn:disabled { background: #ECECEC; color: #999; cursor: wait; }
+      #tab-au-birthday .bday-disconnected { opacity: 0.5; }
+      /* SS-card dimming when ShipStation is disconnected — class toggled on the panel root. */
+      #tab-au-birthday.bday-ss-down .bday-card--ss { opacity: 0.5; }
+      #tab-au-birthday .bday-error {
+        background: #FFF5F7; border: 1px solid #FF578A; color: #C8295F;
+        padding: 8px 12px; border-radius: 8px; font-size: 12px; font-weight: 500;
+        flex: 0 0 auto;
+      }
+
+      /* ── Smaller screens fall back to scrollable ── */
+      @media (max-width: 1200px) {
+        #tab-au-birthday.active { height: auto; overflow: visible; }
+        #tab-au-birthday .bday-kpi-row { grid-template-columns: repeat(4, 1fr); }
+        #tab-au-birthday .bday-main-row { grid-template-columns: 1fr; }
+      }
+    </style>
+
+    <!-- Hero -->
+    <div class="bday-hero">
+      <div>
+        <h2>🎂 11th Birthday Launch</h2>
+        <div class="subtitle">Thursday 21 May 2026 · hourly drops 7am–5pm AEST · live data from Woo + ShipStation</div>
+      </div>
+      <div>
+        <div class="bday-countdown-label">Next drop in</div>
+        <div class="bday-countdown-big" id="bday-countdown">--:--</div>
+        <div class="bday-drop-time" id="bday-next-drop-time">--:-- AEST</div>
+      </div>
+      <div>
+        <div class="bday-countdown-label">Open in ShipStation</div>
+        <div class="bday-countdown-big" id="bday-open-orders-big">--</div>
+        <div class="bday-card-sub" id="bday-open-orders-sub" style="color:#fff;opacity:0.9;">awaiting shipment</div>
+      </div>
+    </div>
+
+    <div id="bday-error-box"></div>
+
+    <!-- KPI row: 4 Woo cards (pink left-stripe) + 3 ShipStation cards (purple left-stripe) -->
+    <div class="bday-kpi-row">
+      <!-- 1: All orders today (envelope) -->
+      <div class="bday-card bday-card--woo">
+        <div>
+          <div class="bday-card-icon-row">
+            <svg class="bday-mini-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/></svg>
+            <div class="bday-card-label">All orders today</div>
+          </div>
+        </div>
+        <div class="bday-card-value" id="bday-woo-total-orders">--</div>
+        <div class="bday-card-sub">since midnight AEST</div>
+      </div>
+
+      <!-- 2: Launch-product orders (envelope) -->
+      <div class="bday-card bday-card--woo">
+        <div>
+          <div class="bday-card-icon-row">
+            <svg class="bday-mini-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/></svg>
+            <div class="bday-card-label">Orders w/ launch products</div>
+          </div>
+        </div>
+        <div class="bday-card-value" id="bday-woo-launch-orders">--</div>
+        <div class="bday-card-sub">contains soap or tin</div>
+      </div>
+
+      <!-- 3: Soap (lifetime, with product image + Woo stock) -->
+      <div class="bday-card bday-card--woo bday-card--with-img">
+        <img class="bday-product-img empty" id="bday-soap-img" src="" alt="Soap" />
+        <div class="bday-card-label">Soap units (lifetime)</div>
+        <div class="bday-card-value" id="bday-soap-lifetime">--</div>
+        <div class="bday-stock-line" id="bday-soap-stock">Stock: --</div>
+        <div class="bday-card-sub" id="bday-soap-sub">AU-BD-NPS-100 · all-time</div>
+      </div>
+
+      <!-- 4: Tin (today, with product image + Woo stock) -->
+      <div class="bday-card bday-card--woo bday-card--with-img">
+        <img class="bday-product-img empty" id="bday-tin-img" src="" alt="11th Birthday Tin" />
+        <div class="bday-card-label">11th Birthday Tin (today)</div>
+        <div class="bday-card-value" id="bday-tin-today">--</div>
+        <div class="bday-stock-line" id="bday-tin-stock">Stock: --</div>
+        <div class="bday-card-sub" id="bday-tin-sub">AU-BD-NBF-35 · today</div>
+      </div>
+
+      <!-- 5: SS open queue -->
+      <div class="bday-card bday-card--ss">
+        <div>
+          <div class="bday-card-icon-row">
+            <svg class="bday-mini-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><line x1="7" y1="7" x2="7" y2="7"/><line x1="7" y1="17" x2="7" y2="17"/></svg>
+            <div class="bday-card-label">Awaiting shipment</div>
+          </div>
+        </div>
+        <div class="bday-card-value" id="bday-ss-open">--</div>
+        <div class="bday-card-sub">open queue (ShipStation)</div>
+      </div>
+
+      <!-- 6: SS shipped today (orders) -->
+      <div class="bday-card bday-card--ss">
+        <div>
+          <div class="bday-card-icon-row">
+            <svg class="bday-mini-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7l-9 6-9-6"/><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7"/><path d="M3 7l9-4 9 4"/></svg>
+            <div class="bday-card-label">Shipped today (orders)</div>
+          </div>
+        </div>
+        <div class="bday-card-value" id="bday-ss-shipped-orders">--</div>
+        <div class="bday-card-sub">labels printed today</div>
+      </div>
+
+      <!-- 7: SS shipped today (items) -->
+      <div class="bday-card bday-card--ss">
+        <div>
+          <div class="bday-card-icon-row">
+            <svg class="bday-mini-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-6"/></svg>
+            <div class="bday-card-label">Shipped today (items)</div>
+          </div>
+        </div>
+        <div class="bday-card-value" id="bday-ss-shipped-items">--</div>
+        <div class="bday-card-sub">sum across shipments</div>
+      </div>
+    </div>
+
+    <!-- Main row: big chart on the left, two stacked alert cards on the right -->
+    <div class="bday-main-row">
+      <div class="bday-chart-card">
+        <div class="bday-chart-title">Orders per hour — launch window (7am–7pm AEST) · drop hours 7am–5pm highlighted</div>
+        <div class="bday-chart-canvas-wrap">
+          <canvas id="bdayHourlyChart"></canvas>
+        </div>
+      </div>
+      <div class="bday-alerts-col">
+        <div class="bday-alert" id="bday-alert-box">
+          <div class="bday-alert-header">
+            <div class="bday-alert-title">⚠️ Express / International — still open</div>
+            <div class="bday-alert-count" id="bday-alert-count">--</div>
+          </div>
+          <div class="bday-alert-list" id="bday-alert-list">
+            <div style="font-size:12px;color:var(--text-secondary);font-style:italic;">Loading…</div>
+          </div>
+        </div>
+        <div class="bday-alert wholesale" id="bday-alert-wholesale-box">
+          <div class="bday-alert-header">
+            <div class="bday-alert-title">📦 Wholesale — still open</div>
+            <div class="bday-alert-count" id="bday-alert-wholesale-count">--</div>
+          </div>
+          <div class="bday-alert-list" id="bday-alert-wholesale-list">
+            <div style="font-size:12px;color:var(--text-secondary);font-style:italic;">Loading…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Meta bar -->
+    <div class="bday-meta-bar">
+      <span id="bday-last-updated">Loading…</span>
+      <span>
+        Auto-refresh: <span id="bday-refresh-cadence">5 min</span>
+        <button class="bday-refresh-btn" id="bday-refresh-btn" onclick="bdayRefreshNow()" style="margin-left:10px;">Refresh now</button>
+      </span>
+    </div>
+  </div>

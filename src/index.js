@@ -19,7 +19,6 @@ import { diagnosticsRoutes } from './diagnostics.js';
 import { xeroRoutes, xeroAuthRoutes, readXeroStatus } from './xero.js';
 import { logiwaRoutes, readLogiwaStatus } from './logiwa.js';
 import { auRoutes } from './cin7.js';
-import { birthdayRoutes } from './birthday.js';
 import { logisticsRoutes } from './logistics.js';
 import { runCin7SalesOrdersChunk, runCin7CreditNotesChunk } from './cin7-sync.js';
 import buyingToolHistory from './buying-tool-history.js';
@@ -106,16 +105,16 @@ app.route('/api/logiwa', logiwaRoutes);
 // design — KV cache, fallback semantics, secret names.
 app.route('/api/au', auRoutes);
 
-// 11th Birthday launch tab (v2.2.21, Thursday 2026-05-21). Live Woo + live
-// ShipStation v2 — bypasses D1 because the cron's watermark lag would hurt
-// the launch-day signal. See src/birthday.js header for the full design.
-app.route('/api/au', birthdayRoutes);
-
 // Logistics tab (v2.2.27). Live ShipStation + live CIN7 SalesOrders + Stock
 // to drive the warehouse TV with open-distributor visibility and per-line
-// stock-fulfillment checks. Bypasses D1 for the same reasons as the birthday
-// tab — warehouse ops need real-time signal, not a 15-min-lagged cache. See
-// src/logistics.js header for the full design.
+// stock-fulfillment checks. Bypasses D1 because warehouse ops need real-time
+// signal, not a 15-min-lagged cache. See src/logistics.js for the full
+// design.
+//
+// The 11th Birthday launch tab (v2.2.21 — 21 May 2026 product drop) used to
+// mount here too via `birthdayRoutes`. Removed in v2.2.46 since the launch
+// was over and the polling was unnecessary; the implementation lives at
+// archive/11th-birthday-tab/ for re-integration on future launches.
 app.route('/api/au', logisticsRoutes);
 
 // Buying-tool history — 18+ months of per-SKU monthly sales plus manually
