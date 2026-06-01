@@ -2607,9 +2607,9 @@
       #tab-au-logistics .log-section.woolies { border-left: 3px solid #1F8B4C; }
       #tab-au-logistics .log-section.other   { border-left: 3px solid #5A89C2; }
       #tab-au-logistics .log-section-title {
-        font-size: 13px;
+        font-size: 17px;
         font-weight: 700;
-        margin-bottom: 8px;
+        margin-bottom: 10px;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -2618,8 +2618,8 @@
       #tab-au-logistics .log-section-title .count-pill {
         background: var(--bg-soft);
         color: var(--text-secondary);
-        font-size: 11px;
-        padding: 2px 8px;
+        font-size: 14px;
+        padding: 3px 10px;
         border-radius: 999px;
         font-weight: 600;
       }
@@ -2629,15 +2629,15 @@
         min-height: 0;
       }
 
-      /* ── Order cards — tightened in v2.2.29 to fit 4-6 per section ──
-         Padding shrunk from 8px/10px → 5px/8px, line padding 2px → 1px,
-         and the line-item .name column was dropped (the short-SKU display
-         carries the variant info on its own). */
+      /* ── Order cards — typography sized for the warehouse TV (v2.2.44) ──
+         Bumped from the tight v2.2.29 sizes (10-12px) so the floor can read
+         distributor labels, dates, SKUs and qtys from ~3-5m away. Padding
+         and tick badges scaled to match. */
       #tab-au-logistics .log-order {
         border: 1px solid var(--border);
         border-radius: 6px;
-        padding: 5px 8px;
-        margin-bottom: 5px;
+        padding: 8px 10px;
+        margin-bottom: 6px;
         background: #fff;
       }
       #tab-au-logistics .log-order:last-child { margin-bottom: 0; }
@@ -2650,22 +2650,22 @@
         justify-content: space-between;
         align-items: baseline;
         gap: 8px;
-        margin-bottom: 2px;
+        margin-bottom: 3px;
       }
       #tab-au-logistics .log-order-label {
-        font-size: 12px;
+        font-size: 18px;
         font-weight: 700;
         color: var(--text-primary);
       }
       #tab-au-logistics .log-order-ref {
-        font-size: 10px;
+        font-size: 13px;
         color: var(--text-secondary);
         font-variant-numeric: tabular-nums;
       }
       #tab-au-logistics .log-order-date {
-        font-size: 10px;
+        font-size: 14px;
         color: var(--text-secondary);
-        margin-bottom: 3px;
+        margin-bottom: 5px;
         font-variant-numeric: tabular-nums;
       }
       #tab-au-logistics .log-order.past-due .log-order-date {
@@ -2675,19 +2675,19 @@
       #tab-au-logistics .log-line {
         display: flex;
         align-items: center;
-        gap: 6px;
-        font-size: 11px;
-        padding: 1px 0;
+        gap: 8px;
+        font-size: 16px;
+        padding: 2px 0;
       }
       #tab-au-logistics .log-line .log-line-tick {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 14px;
-        height: 14px;
-        border-radius: 3px;
+        width: 20px;
+        height: 20px;
+        border-radius: 4px;
         flex-shrink: 0;
-        font-size: 10px;
+        font-size: 14px;
         font-weight: 800;
       }
       #tab-au-logistics .log-line .log-line-tick.ok {
@@ -2698,22 +2698,22 @@
         background: #FFF1F1;
         color: #C62828;
         border: 1px solid #E53935;
-        font-size: 9px;
+        font-size: 12px;
         width: auto;
-        height: 14px;
-        padding: 0 5px;
+        height: 20px;
+        padding: 0 7px;
         font-weight: 700;
       }
       #tab-au-logistics .log-line-sku {
         font-family: ui-monospace, monospace;
-        font-size: 11px;
+        font-size: 16px;
         color: var(--text-primary);
         font-weight: 700;
         letter-spacing: -0.2px;
       }
       #tab-au-logistics .log-line-qty {
         margin-left: auto;
-        font-size: 10px;
+        font-size: 14px;
         color: var(--text-secondary);
         font-variant-numeric: tabular-nums;
         font-weight: 600;
@@ -2723,10 +2723,10 @@
         font-weight: 700;
       }
       #tab-au-logistics .log-empty {
-        font-size: 12px;
+        font-size: 15px;
         color: var(--text-secondary);
         text-align: center;
-        padding: 12px;
+        padding: 16px;
         font-style: italic;
       }
 
@@ -2888,9 +2888,17 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.43</span> &middot; June 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.44</span> &middot; June 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.44 &mdash; 1 June 2026 (🚚 Logistics tab: bigger typography for warehouse-TV readability)</h4>
+    <ul>
+      <li><strong>Order-card text resized for ~3-5m viewing distance.</strong> Distributor labels 12 &rarr; 18px, must-ship-by dates 10 &rarr; 14px, SKU codes 11 &rarr; 16px, qty + reference 10 &rarr; 13-14px. Section titles 13 &rarr; 17px, count pills 11 &rarr; 14px. Empty-state copy 12 &rarr; 15px.</li>
+      <li><strong>Tick badges + padding scaled to match.</strong> Green &check; tick 14 &rarr; 20px square; red "X / Y cartons" gap pill resized accordingly. Order-card padding 5/8 &rarr; 8/10px so the bigger text has room to breathe.</li>
+      <li><strong>Applies to all three columns</strong> (Coles, Woolworths, Other distributors) for visual consistency &mdash; selectors are unchanged, just the font-size declarations.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.43 &mdash; 1 June 2026 (🚚 Logistics tab: split Coles + Woolies into thirds, Waiva Clark preview mode)</h4>
     <ul>
       <li><strong>Main row is now three equal columns &mdash; Coles | Woolworths | Other distributors.</strong> Was previously a 2fr / 1fr split with Coles + Woolies merged into a single "CW" section. Each retailer now has its own column on the warehouse TV with the channel colour stripe (Coles red, Woolies green, Distributors blue) matching the AU Sales palette. New IDs: <code>log-coles-list</code>, <code>log-woolies-list</code>, <code>log-other-list</code> (plus <code>-count</code> pills).</li>
