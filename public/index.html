@@ -2581,12 +2581,13 @@
         font-weight: 500;
       }
 
-      /* ── Main row: Coles+Woolies (2fr) + Other Distributors (1fr) ──
-         Per Melanie 2026-05-19: split makes the busier CW section get more
-         horizontal room, with Other Distributors sitting on the right. */
+      /* ── Main row: Coles (1fr) + Woolies (1fr) + Other Distributors (1fr) ──
+         Per Melanie 2026-06-01: thirds across the warehouse TV so Coles,
+         Woolies, and Other Distributors each have their own column. Was
+         previously a 2fr / 1fr split with Coles + Woolies merged. */
       #tab-au-logistics .log-main-row {
         display: grid;
-        grid-template-columns: 2fr 1fr;
+        grid-template-columns: 1fr 1fr 1fr;
         gap: 10px;
         flex: 1;
         min-height: 0;
@@ -2600,8 +2601,11 @@
         flex-direction: column;
         min-height: 0;
       }
-      #tab-au-logistics .log-section.cw { border-left: 3px solid #1F8B4C; }
-      #tab-au-logistics .log-section.other { border-left: 3px solid #5A89C2; }
+      /* Colour stripes per channel — match the AU Sales channel palette:
+         Coles red, Woolies green, Distributors blue. */
+      #tab-au-logistics .log-section.coles   { border-left: 3px solid #D32F2F; }
+      #tab-au-logistics .log-section.woolies { border-left: 3px solid #1F8B4C; }
+      #tab-au-logistics .log-section.other   { border-left: 3px solid #5A89C2; }
       #tab-au-logistics .log-section-title {
         font-size: 13px;
         font-weight: 700;
@@ -2782,6 +2786,9 @@
         font-size: 12px;
       }
 
+      @media (max-width: 1400px) {
+        #tab-au-logistics .log-main-row { grid-template-columns: 1fr 1fr; }
+      }
       @media (max-width: 1200px) {
         #tab-au-logistics.active { height: auto; overflow: visible; }
         #tab-au-logistics .log-kpi-row { grid-template-columns: repeat(3, 1fr); }
@@ -2830,17 +2837,26 @@
       </div>
     </div>
 
-    <!-- Main row: Coles+Woolies (2/3) side-by-side with Other Distributors (1/3).
-         Left column with ShipStation alert lists was removed in v2.2.29 — those
-         counts already live on the KPI strip, and the warehouse needs the
-         vertical real estate for 4-6 distributor orders without scrolling. -->
+    <!-- Main row (v2.2.43): three equal columns — Coles | Woolworths | Other
+         distributors. Replaces the v2.2.29 two-column 2fr/1fr layout that
+         merged Coles + Woolies into a single "CW" section. The warehouse TV
+         needs ~4-6 orders visible per column without scrolling at 1920×1080. -->
     <div class="log-main-row">
-      <div class="log-section cw">
+      <div class="log-section coles">
         <div class="log-section-title">
-          🛒 Coles + Woolworths
-          <span class="count-pill" id="log-cw-count">0</span>
+          🛒 Coles
+          <span class="count-pill" id="log-coles-count">0</span>
         </div>
-        <div class="log-section-body" id="log-cw-list">
+        <div class="log-section-body" id="log-coles-list">
+          <div class="log-empty">Loading…</div>
+        </div>
+      </div>
+      <div class="log-section woolies">
+        <div class="log-section-title">
+          🛍️ Woolworths
+          <span class="count-pill" id="log-woolies-count">0</span>
+        </div>
+        <div class="log-section-body" id="log-woolies-list">
           <div class="log-empty">Loading…</div>
         </div>
       </div>
@@ -2872,9 +2888,18 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.42</span> &middot; May 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.43</span> &middot; June 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.43 &mdash; 1 June 2026 (🚚 Logistics tab: split Coles + Woolies into thirds, Waiva Clark preview mode)</h4>
+    <ul>
+      <li><strong>Main row is now three equal columns &mdash; Coles | Woolworths | Other distributors.</strong> Was previously a 2fr / 1fr split with Coles + Woolies merged into a single "CW" section. Each retailer now has its own column on the warehouse TV with the channel colour stripe (Coles red, Woolies green, Distributors blue) matching the AU Sales palette. New IDs: <code>log-coles-list</code>, <code>log-woolies-list</code>, <code>log-other-list</code> (plus <code>-count</code> pills).</li>
+      <li><strong>Backend: <code>aggregateDistributorOrders()</code> in <code>src/logistics.js</code></strong> now returns three arrays (<code>coles</code>, <code>woolies</code>, <code>otherDistributors</code>) instead of two. <code>classifyDistributor()</code> stamps <code>group: 'coles' | 'woolies' | 'otherDistributors'</code>. Totals expose <code>coles_count</code> + <code>woolies_count</code> separately (the old <code>coles_woolies_count</code> aggregate is gone).</li>
+      <li><strong>Tablet breakpoint added.</strong> At &le; 1400px the layout collapses to two columns; at &le; 1200px it stacks to one. Warehouse TV at 1920&times;1080 gets the full three-up.</li>
+      <li><strong>Waiva Clark preview mode &mdash; <code>?test_waiva=1</code>.</strong> Hit <code>logistics.apps.nopong.com/?test_waiva=1</code> and the Wholesale KPI card paints red, pulses, and the sub-line shows "&#9888; Waiva Clark order open" (or "&#9888; Waiva Clark &mdash; N orders open" with <code>?test_waiva=3</code>). Detector unchanged &mdash; the real flag fires when ShipStation's <code>billTo.company</code>/<code>shipTo.company</code> matches <code>/waiva\s*clark/i</code>. Preview mode bypasses the 60s KV cache and never writes the forged payload back, so removing the query param clears it immediately.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.42 &mdash; 27 May 2026 (AU PO &mdash; Incoming stock by SKU: loose-vs-carton breakdown tooltip on Current stock)</h4>
     <ul>
       <li><strong>Hover any Current stock value</strong> in the Incoming stock by SKU table to see the breakdown of loose base-SKU tins vs cartons rolled up at &times; 48 &mdash; e.g. on No Pong Original, the tooltip reads "4,815 loose tins  +  551 cartons &times; 48 = 26,448 tins  =  31,263 total". Helps Mel sanity-check what's behind the headline number without scrolling down to the Carton SKUs table.</li>
@@ -8049,7 +8074,15 @@ function logisticsRefreshNow() {
 
 async function logisticsLoad({ force = false } = {}) {
   try {
-    const url = '/api/au/logistics' + (force ? '?refresh=1' : '');
+    // v2.2.43 — preserve ?test_waiva=1 from the page URL so the preview flag
+    // flows through to the API call (otherwise the JS would always strip it).
+    const pageParams = new URLSearchParams(window.location.search);
+    const testWaiva = pageParams.get('test_waiva');
+    const params = new URLSearchParams();
+    if (force) params.set('refresh', '1');
+    if (testWaiva) params.set('test_waiva', testWaiva);
+    const qs = params.toString();
+    const url = '/api/au/logistics' + (qs ? '?' + qs : '');
     const resp = await fetch(url, { credentials: 'include' });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
@@ -8057,7 +8090,7 @@ async function logisticsLoad({ force = false } = {}) {
     _logisticsRender(data);
   } catch (e) {
     console.warn('logistics load failed', e);
-    const list = document.getElementById('log-cw-list');
+    const list = document.getElementById('log-coles-list');
     if (list) list.innerHTML = `<div class="log-error">Couldn't load: ${_logEscape(e?.message || String(e))}</div>`;
   }
 }
@@ -8095,20 +8128,24 @@ function _logisticsRender(data) {
     }
   }
 
-  // Distributor sections — the left column (ShipStation alert lists) was
-  // removed in v2.2.29; counts for Express/Intl + Wholesale already live on
-  // the KPI strip above.
+  // Distributor sections — three columns since v2.2.43: Coles | Woolworths
+  // | Other distributors. Counts for Express/Intl + Wholesale already live
+  // on the KPI strip above.
   const dist = data?.distributors || {};
-  const cw = dist.colesWoolies || [];
+  const coles = dist.coles || [];
+  const woolies = dist.woolies || [];
   const other = dist.otherDistributors || [];
-  document.getElementById('log-cw-count').textContent = cw.length;
+  document.getElementById('log-coles-count').textContent = coles.length;
+  document.getElementById('log-woolies-count').textContent = woolies.length;
   document.getElementById('log-other-count').textContent = other.length;
-  _logRenderDistributorList('log-cw-list', cw, '✅ No open Coles or Woolworths orders right now');
+  _logRenderDistributorList('log-coles-list', coles, '✅ No open Coles orders right now');
+  _logRenderDistributorList('log-woolies-list', woolies, '✅ No open Woolworths orders right now');
   _logRenderDistributorList('log-other-list', other, '✅ No open distributor orders right now');
 
-  // Meta bar
+  // Meta bar — surface CIN7 errors on the Coles column (leftmost, most
+  // visible). The other two columns will still show their empty state.
   if (dist.error) {
-    const list = document.getElementById('log-cw-list');
+    const list = document.getElementById('log-coles-list');
     if (list) list.innerHTML = `<div class="log-error">CIN7 error: ${_logEscape(dist.error)}</div>`;
   }
   const stamp = new Date(data?.generated_at_iso || Date.now());

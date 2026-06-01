@@ -14,11 +14,13 @@
  * Surfaces:
  *   1. ShipStation snapshot — open queue, shipped-today counts, express/intl
  *      + wholesale alert lists. Reuses buildShipStationSnapshot() unchanged.
- *   2. Open distributor orders from CIN7 Omni v1, split into two groups:
- *      • colesWoolies — Coles + Woolies orders, sorted by must-ship-by date
- *        ascending. Coles QLD (RedBank) + Coles VIC (Somerton) must ship the
- *        business day BEFORE deliveryDate; Coles NSW + all Woolies ship on
- *        deliveryDate itself.
+ *   2. Open distributor orders from CIN7 Omni v1, split into three groups
+ *      (v2.2.43 — was two: colesWoolies + otherDistributors):
+ *      • coles — Coles orders only, sorted by must-ship-by date ascending.
+ *        Coles QLD (RedBank) + Coles VIC (Somerton) must ship the business
+ *        day BEFORE deliveryDate; Coles NSW ships on deliveryDate itself.
+ *      • woolies — Woolworths orders only, sorted by must-ship-by date
+ *        ascending. All Woolies DCs ship on deliveryDate itself.
  *      • otherDistributors — every other CIN7 wholesale order (Momentum, AVO,
  *        etc.), sorted by order number ascending. Older order numbers are
  *        treated as more urgent (proxy for "longer waiting" since CIN7 IDs
@@ -181,7 +183,7 @@ function dateBefore(a, b) {
  *
  * Returns:
  *   {
- *     group: 'colesWoolies' | 'otherDistributors',
+ *     group: 'coles' | 'woolies' | 'otherDistributors',
  *     retailer: 'col' | 'woo2' | 'dist',
  *     label: 'Coles QLD' | 'Woolworths — Moorebank' | <company name>,
  *     state: 'QLD' | null,
@@ -190,6 +192,10 @@ function dateBefore(a, b) {
  *
  * Or null if the order shouldn't appear on the warehouse TV (e.g. Stock
  * Adjustments, Amazon mirrors, redacted retail orders).
+ *
+ * v2.2.43 — group split from 'colesWoolies' into separate 'coles' and
+ * 'woolies' so the Logistics tab can render thirds (Coles | Woolies |
+ * Distributors).
  */
 function classifyDistributor(order) {
   const attr = attributeCin7Order(order);
@@ -202,7 +208,7 @@ function classifyDistributor(order) {
     const dc = COLES_DC_TABLE.find(row => cl.includes(row.match));
     if (dc) {
       return {
-        group: 'colesWoolies',
+        group: 'coles',
         retailer: 'col',
         label: dc.label,
         state: dc.state,
@@ -212,7 +218,7 @@ function classifyDistributor(order) {
     // Coles order against an unknown DC — show with generic label, no
     // must-ship-by-business-day-before rule (safe default).
     return {
-      group: 'colesWoolies',
+      group: 'coles',
       retailer: 'col',
       label: 'Coles',
       state: null,
@@ -224,7 +230,7 @@ function classifyDistributor(order) {
     const dc = WOOLIES_DC_TABLE.find(row => cl.includes(row.match));
     if (dc) {
       return {
-        group: 'colesWoolies',
+        group: 'woolies',
         retailer: 'woo2',
         label: dc.label,
         state: dc.state,
@@ -232,7 +238,7 @@ function classifyDistributor(order) {
       };
     }
     return {
-      group: 'colesWoolies',
+      group: 'woolies',
       retailer: 'woo2',
       label: 'Woolworths',
       state: null,
@@ -428,15 +434,17 @@ async function fetchOpenSalesOrdersLive(env, todayLocalDate) {
  * Turn an array of raw open SalesOrders + a stock Map into the shape the
  * frontend will render.
  *
- * Returns:
+ * Returns (v2.2.43 — three groups instead of two):
  *   {
- *     colesWoolies: [orderRecord, ...]  // sorted by must-ship-by ascending
+ *     coles:             [orderRecord, ...]  // sorted by must-ship-by ascending
+ *     woolies:           [orderRecord, ...]  // sorted by must-ship-by ascending
  *     otherDistributors: [orderRecord, ...]  // sorted by reference ascending
- *     totals: { open_orders, coles_woolies_count, other_count, past_due_count },
+ *     totals: { open_orders, coles_count, woolies_count, other_count, past_due_count },
  *   }
  */
 function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
-  const colesWoolies = [];
+  const coles = [];
+  const woolies = [];
   const otherDistributors = [];
   let pastDueCount = 0;
 
@@ -486,16 +494,19 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
       line_items: lines,
     };
 
-    if (cls.group === 'colesWoolies') colesWoolies.push(record);
+    if (cls.group === 'coles') coles.push(record);
+    else if (cls.group === 'woolies') woolies.push(record);
     else otherDistributors.push(record);
   }
 
-  // Sort. Coles+Woolies: must-ship-by ascending (nulls to the end).
-  colesWoolies.sort((a, b) => {
+  // Sort. Coles + Woolies: must-ship-by ascending (nulls to the end).
+  const sortByMustShipBy = (a, b) => {
     const aKey = a.must_ship_by || '9999-12-31';
     const bKey = b.must_ship_by || '9999-12-31';
     return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
-  });
+  };
+  coles.sort(sortByMustShipBy);
+  woolies.sort(sortByMustShipBy);
   // Other distributors: by CIN7 reference ascending (older reference =
   // longer wait = more urgent). Numeric-aware comparison so SO-1009 sorts
   // before SO-1010.
@@ -506,11 +517,13 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
   });
 
   return {
-    colesWoolies,
+    coles,
+    woolies,
     otherDistributors,
     totals: {
-      open_orders: colesWoolies.length + otherDistributors.length,
-      coles_woolies_count: colesWoolies.length,
+      open_orders: coles.length + woolies.length + otherDistributors.length,
+      coles_count: coles.length,
+      woolies_count: woolies.length,
       other_count: otherDistributors.length,
       past_due_count: pastDueCount,
     },
@@ -522,9 +535,16 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
 logisticsRoutes.get('/logistics', async (c) => {
   const env = c.env;
   const forceRefresh = c.req.query('refresh') === '1' || c.req.query('refresh') === 'true';
+  // v2.2.43 — preview mode: ?test_waiva=1 forces the Waiva Clark flag on so
+  // Melanie can see what the warehouse TV looks like when an order from that
+  // customer is open, even when nothing real is open. Bypasses KV cache so
+  // the override applies immediately. Remove the query param to clear.
+  const testWaivaRaw = c.req.query('test_waiva');
+  const testWaiva = testWaivaRaw && testWaivaRaw !== '0' && testWaivaRaw !== 'false';
+  const testWaivaCount = testWaiva ? (Number(testWaivaRaw) > 1 ? Number(testWaivaRaw) : 1) : 0;
   const cache = env.CACHE;
 
-  if (!forceRefresh && cache) {
+  if (!forceRefresh && !testWaiva && cache) {
     const cached = await cache.get(KV_KEY, 'json');
     if (cached?.generated_at_iso) {
       return c.json({ ...cached, cached: true });
@@ -591,10 +611,18 @@ logisticsRoutes.get('/logistics', async (c) => {
   shipstation.waiva_clark_open = waivaClarkSummaries.length > 0;
   shipstation.waiva_clark_open_count = waivaClarkSummaries.length;
 
+  // Preview override — see top of handler. Forces the flag on so Melanie can
+  // see the visual on the live dashboard without waiting for a real order.
+  if (testWaiva) {
+    shipstation.waiva_clark_open = true;
+    shipstation.waiva_clark_open_count = testWaivaCount;
+    shipstation.waiva_clark_preview = true;
+  }
+
   // CIN7 fetches: if either fails, surface the error inside the distributors
   // block so the rest of the tab (ShipStation + KPIs) still renders. The
   // warehouse can still work off ShipStation alone if CIN7 hiccups.
-  let distributors = { colesWoolies: [], otherDistributors: [], totals: { open_orders: 0, coles_woolies_count: 0, other_count: 0, past_due_count: 0 } };
+  let distributors = { coles: [], woolies: [], otherDistributors: [], totals: { open_orders: 0, coles_count: 0, woolies_count: 0, other_count: 0, past_due_count: 0 } };
   let distributorsError = null;
 
   if (openOrdersError) {
@@ -622,7 +650,10 @@ logisticsRoutes.get('/logistics', async (c) => {
     },
   };
 
-  if (cache) {
+  // v2.2.43 — don't write the preview payload to KV; otherwise a normal
+  // (non-preview) request would read back the forged Waiva Clark flag for
+  // up to 60s.
+  if (cache && !testWaiva) {
     c.executionCtx?.waitUntil?.(
       cache.put(KV_KEY, JSON.stringify(payload), { expirationTtl: KV_TTL_SECONDS }),
     );
