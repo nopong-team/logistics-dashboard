@@ -2351,9 +2351,17 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.48</span> &middot; June 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.49</span> &middot; June 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.49 &mdash; 2 June 2026 (📦 Cutover shifted to June after CIN7 cron stalled mid-May)</h4>
+    <ul>
+      <li><strong>Cutover constant moved May &rarr; June.</strong> Same-day follow-up to v2.2.48. The May cutover assumed CIN7's `cin7_sales_orders` table had complete May Amazon data, but a CIN7 cron stall (watermark stuck at <code>2026-05-23T14:00:0XZ</code> on a bulk-modification cluster of ~1,000 records-per-second) left May 24-31 Amazon orders unreached, so CIN7 May numbers under-counted (e.g. AU-OG-NPO-35 read 269 tins vs <code>amazon_orders</code>' CSV-imported 309). Moving <code>AU_AMAZON_CIN7_CUTOVER_MONTH</code> from <code>'2026-05'</code> to <code>'2026-06'</code> keeps May on the accurate CSV source and lets June onwards live on CIN7.</li>
+      <li><strong>Watermark jump command:</strong> <code>commands/jump-cin7-watermark-to-june.command</code> pushes <code>sync_state.watermark</code> for <code>cin7_sales_orders</code> straight to <code>2026-06-01T00:00:00Z</code>, skipping the stuck May 23 cluster entirely. Two cron ticks later (~30 min) June's 40+ Amazon Seller orders land in D1 with <code>channel_attr='amz'</code> (set by the v2.2.48 <code>attributeCin7Order</code> change). May orders that the cron missed (May 24-31) are intentionally skipped &mdash; they're already on the amazon_orders CSV side, so no data loss.</li>
+      <li><strong>Long-term cron fix queued for next session.</strong> The 1-second-per-tick crawl on the May 23 cluster proved the current cron design can't survive CIN7's bulk-modification events at scale. Plan: cluster-aware pagination (track <code>(watermark, cluster_page)</code> instead of just <code>watermark</code>; paginate through same-timestamp clusters via CIN7's <code>page</code> param) plus a weekly safety-net backfill that re-fetches the last 60 days by <code>CreatedDate ASC</code>. Notes in <code>Melanie's Context/DECISIONS.md</code> 2026-06-02.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.48 &mdash; 2 June 2026 (📦 Amazon AU live from CIN7 + honest fallback chip)</h4>
     <ul>
       <li><strong>Amazon AU column now live from CIN7 for May 2026 onwards.</strong> Per Melanie 2026-06-02, the Monthly SKU table's Amazon column was empty for June because the old data path read from <code>amazon_orders</code> (CSV-imported from Amazon Seller Central) and no June CSV had been imported yet &mdash; even though the same orders were already syncing into <code>cin7_sales_orders</code> via the 15-min CIN7 cron. Per a side-by-side comparison (May: CIN7 695 orders vs CSV 730 = ~95% match), CIN7 is now the source of truth from <code>AU_AMAZON_CIN7_CUTOVER_MONTH = '2026-05'</code> onwards. Pre-cutover months (March, April, earlier) still read from <code>amazon_orders</code> because CIN7's sync only started capturing Amazon Seller orders mid-April (0 in March, 14 in April) and historical numbers would crater if we cut over fully without a backfill.</li>

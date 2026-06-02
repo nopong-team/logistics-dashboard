@@ -121,7 +121,16 @@ function kvSalesKey(month) { return `au:sales:${month}:v8`; }
 // sales orders (channel_attr='amz'); months before read 'amz' from
 // amazon_orders (CSV-imported). String comparison works because YYYY-MM
 // sorts lexicographically. See attributeCin7Order's Amazon branch.
-const AU_AMAZON_CIN7_CUTOVER_MONTH = '2026-05';
+//
+// v2.2.49 (2026-06-02): moved cutover '2026-05' → '2026-06' after CIN7
+// sales-orders cron stalled on a bulk-modification cluster at
+// 2026-05-23T14:00:0XZ. The stall left May 24-31 Amazon orders unreached by
+// the cron, so CIN7's May numbers under-counted vs amazon_orders' CSV-imported
+// full backfill (e.g. AU-OG-NPO-35 read 269 vs CSV's 309). Keeping May on
+// amazon_orders preserves accuracy; June onwards lives on CIN7 once the
+// watermark is jumped past the cluster (commands/jump-cin7-watermark-to-june
+// .command). Long-term cluster-aware cron in progress (next session).
+const AU_AMAZON_CIN7_CUTOVER_MONTH = '2026-06';
 
 // 15 min TTL — short enough that drift is bounded but long enough to absorb
 // dashboard refreshes on the same minute. Bump the key suffix (v1 → v2) on
