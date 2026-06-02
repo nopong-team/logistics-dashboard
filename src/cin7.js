@@ -105,13 +105,23 @@ const KV_POS_KEY       = 'au:pos:v4';
 // channels payload now includes a `woo` key sourced from D1's `orders` table
 // (market='AU'), in addition to the existing col/woo2/dist (CIN7). Bumping
 // invalidates v4 caches that don't have the woo channel populated.
+// v8 (v2.2.47, 2026-06-02): Amazon AU hybrid source. Months >= 2026-05 read
+// 'amz' from cin7_sales_orders (live, no manual CSV import needed). Months
+// < 2026-05 keep reading 'amz' from amazon_orders (CSV-imported historical
+// backfill — CIN7 sync only started capturing Amazon Seller orders mid-April).
 // v7 (v2.2.20, 2026-05-17): channels.amz + skuSales rows gain an `amz` field
 // + revenue includes Amazon revenue. Phase 3b-a finishes the Woo/Amazon
 // symmetry — Amazon now sourced from amazon_orders + amazon_items (the
 // historical CSV import is the seed; SP-API cron extension is Phase 3b-b).
 // v6 (v2.2.18, 2026-05-16): skuSales rows gained a `woo` field. v5 → v6
 // notes preserved in git history.
-function kvSalesKey(month) { return `au:sales:${month}:v7`; }
+function kvSalesKey(month) { return `au:sales:${month}:v8`; }
+
+// AU Amazon source cutover — months at-or-after this read 'amz' from CIN7
+// sales orders (channel_attr='amz'); months before read 'amz' from
+// amazon_orders (CSV-imported). String comparison works because YYYY-MM
+// sorts lexicographically. See attributeCin7Order's Amazon branch.
+const AU_AMAZON_CIN7_CUTOVER_MONTH = '2026-05';
 
 // 15 min TTL — short enough that drift is bounded but long enough to absorb
 // dashboard refreshes on the same minute. Bump the key suffix (v1 → v2) on
@@ -579,9 +589,14 @@ export function attributeCin7Order(order) {
   if (cl.includes('grocery holdings'))  return 'col';   // Coles parent co
   if (_COLES_DC_NAMES.has(cl))          return 'col';
 
-  // Amazon mirror — CIN7 mirrors Amazon orders for fulfilment. They're
-  // counted on the Amazon channel via SP-API in Phase 3, not here.
-  if (cl.startsWith('amazon')) return null;
+  // Amazon orders. CIN7 mirrors them from Seller Central for fulfilment.
+  // v2.2.47 (2026-06-02): Amazon Seller orders now attribute to 'amz' and
+  // count toward the Amazon channel on the dashboard for months >= the
+  // AU_AMAZON_CIN7_CUTOVER_MONTH (see buildAuSalesPayloadFromD1). Pre-cutover
+  // months still read from amazon_orders (CSV-imported, full backfill).
+  // Amazon FBA is REPLENISHMENT (warehouse restock), not a sale — keep null.
+  if (cl.startsWith('amazon seller')) return 'amz';
+  if (cl.startsWith('amazon'))        return null;  // FBA, other Amazon flavours
 
   // No company OR redacted personal customer → likely Woo retail mirror.
   // Don't count as CIN7-sourced sales (Phase 3 wires Woo direct).
@@ -1138,6 +1153,16 @@ async function buildAuSalesPayloadFromD1(env, month) {
     throw new Error('Phase C: env.DB binding not configured (logistics-db)');
   }
 
+  // v2.2.47 hybrid Amazon source: months >= cutover read 'amz' from CIN7,
+  // months before read 'amz' from amazon_orders below. The SQL channel filter
+  // includes 'amz' only when the CIN7 source is active for this month, so
+  // pre-cutover months don't pick up partial CIN7 Amazon data (April had 14
+  // Amazon orders in CIN7 — those would understate vs amazon_orders' 1,370).
+  const useCin7ForAmazon = month >= AU_AMAZON_CIN7_CUTOVER_MONTH;
+  const channelFilter = useCin7ForAmazon
+    ? "('col','woo2','dist','amz')"
+    : "('col','woo2','dist')";
+
   // Sales channels aggregate. parent_id = 0 to skip CIN7's auto-generated
   // bundle-child line items (otherwise we double-count — the parent row's
   // multiplier already represents the children's tin volume). Status filter
@@ -1152,7 +1177,7 @@ async function buildAuSalesPayloadFromD1(env, month) {
        JOIN cin7_sales_order_items i ON i.order_id = o.id
       WHERE o.market = 'AU'
         AND o.status NOT IN ('VOID','VOIDED','CANCELLED')
-        AND o.channel_attr IN ('col','woo2','dist')
+        AND o.channel_attr IN ${channelFilter}
         AND substr(o.created_date, 1, 7) = ?
         AND i.parent_id = 0
       GROUP BY o.channel_attr`,
@@ -1161,19 +1186,24 @@ async function buildAuSalesPayloadFromD1(env, month) {
   // Sales per-SKU rollup. Drop rows with no base_sku — CIN7 occasionally
   // ships items with non-AU codes (placeholders, freight, etc.) that don't
   // belong in the per-SKU view, mirroring the CIN7 build's behaviour.
+  // The `amz` pivot returns 0 for pre-cutover months because the channel
+  // filter excludes 'amz' rows entirely — those months get Amazon from the
+  // amazon_orders read further down.
   const skuRows = await env.DB.prepare(
     `SELECT
         i.base_sku                                                     AS sku,
         MAX(i.name)                                                    AS name,
-        SUM(CASE WHEN o.channel_attr = 'col'  THEN i.tins ELSE 0 END)  AS col,
-        SUM(CASE WHEN o.channel_attr = 'woo2' THEN i.tins ELSE 0 END)  AS woo2,
-        SUM(CASE WHEN o.channel_attr = 'dist' THEN i.tins ELSE 0 END)  AS dist,
-        SUM(i.total)                                                   AS revenue
+        SUM(CASE WHEN o.channel_attr = 'col'  THEN i.tins  ELSE 0 END) AS col,
+        SUM(CASE WHEN o.channel_attr = 'woo2' THEN i.tins  ELSE 0 END) AS woo2,
+        SUM(CASE WHEN o.channel_attr = 'dist' THEN i.tins  ELSE 0 END) AS dist,
+        SUM(CASE WHEN o.channel_attr = 'amz'  THEN i.tins  ELSE 0 END) AS amz,
+        SUM(CASE WHEN o.channel_attr = 'amz'  THEN i.total ELSE 0 END) AS amz_revenue,
+        SUM(CASE WHEN o.channel_attr IN ('col','woo2','dist') THEN i.total ELSE 0 END) AS revenue
        FROM cin7_sales_orders o
        JOIN cin7_sales_order_items i ON i.order_id = o.id
       WHERE o.market = 'AU'
         AND o.status NOT IN ('VOID','VOIDED','CANCELLED')
-        AND o.channel_attr IN ('col','woo2','dist')
+        AND o.channel_attr IN ${channelFilter}
         AND substr(o.created_date, 1, 7) = ?
         AND i.parent_id = 0
         AND i.base_sku IS NOT NULL
@@ -1230,11 +1260,17 @@ async function buildAuSalesPayloadFromD1(env, month) {
   // showing from static au-data.js (April only) and 0 elsewhere.
   const wooFromD1 = await getAuWooSalesFromD1(env, month);
 
-  // Amazon channel from D1 (Phase 3b-a, v2.2.20). Sourced from amazon_orders
-  // + amazon_items where market='AU' — populated by the Fulfilled Shipments
-  // CSV import; SP-API cron extension is Phase 3b-b. Same merge shape as Woo:
-  // channels.amz gets channelTotal; bySku folds into skuSales below.
-  const amzFromD1 = await getAuAmazonSalesFromD1(env, month);
+  // Amazon channel — hybrid source (v2.2.47):
+  //  • months >= AU_AMAZON_CIN7_CUTOVER_MONTH ('2026-05') → CIN7's 'amz'
+  //    channel rows already aggregated above (channelsRows / skuRows)
+  //  • months < cutover → amazon_orders + amazon_items (CSV-imported
+  //    historical backfill, populated via Fulfilled Shipments TSV import)
+  // We only call getAuAmazonSalesFromD1 in the pre-cutover branch — for
+  // current/future months CIN7 owns the column and we skip the legacy read
+  // to avoid double-counting.
+  const amzFromD1 = useCin7ForAmazon
+    ? null
+    : await getAuAmazonSalesFromD1(env, month);
 
   // Materialise — match the shape buildAuSalesPayload produces so the
   // frontend doesn't need to know which path served the data.
@@ -1254,7 +1290,12 @@ async function buildAuSalesPayloadFromD1(env, month) {
     };
   }
   channelsOut.woo = wooFromD1.channelTotal;
-  channelsOut.amz = amzFromD1.channelTotal;
+  // v2.2.47 hybrid: post-cutover months already have channels.amz populated
+  // by the channelsRows loop above (from CIN7). Pre-cutover months read from
+  // amazon_orders via amzFromD1.
+  if (amzFromD1) {
+    channelsOut.amz = amzFromD1.channelTotal;
+  }
 
   const refundsOut = {
     tins:      Number(refundsAgg?.tins)    || 0,
@@ -1290,10 +1331,14 @@ async function buildAuSalesPayloadFromD1(env, month) {
       woo2:          Number(r.woo2) || 0,
       dist:          Number(r.dist) || 0,
       woo:           0,
-      amz:           0,
-      cin7_revenue:  Number(r.revenue) || 0,
+      // v2.2.47 hybrid: r.amz / r.amz_revenue are populated by the SQL pivot
+      // ONLY for post-cutover months (when channelFilter included 'amz').
+      // For pre-cutover months these columns return 0 from the SQL and the
+      // amzFromD1 merge loop below fills them in from amazon_orders.
+      amz:           Number(r.amz)         || 0,
+      cin7_revenue:  Number(r.revenue)     || 0,
       woo_revenue:   0,
-      amz_revenue:   0,
+      amz_revenue:   Number(r.amz_revenue) || 0,
     });
   }
   for (const [baseSku, w] of Object.entries(wooFromD1.bySku || {})) {
@@ -1310,19 +1355,24 @@ async function buildAuSalesPayloadFromD1(env, month) {
     if (!existing.name && w.name) existing.name = w.name;
     skuMap.set(baseSku, existing);
   }
-  for (const [baseSku, a] of Object.entries(amzFromD1.bySku || {})) {
-    const existing = skuMap.get(baseSku) || {
-      sku:           baseSku,
-      name:          a.name || '',
-      col: 0, woo2: 0, dist: 0, woo: 0, amz: 0,
-      cin7_revenue:  0,
-      woo_revenue:   0,
-      amz_revenue:   0,
-    };
-    existing.amz         += Number(a.tins)    || 0;
-    existing.amz_revenue += Number(a.revenue) || 0;
-    if (!existing.name && a.name) existing.name = a.name;
-    skuMap.set(baseSku, existing);
+  // Pre-cutover months: merge amazon_orders bySku. Post-cutover skips this
+  // (amzFromD1 is null) because CIN7's 'amz' pivot already populated the
+  // per-SKU amz / amz_revenue fields above.
+  if (amzFromD1) {
+    for (const [baseSku, a] of Object.entries(amzFromD1.bySku || {})) {
+      const existing = skuMap.get(baseSku) || {
+        sku:           baseSku,
+        name:          a.name || '',
+        col: 0, woo2: 0, dist: 0, woo: 0, amz: 0,
+        cin7_revenue:  0,
+        woo_revenue:   0,
+        amz_revenue:   0,
+      };
+      existing.amz         += Number(a.tins)    || 0;
+      existing.amz_revenue += Number(a.revenue) || 0;
+      if (!existing.name && a.name) existing.name = a.name;
+      skuMap.set(baseSku, existing);
+    }
   }
 
   const skuSales = [];
@@ -1344,28 +1394,31 @@ async function buildAuSalesPayloadFromD1(env, month) {
   }
   skuSales.sort((a, b) => b.total_tins - a.total_tins);
 
-  const channelOrders = channelsOut.col.orders + channelsOut.woo2.orders + channelsOut.dist.orders;
+  // ordersConsidered counts CIN7 sales orders attributed to a channel. v2.2.47
+  // adds channelsOut.amz.orders to the post-cutover total — pre-cutover the
+  // amz orders come from amazon_orders so they're already in channelsOut.amz
+  // but didn't come through CIN7's sales-orders pipeline.
+  const cin7OrdersConsidered = channelsOut.col.orders
+                             + channelsOut.woo2.orders
+                             + channelsOut.dist.orders
+                             + (useCin7ForAmazon ? channelsOut.amz.orders : 0);
   return {
     month,
     channels: channelsOut,
     refunds:  refundsOut,
     skuSales,
     lastSync: new Date().toISOString(),
-    source:   'cin7-d1',
+    source:   useCin7ForAmazon ? 'cin7-d1+amz-from-cin7' : 'cin7-d1+amz-from-csv',
     counts: {
       // ordersConsidered + attributedRefs + skuRows match the keys
       // buildAuSalesPayload returned. ordersFetched / voidsDropped /
       // creditNotesFetched are upstream-fetch metrics that no longer
       // apply — D1 only stores the post-cron set.
-      ordersConsidered:      channelOrders,
-      attributedRefs:        channelOrders + refundsOut.orders,
+      ordersConsidered:      cin7OrdersConsidered,
+      attributedRefs:        cin7OrdersConsidered + refundsOut.orders,
       creditNotesConsidered: refundsOut.orders,
       skuRows:               skuSales.length,
     },
-    // v2.2.14 (Phase 3a read-side cutover): `woo` is now sourced from D1
-    // alongside col/woo2/dist. `amz` is still absent — it'll be added in
-    // Phase 3b once Amazon AU SP-API is wired up. Frontend's loadLiveAuSales
-    // still merges with static window.AU_DATA.salesByMonth[month] for `amz`.
   };
 }
 

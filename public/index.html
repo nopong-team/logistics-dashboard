@@ -2351,9 +2351,20 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.47</span> &middot; June 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.48</span> &middot; June 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.48 &mdash; 2 June 2026 (📦 Amazon AU live from CIN7 + honest fallback chip)</h4>
+    <ul>
+      <li><strong>Amazon AU column now live from CIN7 for May 2026 onwards.</strong> Per Melanie 2026-06-02, the Monthly SKU table's Amazon column was empty for June because the old data path read from <code>amazon_orders</code> (CSV-imported from Amazon Seller Central) and no June CSV had been imported yet &mdash; even though the same orders were already syncing into <code>cin7_sales_orders</code> via the 15-min CIN7 cron. Per a side-by-side comparison (May: CIN7 695 orders vs CSV 730 = ~95% match), CIN7 is now the source of truth from <code>AU_AMAZON_CIN7_CUTOVER_MONTH = '2026-05'</code> onwards. Pre-cutover months (March, April, earlier) still read from <code>amazon_orders</code> because CIN7's sync only started capturing Amazon Seller orders mid-April (0 in March, 14 in April) and historical numbers would crater if we cut over fully without a backfill.</li>
+      <li><strong>Backend (<code>src/cin7.js</code>):</strong> <code>attributeCin7Order</code> now returns <code>'amz'</code> for company names starting with <code>"amazon seller"</code> instead of dropping them to <code>null</code>; <code>"amazon fba"</code> still returns <code>null</code> (replenishment, not a sale). <code>buildAuSalesPayloadFromD1</code> picks the channel filter (<code>('col','woo2','dist')</code> vs <code>('col','woo2','dist','amz')</code>) based on the month-vs-cutover check, and only calls <code>getAuAmazonSalesFromD1</code> on the pre-cutover branch to avoid double-counting. Per-SKU rollup gains <code>amz</code> + <code>amz_revenue</code> SUM-CASE pivots. <code>counts.ordersConsidered</code> includes Amazon orders post-cutover. <code>source</code> field now disambiguates: <code>'cin7-d1+amz-from-cin7'</code> vs <code>'cin7-d1+amz-from-csv'</code>.</li>
+      <li><strong>KV cache key bumped v7 &rarr; v8</strong> (<code>kvSalesKey</code>) so any pre-v2.2.48 cached month payloads with the old shape get ignored and the new aggregation re-runs.</li>
+      <li><strong>Backfill required for legacy rows.</strong> Existing Amazon Seller rows in <code>cin7_sales_orders</code> still have <code>channel_attr = NULL</code> from the old attribution code. New double-clickable <code>commands/backfill-amazon-channel-attr.command</code> runs the one-time <code>UPDATE</code>. Safe to re-run (no-op once tagged). Run this once after the deploy.</li>
+      <li><strong>Frontend: honest fallback chip + one-shot auto-retry (<code>public/index.html</code>).</strong> The old "CIN7 fallback (static) &mdash; Showing static April snapshot" copy was misleading whenever a previous fetch had successfully populated the month bucket &mdash; the dashboard kept rendering the live data while claiming it was static. <code>loadLiveAuSales</code>'s catch block now distinguishes "have prior data &rarr; <em>CIN7 retry pending</em>; showing previously-loaded data" vs "no prior data &rarr; <em>CIN7 live fetch failed</em>; no data available". Both states trigger a one-shot auto-retry after 2 seconds (guarded by a per-month <code>_retrying</code> sentinel so we don't loop) to ride out transient Cloudflare Access SSO blips at page-load.</li>
+      <li><strong>Comparison + backfill scripts shipped in <code>commands/</code></strong>: <code>compare-amazon-au-sources.command</code> (read-only, used to validate the cutover decision) + <code>backfill-amazon-channel-attr.command</code> (one-time UPDATE described above).</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.47 &mdash; 2 June 2026 (🧼 Inventory &mdash; SOAP SKUs now surface)</h4>
     <ul>
       <li><strong>Soap stock now visible on the AU Inventory tab.</strong> Per Melanie 2026-06-02 the soap product family (AU-{scent}-NPS-100, e.g. <code>AU-BD-NPS-100</code> from the 11th birthday launch) wasn't appearing in the inventory table at all. Root cause: CIN7 has soap under its own category, and <code>buildInventory</code> in <code>src/cin7.js</code> was only letting <em>Finished Products</em>, <em>Bicarb Based</em>, and uncategorised SKUs through &mdash; soap was being silently dropped before the data ever reached the dashboard.</li>
@@ -7474,12 +7485,40 @@ async function loadLiveAuSales(month) {
       _auChipFromResp('au-monthly-source-chip', data, 'CIN7 live');
     }
   } catch (e) {
-    console.warn(`AU live sales fetch failed for ${month} — keeping static rows:`, e?.message || e);
+    // v2.2.47: honest chip text + one-shot auto-retry.
+    // The old "Showing static April snapshot" copy was misleading whenever
+    // a previous fetch had successfully populated the month bucket — the
+    // dashboard kept rendering the live data while claiming it was static.
+    // Now the chip text reflects what the user is actually looking at, and
+    // we auto-retry once after 2s to ride out transient Access SSO blips.
+    const errMsg = e?.message || String(e);
+    console.warn(`AU live sales fetch failed for ${month}:`, errMsg);
+    const hasPriorData = Array.isArray(AU_SKU_SALES_BY_MONTH[month])
+                      && AU_SKU_SALES_BY_MONTH[month].length > 0;
     if (updateChips()) {
-      _auSetChip('au-sales-source-chip',   'CIN7 fallback (static)', 'gray',
-        `Live fetch failed (${e?.message || e}). Showing static April snapshot for CIN7 channels.`);
-      _auSetChip('au-monthly-source-chip', 'CIN7 fallback (static)', 'gray',
-        `Live fetch failed (${e?.message || e}). Showing static April snapshot for CIN7 columns.`);
+      if (hasPriorData) {
+        _auSetChip('au-sales-source-chip',   'CIN7 retry pending', 'gray',
+          `Live retry failed (${errMsg}). Showing previously-loaded data; will retry once in 2s.`);
+        _auSetChip('au-monthly-source-chip', 'CIN7 retry pending', 'gray',
+          `Live retry failed (${errMsg}). Showing previously-loaded data; will retry once in 2s.`);
+      } else {
+        _auSetChip('au-sales-source-chip',   'CIN7 live fetch failed', 'gray',
+          `Live fetch failed (${errMsg}). No data available for ${month}; will retry once in 2s.`);
+        _auSetChip('au-monthly-source-chip', 'CIN7 live fetch failed', 'gray',
+          `Live fetch failed (${errMsg}). No data available for ${month}; will retry once in 2s.`);
+      }
+    }
+    // One-shot auto-retry. Guard with a sentinel on the function so we don't
+    // loop forever if the second attempt also fails — that just leaves the
+    // chip in its current state.
+    if (!loadLiveAuSales._retrying?.has(month)) {
+      loadLiveAuSales._retrying = loadLiveAuSales._retrying || new Set();
+      loadLiveAuSales._retrying.add(month);
+      setTimeout(() => {
+        loadLiveAuSales(month)
+          .catch(() => { /* swallowed — chip already reflects state */ })
+          .finally(() => loadLiveAuSales._retrying.delete(month));
+      }, 2000);
     }
   }
 }
