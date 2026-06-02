@@ -387,13 +387,28 @@ async function fetchProductMeta(env) {
   return meta;
 }
 
+// True for the soap product family — AU-{scent}-NPS-100. NPS = "No Pong Soap"
+// formula, -100 = 100 g bar. Detected by SKU suffix so we don't depend on the
+// CIN7 product category string (which sits in its own category and gets
+// filtered out by the default whitelist below). v2.2.47: added so soap stock
+// surfaces on the Inventory tab. Soap is deliberately excluded from the
+// Incoming-stock-by-SKU PO table — the only soap SKU live today
+// (AU-BD-NPS-100) is the birthday-only run, not coming back until next year,
+// so a per-SKU run-rate / days-left view would be misleading.
+function isAuSoapSku(code) {
+  return /-NPS-100$/.test(String(code || ''));
+}
+
 // Build the inventory list in the shape window.AU_DATA.inventory has today.
 // Mirrors AU Dashboard/scripts/build_data.py:build_inventory():
 //   • Folds AU-SRT-...x12 rows into their base SKU as ×12 tins (SOH + avail).
 //   • Drops AU-CTN-SRT-MIX-* (mixed mega-trays — handled in Packaging).
 //   • Drops CANVAS / AU-BAG codes (apparel / merch).
 //   • Filters to category in {Finished Products, Bicarb Based, ''} (uncategorised).
-//   • Tags AU-CTN-* as kind:'carton', AU-B-* as kind:'base-b', else kind:'base'.
+//     EXCEPTION: AU-{scent}-NPS-100 soap SKUs bypass the category filter — they
+//     sit in their own CIN7 category, but we want them tracked on the dashboard.
+//   • Tags AU-CTN-* as kind:'carton', AU-B-* as kind:'base-b',
+//     AU-*-NPS-100 as kind:'soap', else kind:'base'.
 //   • Marks Spicy Chai SKUs as discontinued.
 function buildInventory(stockBySku, productMeta) {
   // First pass: SRT rollup — find AU-SRT-...x12 rows and accumulate their
@@ -423,12 +438,16 @@ function buildInventory(stockBySku, productMeta) {
 
     const meta = productMeta.get(code) || {};
     const cat = meta.category || '';
-    if (cat && cat !== 'Finished Products' && cat !== 'Bicarb Based') continue;
+    const isSoap = isAuSoapSku(code);
+    // Soap SKUs (AU-*-NPS-100) bypass the category whitelist — they sit in
+    // their own CIN7 category but Mel wants them tracked on the dashboard.
+    if (!isSoap && cat && cat !== 'Finished Products' && cat !== 'Bicarb Based') continue;
 
     let kind, mult;
-    if (code.startsWith('AU-CTN-')) { kind = 'carton'; mult = 48; }
-    else if (code.startsWith('AU-B-')) { kind = 'base-b'; mult = 1; }
-    else { kind = 'base'; mult = 1; }
+    if (isSoap)                          { kind = 'soap';   mult = 1; }
+    else if (code.startsWith('AU-CTN-')) { kind = 'carton'; mult = 48; }
+    else if (code.startsWith('AU-B-'))   { kind = 'base-b'; mult = 1; }
+    else                                  { kind = 'base';   mult = 1; }
 
     // SRT trays are warehouse-only (FBA never holds trays), so the rollup
     // contribution lands on the warehouse and total buckets but not FBA.

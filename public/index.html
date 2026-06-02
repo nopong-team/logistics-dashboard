@@ -2351,9 +2351,19 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.46</span> &middot; June 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.47</span> &middot; June 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.47 &mdash; 2 June 2026 (🧼 Inventory &mdash; SOAP SKUs now surface)</h4>
+    <ul>
+      <li><strong>Soap stock now visible on the AU Inventory tab.</strong> Per Melanie 2026-06-02 the soap product family (AU-{scent}-NPS-100, e.g. <code>AU-BD-NPS-100</code> from the 11th birthday launch) wasn't appearing in the inventory table at all. Root cause: CIN7 has soap under its own category, and <code>buildInventory</code> in <code>src/cin7.js</code> was only letting <em>Finished Products</em>, <em>Bicarb Based</em>, and uncategorised SKUs through &mdash; soap was being silently dropped before the data ever reached the dashboard.</li>
+      <li><strong>Fix: special-case the <code>*-NPS-100</code> suffix.</strong> New helper <code>isAuSoapSku(code)</code> matches the soap SKU pattern by suffix (scent-agnostic, future-proof for whatever scents launch next year). Soap SKUs bypass the category whitelist and are tagged <code>kind:'soap'</code>, <code>mult:1</code> so they stay separate from tin counts.</li>
+      <li><strong>New KPI card: "Soap bars on hand"</strong> &mdash; purple accent (matches the existing PO "Soap (new)" badge palette). Subtitle shows the count of soap SKUs + "100 g bars". Soap is excluded from the tin KPIs (<em>Loose tins on hand</em>, <em>Tins at Amazon FBA</em>, <em>Cartons on hand</em>, <em>Discontinued tins</em>) so the tin numbers stay clean, and excluded from <em>Units on order</em> with a subtitle clarification (<em>tins only</em>) &mdash; birthday SKU isn't coming back until next year so any soap PO would be misleading there.</li>
+      <li><strong>New row badge: <em>Soap (100 g)</em></strong> in the SKU column of the inventory table, same purple palette. Low-stock badge (&lt; 100) deliberately does NOT trigger on soap rows since the threshold is tuned for tin runway.</li>
+      <li><strong>Deliberately NOT changed:</strong> the <em>Incoming stock by SKU</em> table on the PO tab still excludes soap. Per Melanie 2026-06-02 the only soap SKU live today is birthday-only and won't return until next year, so a run-rate / days-left / next-PO view would be misleading. Filter is automatic &mdash; <code>buildIncomingBySku</code> only includes <code>kind:'base'</code> + <code>kind:'base-b'</code>.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.46 &mdash; 1 June 2026 (🎂 11th Birthday tab archived &amp; removed)</h4>
     <ul>
       <li><strong>Tab + endpoint retired</strong> now that the 21 May 2026 launch is over. Per Melanie 2026-06-01 the polling (live Woo REST + ShipStation every 2-5 min via <code>/api/au/birthday</code>) was running unnecessarily. Removed: the &#127874; <strong>11th Birthday</strong> tab button, the <code>#tab-au-birthday</code> panel + all <code>bday-*</code> CSS, every <code>bday*</code>/<code>_bday*</code> JS function (countdown, refresh scheduler, render, sell-out + milestone celebration, hourly chart), the <code>bdayOnTabActivate/Deactivate</code> hooks in <code>switchAuTab()</code>, the <code>birthdayRoutes</code> import + <code>app.route('/api/au', birthdayRoutes)</code> mount in <code>src/index.js</code>, and the <code>src/birthday.js</code> module itself.</li>
@@ -7783,8 +7793,11 @@ function renderAuInventoryKpis() {
   const grid = document.getElementById('au-inv-kpis');
   if (!grid) return;
   const active     = AU_INVENTORY_DATA.filter(r => !r.discontinued);
+  // v2.2.47: soap (kind:'soap', AU-*-NPS-100) is kept OUT of baseRows so it
+  // doesn't conflate the tin counters. It gets its own KPI card below.
   const baseRows   = active.filter(r => r.kind === 'base' || r.kind === 'base-b');
   const cartonRows = active.filter(r => r.kind === 'carton');
+  const soapRows   = active.filter(r => r.kind === 'soap');
   const discRows   = AU_INVENTORY_DATA.filter(r => r.discontinued);
   // KPIs report WAREHOUSE numbers — what's physically on-site and reorderable.
   // FBA stock is shown separately so Melanie can see the Amazon bucket without
@@ -7793,14 +7806,20 @@ function renderAuInventoryKpis() {
   const tinAvail  = baseRows.reduce((a,r) => a + auWhAvail(r),   0);
   const tinFba    = baseRows.reduce((a,r) => a + (r.fba_cin7 || 0), 0);
   const cartonSoh = cartonRows.reduce((a,r) => a + auWhSoh(r),   0);
+  const soapSoh   = soapRows.reduce((a,r)   => a + auWhSoh(r),   0);
   const discSoh   = discRows.reduce((a,r)   => a + auWhSoh(r),   0);
-  const onOrd     = active.reduce((a,r)     => a + auWhIncoming(r), 0);
+  // Soap is excluded from "Units on order" too — the only soap SKU live today
+  // (AU-BD-NPS-100) is the birthday-only run, not coming back until next year,
+  // so any incoming-on-soap would just be noise on a tin-focused KPI.
+  const onOrd     = active.filter(r => r.kind !== 'soap')
+                          .reduce((a,r) => a + auWhIncoming(r), 0);
   const cards = [
     { label:'Active SKUs',         value: fmtAuNum(baseRows.length), accent:'#FF5789' },
     { label:'Loose tins on hand',  value: fmtAuNum(tinSoh),          accent:'#FF5789', sub: fmtAuNum(tinAvail) + ' available · warehouse only' },
     { label:'Tins at Amazon FBA',  value: fmtAuNum(tinFba),          accent:'#F0A24E', sub: 'CIN7 mirror — Amazon truth comes Phase 3' },
     { label:'Cartons on hand',     value: fmtAuNum(cartonSoh),       accent:'#F0A24E', sub: '×48 each · warehouse only' },
-    { label:'Units on order',      value: fmtAuNum(onOrd),           accent:'#4F6BD4', sub: 'open POs into warehouse' },
+    { label:'Soap bars on hand',   value: fmtAuNum(soapSoh),         accent:'#5E2A82', sub: soapRows.length + ' soap SKU' + (soapRows.length === 1 ? '' : 's') + ' · 100 g bars' },
+    { label:'Units on order',      value: fmtAuNum(onOrd),           accent:'#4F6BD4', sub: 'open POs into warehouse · tins only' },
     { label:'Discontinued tins',   value: fmtAuNum(discSoh),         accent:'#9CA3AF', sub: discRows.length + ' SKUs to run down' },
   ];
   grid.innerHTML = cards.map(c => `
@@ -7816,6 +7835,9 @@ const AU_KIND_BADGE = {
   'base':   '',
   'base-b': '<span class="badge" style="background:#2A2A2A;color:#FFF;border-color:#000;font-size:10px;padding:1px 6px;">Black tin</span>',
   'carton': '<span class="badge" style="background:#FAEEDA;color:#854F0B;border-color:#F4DEBB;font-size:10px;padding:1px 6px;">CTN ×48</span>',
+  // v2.2.47: soap product family — AU-{scent}-NPS-100. Same purple palette as
+  // the PO type badge for visual consistency across the AU tabs.
+  'soap':   '<span class="badge" style="background:#EEE2F4;color:#5E2A82;border-color:#D8C0E8;font-size:10px;padding:1px 6px;">Soap (100 g)</span>',
 };
 
 function renderAuInventoryTable() {
