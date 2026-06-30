@@ -52,13 +52,20 @@
 			"remote": true
 		}
 	],
-	// Cron triggers. Every 15 minutes the scheduled handler in src/index.js
-	// runs one Woo→D1 incremental sync chunk per configured market and
-	// invalidates the corresponding /api/woo/sales KV cache key.
-	// Cloudflare cron is supported on Workers Free; pages=1 chunks stay well
-	// inside the platform CPU budget for scheduled handlers.
+	// Cron triggers. The scheduled handler in src/index.js branches on
+	// `event.cron`:
+	//   • "*/15 * * * *" — every 15 min: one incremental sync chunk per source
+	//                      (Woo / Amazon / CIN7) + KV cache invalidation.
+	//   • "0 2 * * sun"  — Sunday 02:00 UTC: CIN7 weekly safety-net backfill
+	//                      (re-fetch last 60 days by CreatedDate, idempotent).
+	//                      Added v2.2.50 as insurance against any incremental
+	//                      miss; runs as its own invocation with its own budget.
+	//                      Day-of-week MUST be a lowercase name (`sun`) — the
+	//                      Cloudflare cron parser rejects the numeric `0` form.
+	// Cloudflare cron + multiple triggers are supported on Workers Free; each
+	// chunk stays well inside the platform CPU + subrequest budget.
 	"triggers": {
-		"crons": ["*/15 * * * *"]
+		"crons": ["*/15 * * * *", "0 2 * * sun"]
 	}
 	// ──────────────────────────────────────────────────────────────────────────
 	// Secrets — set with `wrangler secret put NAME` (Cloudflare-side, never in git).

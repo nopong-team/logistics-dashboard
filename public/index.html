@@ -2351,9 +2351,48 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.49</span> &middot; June 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.54</span> &middot; June 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.54 &mdash; 30 June 2026 (🎉 Cutover flipped to May &mdash; Amazon AU live from CIN7, monthly CSV import retired)</h4>
+    <ul>
+      <li><strong><code>AU_AMAZON_CIN7_CUTOVER_MONTH</code> '2026-06' &rarr; '2026-05'.</strong> May 2026 onward now reads the Amazon column from CIN7's <code>cin7_sales_orders</code> (<code>channel_attr='amz'</code>) instead of the CSV-imported <code>amazon_orders</code> table. This completes the work the whole v2.2.50&ndash;53 chain set up: a reliable, complete CIN7 Amazon feed. <strong>No more monthly Amazon CSV imports for AU.</strong> April and earlier still read the CSV (CIN7's pre-May Amazon data is incomplete), so the hybrid is unchanged below the cutover.</li>
+      <li><strong>Reconciliation that justified the flip:</strong> after the cluster-aware re-walk (v2.2.50), the order-ID attribution fix (v2.2.52, +895 redacted Amazon orders) and the CreatedDate early-May backfill (v2.2.53), D1 May Amazon = <strong>1,458 orders / 1,886 tins</strong> vs CIN7's own pivot <strong>1,463 / 1,900</strong> &mdash; a 99.7% / 99.3% match (the small residual is VOID/refund/snapshot noise). June = 1,379 vs 1,326. Both well inside the ±tolerance the April CSV cross-check (0.7%) established.</li>
+      <li><strong>KV cache key bumped v8 &rarr; v9</strong> (<code>kvSalesKey</code>) so the changed May payload refreshes immediately rather than serving a stale pre-cutover value for up to the 15-min TTL.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
+
+    <h4>v2.2.53 &mdash; 30 June 2026 (🩹 CreatedDate safety-net trigger &mdash; fill under-synced day ranges)</h4>
+    <ul>
+      <li><strong>New <code>GET /api/admin/cin7-safetynet?since=YYYY-MM-DD&amp;until=YYYY-MM-DD</code></strong> &mdash; clickable (SSO'd) trigger for the CreatedDate safety-net backfill, now with explicit date-range bounds. Re-fetches SalesOrders by CreatedDate (sidestepping the ModifiedDate noise walls) to fill historical holes where whole days were never synced. Used to backfill early May (1&ndash;8), which had only ~10&ndash;20 orders/day in D1 vs ~300/day mid-month &mdash; a genuine under-sync, not attribution. <code>runCin7SafetyNetBackfill</code> gained <code>since</code>/<code>until</code> params so a sweep can be bound to one gap and finish in a single call. Auth: Cloudflare Access SSO.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
+
+    <h4>v2.2.52 &mdash; 30 June 2026 (🎯 Amazon attribution by order-ID reference &mdash; catches CIN7-redacted Amazon sales)</h4>
+    <ul>
+      <li><strong>Real attribution miss found + fixed.</strong> After the v2.2.50 cluster-aware re-walk filled June fully (D1 1,361 vs CIN7's 1,326 &mdash; matches), May stayed ~600 short (D1 856 vs CIN7 1,463). Read-only diagnosis showed the late-May days are fully synced (~300 orders/day) but Amazon orders were landing with company <code>[Redacted]</code> (CIN7 redacts the customer on some Amazon orders) and being dropped to NULL by the company rule. Proof: 273 May NULL-tagged orders carry Amazon order-ID references (<code>NNN-NNNNNNN-NNNNNNN</code>) + AU SKUs. June had zero such drops.</li>
+      <li><strong>Fix (<code>src/cin7.js</code>, <code>attributeCin7Order</code>):</strong> attribute by the <strong>Amazon order-ID reference</strong> (<code>/^\d{3}-\d{7}-\d{7}$/</code>) as the primary Amazon signal, ahead of the company rules, so a redacted Amazon sale is caught regardless of customer label. Cross-checked against all June Amazon-ref orders &mdash; zero false positives (no Coles/Woolies/distributor order uses this reference shape). The <code>company.startsWith('amazon seller')</code> rule stays as a fallback.</li>
+      <li><strong>Backfill:</strong> existing NULL orders with Amazon-format references re-tagged to <code>amz</code> (one-time idempotent UPDATE).</li>
+      <li><strong>Still open (not this release):</strong> a residual early-May gap (~334) where Amazon orders aren't in D1 at all (early-May under-sync) &mdash; to be resolved by a CreatedDate re-sync before the cutover is flipped to <code>'2026-05'</code>. <code>AU_AMAZON_CIN7_CUTOVER_MONTH</code> stays <code>'2026-06'</code> for now.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
+
+    <h4>v2.2.51 &mdash; 30 June 2026 (⚡ One-click CIN7 catch-up accelerator)</h4>
+    <ul>
+      <li><strong>New <code>GET /api/admin/cin7-catchup</code></strong> &mdash; a browser-clickable accelerator over the 15-min cron for the CIN7 sales-orders sync. Opens from an SSO'd tab (no POST tooling), runs the same cluster-aware chunk in a loop advancing the shared watermark, and returns a plain-English <code>message</code> + <code>nextStep</code> (&ldquo;click again&rdquo; vs &ldquo;caught up&rdquo;) so a recovery doesn't mean waiting hours of cron ticks. Used to backfill the 24&ndash;31 May + 7&ndash;29 June holes after the 6 June stall. Credit notes excluded (low volume, not behind). Auth: Cloudflare Access SSO, same as every <code>/api/admin/*</code> route.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
+
+    <h4>v2.2.50 &mdash; 29 June 2026 (🔁 Cluster-aware CIN7 cron + weekly safety-net &mdash; stalls can't freeze the sync anymore)</h4>
+    <ul>
+      <li><strong>Root cause confirmed (and it was NOT an attribution bug).</strong> The AU Amazon undercount was diagnosed read-only against D1: every Amazon order CIN7 sends arrives as customer <em>"Amazon Sales"</em> / company <em>"amazon seller no pong natural products"</em> and is already tagged <code>channel_attr='amz'</code> correctly &mdash; there is no pile of mis-attributed Amazon sales hiding in the NULL bucket, and CIN7's <code>/SalesOrders</code> API does not even return a branch field, so a branch-based attribution rebuild was unbuildable <em>and</em> unnecessary. The undercount is purely sync coverage: the cron had wedged again, this time on a 275-row cluster all stamped <code>2026-06-06T14:00:02Z</code> (page size is 250, so a single page can never clear it), leaving 7&ndash;29 June unsynced; plus the old 23 May stall left 24&ndash;31 May thin.</li>
+      <li><strong>Cluster-aware pagination (the durable fix).</strong> <code>runCin7SalesOrdersChunk</code> + <code>runCin7CreditNotesChunk</code> in <code>src/cin7-sync.js</code> now track <code>(watermark, clusterPage)</code> &mdash; re-purposing the dormant <code>sync_state.watermark_id</code> column. When a full page sits entirely on one <code>ModifiedDate</code>, the watermark holds and the page advances, so a same-timestamp cluster of any size is walked in <code>ceil(size/250)</code> ticks instead of looping forever. New pure helper <code>decideNextCursor</code> isolates the advance logic. This is the cron rebuild queued in v2.2.49 &mdash; CIN7 still coerces <code>&gt;</code> to <code>&gt;=</code> and drops <code>Id</code> filters, so the <code>page</code> param is the only lever, and this uses it.</li>
+      <li><strong>Weekly safety-net backfill (the insurance).</strong> New <code>runCin7SafetyNetBackfill</code> + a second cron trigger (<code>0 2 * * 0</code>, Sunday 02:00 UTC) re-fetches the last 60 days of SalesOrders ordered by <strong>CreatedDate</strong> (which sidesteps ModifiedDate clusters entirely) and <code>INSERT OR REPLACE</code>s them &mdash; idempotent, bounded, stateless. Catches anything the incremental path structurally missed, including the 24&ndash;31 May hole left by the 2 June manual watermark jump. The per-order upsert was extracted to a shared <code>buildSalesOrderStatements</code> so incremental + safety-net can never drift on attribution.</li>
+      <li><strong>Immediate recovery.</strong> The stuck 6 June watermark was advanced one second past the cluster (<code>commands/unstick-cin7-sales-watermark.command</code>, updated for this recurrence) so the now cluster-aware cron resumes forward through June.</li>
+      <li><strong>No dashboard read-path or cutover change in this release</strong> &mdash; <code>AU_AMAZON_CIN7_CUTOVER_MONTH</code> stays <code>'2026-06'</code> until D1 May is verified complete against CIN7's own May total (1,463 Amazon orders), at which point a follow-up flips it back to <code>'2026-05'</code> to retire the monthly CSV import.</li>
+      <li><strong>NA dashboard untouched</strong> (per the per-region versioning rule). NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.49 &mdash; 2 June 2026 (📦 Cutover shifted to June after CIN7 cron stalled mid-May)</h4>
     <ul>
       <li><strong>Cutover constant moved May &rarr; June.</strong> Same-day follow-up to v2.2.48. The May cutover assumed CIN7's `cin7_sales_orders` table had complete May Amazon data, but a CIN7 cron stall (watermark stuck at <code>2026-05-23T14:00:0XZ</code> on a bulk-modification cluster of ~1,000 records-per-second) left May 24-31 Amazon orders unreached, so CIN7 May numbers under-counted (e.g. AU-OG-NPO-35 read 269 tins vs <code>amazon_orders</code>' CSV-imported 309). Moving <code>AU_AMAZON_CIN7_CUTOVER_MONTH</code> from <code>'2026-05'</code> to <code>'2026-06'</code> keeps May on the accurate CSV source and lets June onwards live on CIN7.</li>

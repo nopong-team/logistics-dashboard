@@ -115,7 +115,7 @@ const KV_POS_KEY       = 'au:pos:v4';
 // historical CSV import is the seed; SP-API cron extension is Phase 3b-b).
 // v6 (v2.2.18, 2026-05-16): skuSales rows gained a `woo` field. v5 → v6
 // notes preserved in git history.
-function kvSalesKey(month) { return `au:sales:${month}:v8`; }
+function kvSalesKey(month) { return `au:sales:${month}:v9`; }
 
 // AU Amazon source cutover — months at-or-after this read 'amz' from CIN7
 // sales orders (channel_attr='amz'); months before read 'amz' from
@@ -130,7 +130,7 @@ function kvSalesKey(month) { return `au:sales:${month}:v8`; }
 // amazon_orders preserves accuracy; June onwards lives on CIN7 once the
 // watermark is jumped past the cluster (commands/jump-cin7-watermark-to-june
 // .command). Long-term cluster-aware cron in progress (next session).
-const AU_AMAZON_CIN7_CUTOVER_MONTH = '2026-06';
+const AU_AMAZON_CIN7_CUTOVER_MONTH = '2026-05';
 
 // 15 min TTL — short enough that drift is bounded but long enough to absorb
 // dashboard refreshes on the same minute. Bump the key suffix (v1 → v2) on
@@ -591,6 +591,19 @@ export function attributeCin7Order(order) {
 
   // Stock Adjustments — inventory movements, not sales
   if (company === 'Stock Adjustments' || first === 'Stock Adjustments') return null;
+
+  // Amazon sales by ORDER-ID REFERENCE — the reliable signal. CIN7 records
+  // SOME Amazon orders with the customer/company redacted (company='[Redacted]'
+  // or blank), so keying off the company string alone undercounts them.
+  // Verified 2026-06-30: 273 May orders carried Amazon-format references + AU
+  // SKUs but were dropped to NULL by the company rule below (the [Redacted]
+  // surge began late May; June had none). The Amazon order-ID format
+  // (NNN-NNNNNNN-NNNNNNN) is distinctive and stable — cross-checked against all
+  // June Amazon-ref orders with zero false positives (no Coles/Woolies/dist
+  // order uses this shape). This runs before the retailer/company rules so a
+  // redacted Amazon sale is caught regardless of how CIN7 labelled the customer.
+  const reference = String(order?.reference || '').trim();
+  if (/^\d{3}-\d{7}-\d{7}$/.test(reference)) return 'amz';
 
   // Coles / Woolies pattern matching
   if (cl.includes('woolworths'))        return 'woo2';

@@ -5,10 +5,15 @@
 #
 # Diagnosed 2026-06-02: cin7_sales_orders watermark stuck at
 # '2026-05-23T14:00:02Z' (per check-cin7-au-june-diagnostic.command).
+# RECURRED 2026-06-29: same stall, this time stuck at '2026-06-06T14:00:02Z'
+# — confirmed a 275-row cluster all sharing that exact modified_date (page
+# size is 250, so the page can never clear the cluster). NEW_WATERMARK
+# below updated to escape it.
 # The cron has been re-fetching the same cluster of records at :02Z every
 # 15 min because CIN7 Omni's `WHERE ModifiedDate > X` silently treats `>`
 # as `>=` — so the watermark never advances past timestamps that are tied
-# across multiple records.
+# across multiple records. Durable fix = cluster-aware pagination (v2.50
+# Part A); this script is the manual escape hatch.
 #
 # Recovery: set the watermark to one second past the stuck point. The
 # stuck records ARE already in D1 (the cron has been re-fetching them
@@ -29,7 +34,7 @@ REPO="$HOME/Documents/logistics-dashboard"
 
 cd "$REPO" || { echo "Error: $REPO not found"; read -r _; exit 1; }
 
-NEW_WATERMARK='2026-05-23T14:00:03Z'   # 1 second past the stuck cluster
+NEW_WATERMARK='2026-06-06T14:00:03Z'   # 1 second past the stuck cluster (2026-06-29 stall)
 
 echo "================================================================"
 echo "  Unstick CIN7 sales-orders watermark — $(date)"

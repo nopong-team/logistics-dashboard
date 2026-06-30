@@ -20,7 +20,7 @@ import { xeroRoutes, xeroAuthRoutes, readXeroStatus } from './xero.js';
 import { logiwaRoutes, readLogiwaStatus } from './logiwa.js';
 import { auRoutes } from './cin7.js';
 import { logisticsRoutes } from './logistics.js';
-import { runCin7SalesOrdersChunk, runCin7CreditNotesChunk } from './cin7-sync.js';
+import { runCin7SalesOrdersChunk, runCin7CreditNotesChunk, runCin7SafetyNetBackfill } from './cin7-sync.js';
 import buyingToolHistory from './buying-tool-history.js';
 import { redactSecrets } from './redact.js';
 
@@ -281,6 +281,40 @@ async function runCin7CronSync(env) {
   }
 }
 
+// Weekly CIN7 safety-net (v2.2.50). Fires on its own cron trigger (Sunday
+// 02:00 UTC) — a SEPARATE scheduled invocation from the every-15-min sync, so
+// it has the full subrequest budget to itself. Re-fetches the last 60 days of
+// SalesOrders by CreatedDate (sidestepping the ModifiedDate clusters that stall
+// the incremental cron) and INSERT OR REPLACEs them, catching any historical
+// hole the incremental path missed. Idempotent; safe to run anytime.
+//
+// Dispatch (see scheduled()) matches the known-good 15-min trigger explicitly
+// and routes every OTHER trigger here, so it's robust to however Cloudflare
+// normalizes the weekly cron string.
+const FIFTEEN_MIN_CRON = '*/15 * * * *';
+
+async function runCin7SafetyNetCron(env) {
+  if (!env.DB) {
+    console.log('CIN7 safety-net skipped: DB binding not configured');
+    return;
+  }
+  if (!(env.CIN7_USERNAME && env.CIN7_CONNECTION_KEY)) {
+    console.log('CIN7 safety-net skipped: secrets not configured');
+    return;
+  }
+  try {
+    const r = await runCin7SafetyNetBackfill(env, { sinceDays: 60 });
+    console.log(
+      `CIN7 safety-net: swept ${r.pagesFetched} page(s) since ${r.sinceISO}, ` +
+      `+${r.rowsUpserted} orders re-synced, +${r.itemsUpserted} items` +
+      (r.more ? ' [window not fully covered this run — hit page cap]' : '') +
+      ` (${r.durationMs}ms)`,
+    );
+  } catch (e) {
+    console.error('CIN7 safety-net failed:', redactSecrets(e?.message || String(e)));
+  }
+}
+
 async function runCronSync(env) {
   if (!env.DB) {
     console.log('cron sync skipped: DB binding not configured');
@@ -308,7 +342,14 @@ export default {
   fetch: app.fetch,
   async scheduled(event, env, ctx) {
     // ctx.waitUntil keeps the work alive past the synchronous return so the
-    // platform can manage handler lifetime cleanly.
-    ctx.waitUntil(runCronSync(env));
+    // platform can manage handler lifetime cleanly. The weekly safety-net runs
+    // on its own cron trigger (own invocation, own subrequest budget); every
+    // other tick runs the normal 15-min sync.
+    if (event.cron === FIFTEEN_MIN_CRON) {
+      ctx.waitUntil(runCronSync(env));
+    } else {
+      // Any non-15-min trigger is the weekly safety-net.
+      ctx.waitUntil(runCin7SafetyNetCron(env));
+    }
   },
 };

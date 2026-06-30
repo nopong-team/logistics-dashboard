@@ -93,6 +93,47 @@ function pickCreatedDate(row) {
   return String(row?.createdDate || row?.modifiedDate || '').trim() || null;
 }
 
+// ─── Cluster-aware cursor advance (v2.2.50) ──────────────────────────────────
+//
+// The 2026-05-23 and 2026-06-06 stalls had the same root cause: a block of
+// >250 records all sharing one ModifiedDate. CIN7 Omni coerces
+// `ModifiedDate > X` to `>=` and silently drops `Id` filters (see file
+// docstring), so the ONLY lever for walking past such a same-timestamp cluster
+// is the `page` parameter. We persist the page in the dormant
+// `sync_state.watermark_id` column ("cluster page").
+//
+// Given the page of rows just fetched at (watermark, clusterPage):
+//   • FULL page AND every row sits exactly on the watermark timestamp → we're
+//     inside a cluster bigger than one page. Hold the watermark, advance the
+//     page; next tick reads the next slice of the same cluster.
+//   • Otherwise the cluster (if any) is cleared → advance the watermark to the
+//     newest timestamp on the page and reset the page to 1.
+//
+// This walks any cluster in ceil(clusterSize / PAGE_SIZE) ticks instead of
+// looping forever. It assumes CIN7 returns a stable order for the same query
+// across ticks; for the real-world case (historical, static clusters) it does.
+// The weekly CreatedDate safety-net backfill is the insurance for any edge.
+//
+// Pure function (no I/O) so the advance logic is trivially reviewable.
+function decideNextCursor({ rows, watermark, clusterPage, pageSize, pickTs }) {
+  const timestamps = (rows || []).map(pickTs).filter(Boolean);
+  if (timestamps.length === 0) {
+    // Nothing came back — stay on the watermark, reset the page so we never
+    // strand the cursor mid-cluster on an empty tail page.
+    return { watermark, clusterPage: 1 };
+  }
+  let maxTs = watermark;
+  for (const t of timestamps) if (t > maxTs) maxTs = t;
+  const fullPage = rows.length >= pageSize;
+  const allAtWatermark = timestamps.every((t) => t === watermark);
+  if (fullPage && allAtWatermark) {
+    // Mid-cluster: same watermark, next page.
+    return { watermark, clusterPage: clusterPage + 1 };
+  }
+  // Cluster cleared (or there never was one): advance, reset page to 1.
+  return { watermark: maxTs, clusterPage: 1 };
+}
+
 // Truncate raw_json strings to a safe ceiling so a giant payload doesn't
 // blow up a single D1 write. 32 KB per row is generous (typical CIN7 sales
 // orders are under 4 KB) and bounds the write size predictably.
@@ -181,18 +222,20 @@ async function logRun(env, {
   ).run();
 }
 
-// Read the current watermark, creating the sync_state row if absent.
-// v2.2.10: stops reading watermark_id (composite cursor was retired — see
-// file docstring). The column still exists in the schema; we leave whatever
-// value is there untouched.
-async function readWatermark(env, source) {
+// v2.2.50: read both the watermark AND the cluster page (watermark_id), which
+// the cluster-aware pagination re-purposes. Creates the row if absent.
+async function readSyncCursor(env, source) {
   await env.DB.prepare(
     `INSERT OR IGNORE INTO sync_state (source, market, watermark) VALUES (?, 'AU', ?)`,
   ).bind(source, EPOCH_WATERMARK).run();
   const row = await env.DB.prepare(
-    `SELECT watermark FROM sync_state WHERE source = ? AND market = 'AU'`,
+    `SELECT watermark, watermark_id FROM sync_state WHERE source = ? AND market = 'AU'`,
   ).bind(source).first();
-  return row?.watermark || EPOCH_WATERMARK;
+  const page = Number(row?.watermark_id);
+  return {
+    watermark: row?.watermark || EPOCH_WATERMARK,
+    clusterPage: Number.isFinite(page) && page > 0 ? page : 1,
+  };
 }
 
 // ─── Sales orders chunk ────────────────────────────────────────────────────
@@ -206,6 +249,84 @@ const SALES_FIELDS = [
   'total', 'subTotal', 'productTotal',
   'lineItems',
 ].join(',');
+
+/**
+ * Build the INSERT/DELETE statements for a batch of sales orders. Extracted in
+ * v2.2.50 so the incremental cron chunk AND the CreatedDate safety-net backfill
+ * share ONE copy of the attribution + column mapping (no second code path to
+ * drift). Returns { stmts, rowsUpserted, itemsUpserted }; the caller batches
+ * the statements. Rows missing a usable timestamp are skipped (they'd violate
+ * NOT NULL on created_date/modified_date).
+ */
+function buildSalesOrderStatements(env, orders, { persistRawJson }) {
+  const stmts = [];
+  let rowsUpserted = 0;
+  let itemsUpserted = 0;
+  for (const o of orders) {
+    const modifiedDate = pickModifiedDate(o);
+    const createdDate  = pickCreatedDate(o);
+    if (!modifiedDate || !createdDate) continue;
+    rowsUpserted++;
+
+    const channelAttr = attributeCin7Order(o);
+    const company   = String(o?.company   || '').slice(0, 200) || null;
+    const firstName = String(o?.firstName || '').slice(0, 200) || null;
+    const lastName  = String(o?.lastName  || '').slice(0, 200) || null;
+    const memberId  = Number(o?.memberId ?? 0) || null;
+    const memberEmail = String(o?.memberEmail || '').slice(0, 200) || null;
+    const status   = String(o?.status || '').slice(0, 40) || 'UNKNOWN';
+    const stage          = String(o?.stage || '').slice(0, 40) || null;
+    const dispatchedDate = String(o?.dispatchedDate || '').trim() || null;
+    const deliveryDate   = String(o?.estimatedDeliveryDate || '').trim() || null;
+    const total        = Number(o?.total        ?? 0) || 0;
+    const subTotal     = Number(o?.subTotal     ?? 0) || 0;
+    const productTotal = Number(o?.productTotal ?? 0) || 0;
+    const reference    = String(o?.reference || '').slice(0, 100) || null;
+    const rawJson = persistRawJson ? truncateRawJson(o) : null;
+
+    stmts.push(
+      env.DB.prepare(
+        `INSERT OR REPLACE INTO cin7_sales_orders
+           (id, reference, market, status, stage, channel_attr, company,
+            first_name, last_name, member_id, member_email,
+            total, sub_total, product_total,
+            created_date, modified_date, dispatched_date, delivery_date,
+            raw_json, synced_at)
+         VALUES (?, ?, 'AU', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 strftime('%Y-%m-%dT%H:%M:%SZ','now'))`,
+      ).bind(
+        o.id, reference, status, stage, channelAttr, company,
+        firstName, lastName, memberId, memberEmail,
+        total, subTotal, productTotal,
+        createdDate, modifiedDate, dispatchedDate, deliveryDate,
+        rawJson,
+      ),
+    );
+
+    // Re-build line items: scope DELETE to this order_id, then INSERT.
+    stmts.push(
+      env.DB.prepare(`DELETE FROM cin7_sales_order_items WHERE order_id = ?`).bind(o.id),
+    );
+    const lineItems = Array.isArray(o.lineItems) ? o.lineItems : [];
+    for (const li of lineItems) {
+      const d = deriveLineFields(li, { kind: 'sales' });
+      itemsUpserted++;
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO cin7_sales_order_items
+             (order_id, market, parent_id, code, base_sku, multiplier,
+              uom_size, qty, unit_price, total, name, is_au_sku, tins, created_date)
+           VALUES (?, 'AU', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          o.id, d.parentId, d.code, d.baseSku, d.multiplier,
+          d.uomSize, d.qty, d.unitPrice, d.total, d.name, d.isAuSku, d.tins,
+          createdDate,
+        ),
+      );
+    }
+  }
+  return { stmts, rowsUpserted, itemsUpserted };
+}
 
 /**
  * Run one CIN7 SalesOrders → D1 chunk.
@@ -239,21 +360,22 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
     throw new Error('cin7 sync: CIN7_USERNAME / CIN7_CONNECTION_KEY not set');
   }
 
-  const watermarkBefore = await readWatermark(env, source);
+  const { watermark: watermarkBefore, clusterPage } = await readSyncCursor(env, source);
 
-  // v2.2.10: strict `>` on the WHERE clause + ascending ModifiedDate order.
-  // The order param is essential — without it CIN7 returns batches in id
-  // order with a wide modified_date spread, and MAX(modified_date) as the
-  // advance point would skip records in between (v2.2.8's regression).
-  // Page=1 always; the watermark itself is the cursor.
-  const where = `ModifiedDate>'${watermarkBefore}'`;
+  // v2.2.50 cluster-aware: fetch ModifiedDate >= watermark at the current
+  // cluster page, ascending ModifiedDate. We use `>=` explicitly (CIN7 coerces
+  // `>` to `>=` regardless) because the page-walk in decideNextCursor relies on
+  // re-reading from the watermark timestamp. The `order` param is essential —
+  // without it CIN7 returns id-ordered batches and the advance point would skip
+  // records (v2.2.8's regression). See decideNextCursor for the cluster logic.
+  const where = `ModifiedDate>='${watermarkBefore}'`;
   let rows;
   try {
     rows = await cin7Fetch(env, 'SalesOrders', {
       fields: SALES_FIELDS,
       where,
       order: 'ModifiedDate ASC',
-      page: 1,
+      page: clusterPage,
       rows: PAGE_SIZE,
     });
   } catch (e) {
@@ -267,131 +389,52 @@ export async function runCin7SalesOrdersChunk(env, opts = {}) {
   }
   const orders = Array.isArray(rows) ? rows : [];
 
-  let watermarkAfter = watermarkBefore;
   let rowsUpserted = 0;
   let itemsUpserted = 0;
 
   if (orders.length > 0) {
-    const stmts = [];
-    for (const o of orders) {
-      const modifiedDate = pickModifiedDate(o);
-      const createdDate  = pickCreatedDate(o);
-      if (!modifiedDate || !createdDate) {
-        // Skip rows that don't even carry a usable timestamp — the row would
-        // violate NOT NULL on modified_date / created_date and stop the
-        // batch. Logged as itemsUpserted=0 below; rare enough that one-off
-        // outliers don't justify a side-table.
-        continue;
-      }
-      rowsUpserted++;
-
-      const channelAttr = attributeCin7Order(o);
-      const company   = String(o?.company   || '').slice(0, 200) || null;
-      const firstName = String(o?.firstName || '').slice(0, 200) || null;
-      const lastName  = String(o?.lastName  || '').slice(0, 200) || null;
-      const memberId  = Number(o?.memberId ?? 0) || null;
-      const memberEmail = String(o?.memberEmail || '').slice(0, 200) || null;
-      const status   = String(o?.status || '').slice(0, 40) || 'UNKNOWN';
-      // Workflow + delivery fields promoted to first-class columns in
-      // migration 0007 (2026-05-19). raw_json reads via json_extract were
-      // unreliable — many rows have raw_json=NULL from backfill-era inserts.
-      const stage          = String(o?.stage || '').slice(0, 40) || null;
-      const dispatchedDate = String(o?.dispatchedDate || '').trim() || null;
-      const deliveryDate   = String(o?.estimatedDeliveryDate || '').trim() || null;
-      const total        = Number(o?.total        ?? 0) || 0;
-      const subTotal     = Number(o?.subTotal     ?? 0) || 0;
-      const productTotal = Number(o?.productTotal ?? 0) || 0;
-      const reference    = String(o?.reference || '').slice(0, 100) || null;
-      const rawJson = persistRawJson ? truncateRawJson(o) : null;
-
-      stmts.push(
-        env.DB.prepare(
-          `INSERT OR REPLACE INTO cin7_sales_orders
-             (id, reference, market, status, stage, channel_attr, company,
-              first_name, last_name, member_id, member_email,
-              total, sub_total, product_total,
-              created_date, modified_date, dispatched_date, delivery_date,
-              raw_json, synced_at)
-           VALUES (?, ?, 'AU', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                   strftime('%Y-%m-%dT%H:%M:%SZ','now'))`,
-        ).bind(
-          o.id, reference, status, stage, channelAttr, company,
-          firstName, lastName, memberId, memberEmail,
-          total, subTotal, productTotal,
-          createdDate, modifiedDate, dispatchedDate, deliveryDate,
-          rawJson,
-        ),
-      );
-
-      // Re-build line items: scope DELETE to this order_id, then INSERT.
-      // We don't trust CIN7's per-line `id` to be globally unique, so the
-      // table uses AUTOINCREMENT rowids and this scoped rebuild is the
-      // canonical upsert for items. Same pattern Woo uses in admin.js.
-      stmts.push(
-        env.DB.prepare(`DELETE FROM cin7_sales_order_items WHERE order_id = ?`).bind(o.id),
-      );
-
-      const lineItems = Array.isArray(o.lineItems) ? o.lineItems : [];
-      for (const li of lineItems) {
-        const d = deriveLineFields(li, { kind: 'sales' });
-        itemsUpserted++;
-        stmts.push(
-          env.DB.prepare(
-            `INSERT INTO cin7_sales_order_items
-               (order_id, market, parent_id, code, base_sku, multiplier,
-                uom_size, qty, unit_price, total, name, is_au_sku, tins, created_date)
-             VALUES (?, 'AU', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          ).bind(
-            o.id, d.parentId, d.code, d.baseSku, d.multiplier,
-            d.uomSize, d.qty, d.unitPrice, d.total, d.name, d.isAuSku, d.tins,
-            createdDate,
-          ),
-        );
-      }
-    }
+    const built = buildSalesOrderStatements(env, orders, { persistRawJson });
+    rowsUpserted = built.rowsUpserted;
+    itemsUpserted = built.itemsUpserted;
 
     // D1 batches are transactional; chunk if we have a lot of statements.
     const CHUNK = 500;
-    for (let i = 0; i < stmts.length; i += CHUNK) {
-      await env.DB.batch(stmts.slice(i, i + CHUNK));
-    }
-
-    // v2.2.10 watermark advance: MAX(modifiedDate) over the persisted rows.
-    // The strict `>` WHERE clause guarantees every row's modifiedDate is past
-    // the old watermark, so MAX is always a forward step (or stays equal if
-    // orders is empty, in which case this branch doesn't run).
-    for (const o of orders) {
-      const m = pickModifiedDate(o);
-      if (m && m > watermarkAfter) watermarkAfter = m;
+    for (let i = 0; i < built.stmts.length; i += CHUNK) {
+      await env.DB.batch(built.stmts.slice(i, i + CHUNK));
     }
   }
 
-  // Update sync_state heartbeat — always, even if zero rows came back, so
-  // the dashboard can answer "when did we last hear from CIN7" separately
-  // from "when did we last persist a new row". Note: watermark_id is
-  // intentionally NOT touched here — see file docstring.
+  // v2.2.50 cluster-aware advance. Either step the watermark forward to the
+  // newest timestamp seen (and reset the page), or — if this whole page sat on
+  // a single timestamp cluster — hold the watermark and advance the page so the
+  // next tick walks the next slice. watermark_id now carries the cluster page.
+  const next = decideNextCursor({
+    rows: orders, watermark: watermarkBefore, clusterPage,
+    pageSize: PAGE_SIZE, pickTs: pickModifiedDate,
+  });
+
   await env.DB.prepare(
     `UPDATE sync_state
-        SET watermark = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        SET watermark = ?, watermark_id = ?,
+            last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
       WHERE source = ? AND market = 'AU'`,
-  ).bind(watermarkAfter, source).run();
+  ).bind(next.watermark, next.clusterPage, source).run();
 
   const durationMs = Date.now() - startMs;
   await logRun(env, {
     source, action, pagesFetched: 1, rowsUpserted, itemsUpserted,
-    watermarkBefore, watermarkAfter, status: 'ok', durationMs,
+    watermarkBefore, watermarkAfter: next.watermark, status: 'ok', durationMs,
   });
 
-  // `more` hint: full page implies more records may be available. Strict `>`
-  // means we can't have the v2.2.8-style "same records returned forever"
-  // failure mode, so no separate watermarkAdvanced guard is needed — if
-  // orders.length > 0, the watermark moved.
+  // `more`: a full page means either the cluster continues or another
+  // ModifiedDate slice awaits — the backfill loop keeps going while true.
   return {
     ok: true,
     source, action,
     pagesFetched: 1,
     rowsUpserted, itemsUpserted,
-    watermarkBefore, watermarkAfter,
+    watermarkBefore, watermarkAfter: next.watermark,
+    clusterPage: next.clusterPage,
     more: orders.length >= PAGE_SIZE,
     durationMs,
   };
@@ -425,19 +468,20 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
     throw new Error('cin7 sync: CIN7_USERNAME / CIN7_CONNECTION_KEY not set');
   }
 
-  const watermarkBefore = await readWatermark(env, source);
+  const { watermark: watermarkBefore, clusterPage } = await readSyncCursor(env, source);
 
-  // v2.2.10: strict `>` + ascending ModifiedDate order. See sales-orders
-  // chunk for full rationale (and the file docstring for the cluster
-  // trade-off this design accepts).
-  const where = `ModifiedDate>'${watermarkBefore}'`;
+  // v2.2.50 cluster-aware: same shape as the sales-orders chunk (ModifiedDate
+  // >= watermark, ascending, at the current cluster page). Credit notes are
+  // far lower volume so clusters are unlikely, but sharing the logic keeps the
+  // two endpoints from drifting.
+  const where = `ModifiedDate>='${watermarkBefore}'`;
   let rows;
   try {
     rows = await cin7Fetch(env, 'CreditNotes', {
       fields: CREDIT_FIELDS,
       where,
       order: 'ModifiedDate ASC',
-      page: 1,
+      page: clusterPage,
       rows: PAGE_SIZE,
     });
   } catch (e) {
@@ -451,7 +495,6 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
   }
   const creditNotes = Array.isArray(rows) ? rows : [];
 
-  let watermarkAfter = watermarkBefore;
   let rowsUpserted = 0;
   let itemsUpserted = 0;
 
@@ -523,24 +566,25 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
       await env.DB.batch(stmts.slice(i, i + CHUNK));
     }
 
-    // v2.2.10 watermark advance — same logic as sales orders: MAX over the
-    // batch, no id tracking.
-    for (const cn of creditNotes) {
-      const m = pickModifiedDate(cn);
-      if (m && m > watermarkAfter) watermarkAfter = m;
-    }
   }
+
+  // v2.2.50 cluster-aware advance — identical logic to the sales-orders chunk.
+  const next = decideNextCursor({
+    rows: creditNotes, watermark: watermarkBefore, clusterPage,
+    pageSize: PAGE_SIZE, pickTs: pickModifiedDate,
+  });
 
   await env.DB.prepare(
     `UPDATE sync_state
-        SET watermark = ?, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+        SET watermark = ?, watermark_id = ?,
+            last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
       WHERE source = ? AND market = 'AU'`,
-  ).bind(watermarkAfter, source).run();
+  ).bind(next.watermark, next.clusterPage, source).run();
 
   const durationMs = Date.now() - startMs;
   await logRun(env, {
     source, action, pagesFetched: 1, rowsUpserted, itemsUpserted,
-    watermarkBefore, watermarkAfter, status: 'ok', durationMs,
+    watermarkBefore, watermarkAfter: next.watermark, status: 'ok', durationMs,
   });
 
   return {
@@ -548,7 +592,8 @@ export async function runCin7CreditNotesChunk(env, opts = {}) {
     source, action,
     pagesFetched: 1,
     rowsUpserted, itemsUpserted,
-    watermarkBefore, watermarkAfter,
+    watermarkBefore, watermarkAfter: next.watermark,
+    clusterPage: next.clusterPage,
     more: creditNotes.length >= PAGE_SIZE,
     durationMs,
   };
@@ -588,7 +633,10 @@ export async function runCin7BackfillLoop(env, chunkFn, opts = {}) {
       // continue (watermark persists on the sync_state row).
       break;
     }
-    const result = await chunkFn(env, { action: 'cin7-backfill' });
+    const result = await chunkFn(env, {
+      action: opts.action || 'cin7-backfill',
+      persistRawJson: opts.persistRawJson,
+    });
     chunks.push({
       rowsUpserted: result.rowsUpserted,
       itemsUpserted: result.itemsUpserted,
@@ -611,5 +659,112 @@ export async function runCin7BackfillLoop(env, chunkFn, opts = {}) {
     moreAvailable: !!(lastResult && lastResult.more),
     durationMs: Date.now() - start,
     chunks,
+  };
+}
+
+// ─── Weekly safety-net backfill (v2.2.50) ───────────────────────────────────
+
+/**
+ * Re-fetch recent SalesOrders ordered by CreatedDate (NOT ModifiedDate) and
+ * INSERT OR REPLACE them. This is the insurance the v2.2.49 changelog queued:
+ * because it orders by CreatedDate, it sidesteps the ModifiedDate clusters that
+ * stall the incremental cron entirely, and because it sweeps a whole window it
+ * catches anything the incremental path structurally missed — e.g. the
+ * 2026-06-02 manual watermark jump that skipped May 24-31, or any future jump.
+ *
+ * Idempotent (INSERT OR REPLACE) and stateless: each run re-sweeps the window
+ * from scratch, so it never strands a cursor. Bounded by `maxPages` and
+ * `wallClockBudgetMs` so a single invocation can't run away or exceed the
+ * Workers subrequest budget — a partial sweep is harmless (the incremental
+ * cron keeps the most-recent data fresh; the next run finishes the rest).
+ *
+ * Ordered CreatedDate ASC, so when bounded it always covers the OLDEST part of
+ * the window first — exactly the part most likely to have a historical hole.
+ *
+ * @param {object} env
+ * @param {object} opts
+ *   - sinceDays:          window length in days (default 60).
+ *   - maxPages:           hard page cap per run (default 40).
+ *   - wallClockBudgetMs:  stop when approaching this (default 45000).
+ *   - persistRawJson:     default true.
+ */
+export async function runCin7SafetyNetBackfill(env, opts = {}) {
+  const startMs = Date.now();
+  const source = 'cin7_sales_orders';
+  if (!env.DB) {
+    throw new Error('cin7 safety-net: env.DB binding not configured');
+  }
+  if (!(env.CIN7_USERNAME && env.CIN7_CONNECTION_KEY)) {
+    throw new Error('cin7 safety-net: CIN7_USERNAME / CIN7_CONNECTION_KEY not set');
+  }
+
+  const sinceDays = Math.max(1, Number(opts.sinceDays) || 60);
+  const maxPages = Math.max(1, Number(opts.maxPages) || 40);
+  const wallClockBudgetMs = Math.max(1000, Number(opts.wallClockBudgetMs) || 45_000);
+  const persistRawJson = opts.persistRawJson !== false;
+
+  // Window. Default start = now - sinceDays; both bounds can be overridden with
+  // explicit ISO `since`/`until` (used to target a specific gap, e.g. early May,
+  // in a single bounded call). CreatedDate is ISO-8601; range comparisons work
+  // lexicographically. The optional upper bound keeps a targeted sweep small.
+  const sinceISO = opts.since
+    ? String(opts.since)
+    : new Date(startMs - sinceDays * 86_400_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const untilISO = opts.until ? String(opts.until) : null;
+  const where = `CreatedDate>='${sinceISO}'` + (untilISO ? ` AND CreatedDate<'${untilISO}'` : '');
+
+  let page = 1;
+  let pagesFetched = 0;
+  let rowsUpserted = 0;
+  let itemsUpserted = 0;
+  let more = false;
+
+  try {
+    while (page <= maxPages && (Date.now() - startMs) < wallClockBudgetMs) {
+      const rows = await cin7Fetch(env, 'SalesOrders', {
+        fields: SALES_FIELDS,
+        where,
+        order: 'CreatedDate ASC',
+        page,
+        rows: PAGE_SIZE,
+      });
+      const orders = Array.isArray(rows) ? rows : [];
+      pagesFetched++;
+
+      if (orders.length > 0) {
+        const built = buildSalesOrderStatements(env, orders, { persistRawJson });
+        rowsUpserted += built.rowsUpserted;
+        itemsUpserted += built.itemsUpserted;
+        const CHUNK = 500;
+        for (let i = 0; i < built.stmts.length; i += CHUNK) {
+          await env.DB.batch(built.stmts.slice(i, i + CHUNK));
+        }
+      }
+
+      if (orders.length < PAGE_SIZE) break;   // last page of the window
+      if (page >= maxPages) { more = true; break; } // hit the cap; more remains
+      page++;
+    }
+  } catch (e) {
+    const durationMs = Date.now() - startMs;
+    await logRun(env, {
+      source, action: 'cin7-safetynet', pagesFetched, rowsUpserted, itemsUpserted,
+      watermarkBefore: sinceISO, watermarkAfter: sinceISO,
+      status: 'error', error: String(e?.message || e).slice(0, 500), durationMs,
+    });
+    throw e;
+  }
+
+  const durationMs = Date.now() - startMs;
+  await logRun(env, {
+    source, action: 'cin7-safetynet', pagesFetched, rowsUpserted, itemsUpserted,
+    watermarkBefore: sinceISO, watermarkAfter: sinceISO, status: 'ok', durationMs,
+  });
+
+  return {
+    ok: true,
+    source, action: 'cin7-safetynet',
+    sinceISO, untilISO, pagesFetched, rowsUpserted, itemsUpserted,
+    more, durationMs,
   };
 }

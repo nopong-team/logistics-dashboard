@@ -39,7 +39,7 @@
 import { Hono } from 'hono';
 import { redactSecrets } from './redact.js';
 import { runAmazonOrdersChunk, runAmazonReportsTick, spApiRequest, invalidateAmazonSalesCache } from './amazon.js';
-import { runCin7SalesOrdersChunk, runCin7CreditNotesChunk, runCin7BackfillLoop } from './cin7-sync.js';
+import { runCin7SalesOrdersChunk, runCin7CreditNotesChunk, runCin7BackfillLoop, runCin7SafetyNetBackfill } from './cin7-sync.js';
 
 export const adminRoutes = new Hono();
 
@@ -708,6 +708,102 @@ adminRoutes.post('/cin7-backfill', async (c) => {
       out.creditNotes = await runCin7BackfillLoop(c.env, runCin7CreditNotesChunk, opts);
     }
     return c.json(out);
+  } catch (e) {
+    return c.json({ error: redactSecrets(e?.message || String(e)) }, 500);
+  }
+});
+
+// GET /api/admin/cin7-catchup
+//
+// v2.2.50 — browser-clickable accelerator for the CIN7 sales-orders sync. A
+// plain GET (so it works from an SSO'd browser tab — no POST tooling needed):
+// just open the URL, and click/refresh again while it reports `moreAvailable`.
+// Runs the SAME cluster-aware chunk the cron uses, in a loop, advancing the
+// shared watermark — so progress is durable across clicks. Returns a plain-
+// English `message` + `nextStep` so a non-developer can tell when it's done.
+//
+// Credit notes are intentionally excluded (they're low volume and not behind);
+// this is the Amazon-critical sales path only. Auth: Cloudflare Access SSO.
+//
+// Optional: ?maxChunks=N (default = backfill-loop default).
+adminRoutes.get('/cin7-catchup', async (c) => {
+  if (!c.env.DB) {
+    return c.json({ error: 'D1 binding DB not configured' }, 500);
+  }
+  if (!(c.env.CIN7_USERNAME && c.env.CIN7_CONNECTION_KEY)) {
+    return c.json({ error: 'CIN7 not configured (CIN7_USERNAME / CIN7_CONNECTION_KEY)' }, 401);
+  }
+
+  const maxChunks = Number(c.req.query('maxChunks')) || undefined;
+
+  try {
+    const r = await runCin7BackfillLoop(c.env, runCin7SalesOrdersChunk, {
+      action: 'cin7-incremental',
+      maxChunks,
+    });
+    return c.json({
+      ok: true,
+      message:
+        `Synced +${r.totalRowsUpserted} orders / +${r.totalItemsUpserted} line items ` +
+        `over ${r.chunksRun} page(s) in ${(r.durationMs / 1000).toFixed(1)}s. ` +
+        `Watermark now at ${r.finalWatermark}.`,
+      nextStep: r.moreAvailable
+        ? 'More to sync — click/refresh this URL again to continue.'
+        : 'Caught up — done. No need to click again.',
+      moreAvailable: r.moreAvailable,
+      chunksRun: r.chunksRun,
+      rowsAdded: r.totalRowsUpserted,
+      itemsAdded: r.totalItemsUpserted,
+      finalWatermark: r.finalWatermark,
+      durationMs: r.durationMs,
+    });
+  } catch (e) {
+    return c.json({ error: redactSecrets(e?.message || String(e)) }, 500);
+  }
+});
+
+// GET /api/admin/cin7-safetynet?since=YYYY-MM-DD&until=YYYY-MM-DD
+//
+// v2.2.52 — browser-clickable trigger for the CreatedDate safety-net backfill.
+// Re-fetches SalesOrders by CreatedDate (sidesteps the ModifiedDate noise walls
+// the incremental sync grinds through) and INSERT OR REPLACEs them — used to
+// fill historical holes where whole days were never synced (e.g. early May).
+// Idempotent. Bound a sweep to a specific gap with ?since/&until so it finishes
+// in one call; omit them for the default last-60-days window.
+//
+// Auth: Cloudflare Access SSO. Optional: ?maxPages, ?wallClockBudgetMs.
+adminRoutes.get('/cin7-safetynet', async (c) => {
+  if (!c.env.DB) {
+    return c.json({ error: 'D1 binding DB not configured' }, 500);
+  }
+  if (!(c.env.CIN7_USERNAME && c.env.CIN7_CONNECTION_KEY)) {
+    return c.json({ error: 'CIN7 not configured (CIN7_USERNAME / CIN7_CONNECTION_KEY)' }, 401);
+  }
+
+  const since = c.req.query('since') || undefined;          // ISO date, e.g. 2026-05-01
+  const until = c.req.query('until') || undefined;          // exclusive upper bound
+  const maxPages = Number(c.req.query('maxPages')) || undefined;
+  const wallClockBudgetMs = Number(c.req.query('wallClockBudgetMs')) || undefined;
+
+  try {
+    const r = await runCin7SafetyNetBackfill(c.env, { since, until, maxPages, wallClockBudgetMs });
+    return c.json({
+      ok: true,
+      message:
+        `Re-synced ${r.rowsUpserted} orders / ${r.itemsUpserted} line items by CreatedDate ` +
+        `over ${r.pagesFetched} page(s) in ${(r.durationMs / 1000).toFixed(1)}s ` +
+        `(window: ${r.sinceISO}${r.untilISO ? ` → ${r.untilISO}` : ' → now'}).`,
+      nextStep: r.more
+        ? 'Window not fully covered (hit the page cap) — click/refresh again, or narrow the date range.'
+        : 'Window fully swept — done.',
+      windowComplete: !r.more,
+      pagesFetched: r.pagesFetched,
+      rowsUpserted: r.rowsUpserted,
+      itemsUpserted: r.itemsUpserted,
+      since: r.sinceISO,
+      until: r.untilISO,
+      durationMs: r.durationMs,
+    });
   } catch (e) {
     return c.json({ error: redactSecrets(e?.message || String(e)) }, 500);
   }
