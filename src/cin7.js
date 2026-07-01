@@ -89,8 +89,11 @@ const KV_INVENTORY_KEY = 'au:inventory:v1';
 // to CLOSED_PO_STATUSES — see the comment on the set below for the history.
 // au:pos:v5 (v2.2.67, 2026-07-02) — current_stock now INCLUDES Amazon FBA on
 // base SKUs (was warehouse-only). Adds stock_fba to the incomingBySku breakdown.
+// au:pos:v6 (v2.2.71, 2026-07-02) — incomingBySku rows gain empty_tins_soh /
+// empty_tins_incoming (unfilled T-AU-… tin stock) so the forecast can flag a
+// suggested finished PO that exceeds the empty tins available to fill it.
 // Future bumps: any time the response shape or filter logic changes.
-const KV_POS_KEY       = 'au:pos:v5';
+const KV_POS_KEY       = 'au:pos:v6';
 // Per-month sales: `au:sales:YYYY-MM:v4`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because
@@ -378,6 +381,35 @@ export async function fetchStockBySku(env) {
   return bySku;
 }
 
+// Empty (unfilled) tins live in CIN7 under a `T-` prefix on the finished SKU:
+//   T-AU-OG-NPO-35   → AU-OG-NPO-35     (scent-specific, 1:1 with the finished good)
+//   T-AU-B-MJ-BCF-35 → AU-B-MJ-BCF-35   (black tins keep the B-)
+// A finished-goods run can only be FILLED if we hold enough empty tins for that
+// scent, so the forecast surfaces empty-tin stock per base SKU as a supply
+// check on the suggested PO. Empty tins run their own ~4-month lead and their
+// own POs — the full tin-ordering plan lives in the (separate) AU Packaging
+// forecast; here we only show on-hand + incoming so a short finished PO is
+// visible. Excluded from the map:
+//   • T-L-AU-…      — lids (a separate component; strip "T-" → "L-AU-…" which is
+//                     not a finished SKU, so it never matches regardless)
+//   • T-AU-BLANK-…  — unlabelled blank-tin pool (not scent-specific)
+// Empty tins are never held at Amazon FBA, so the all-branches SOH is the
+// fillable pool. Returns Map<finishedSku, { soh, incoming }>.
+function buildEmptyTinsBySku(stockBySku) {
+  const out = new Map();
+  for (const [code, s] of stockBySku.entries()) {
+    if (!code.startsWith('T-AU-')) continue;   // empty tins for AU finished goods
+    const finished = code.slice(2);            // drop the leading "T-"
+    if (!/^AU-.*-(35|85)$/.test(finished)) continue;  // finished base tins only
+    if (/^AU-BLANK/.test(finished)) continue;         // unlabelled blank pool
+    const cur = out.get(finished) || { soh: 0, incoming: 0 };
+    cur.soh      += (s.soh || 0);
+    cur.incoming += (s.incoming || 0);
+    out.set(finished, cur);
+  }
+  return out;
+}
+
 // Products gives us category / status. We need this to filter the inventory
 // rows down to Finished Products + Bicarb Based + uncategorised (which is how
 // build_data.py does it). Returns Map<sku, { category, status }>.
@@ -527,14 +559,19 @@ async function buildAuInventoryPayload(env) {
   const stockBySku  = await fetchStockBySku(env);
   const productMeta = await fetchProductMeta(env);
   const inventory = buildInventory(stockBySku, productMeta);
+  // Empty-tin stock per finished base SKU (T-AU-… rows) — a fillability check
+  // for the forecast's suggested PO. Plain object so it survives KV JSON.
+  const emptyTins = Object.fromEntries(buildEmptyTinsBySku(stockBySku));
   return {
     inventory,
+    emptyTins,
     lastSync: new Date().toISOString(),
     source:   'cin7-live',
     counts: {
       stockSkus:    stockBySku.size,
       productSkus:  productMeta.size,
       inventoryRows: inventory.length,
+      emptyTinSkus:  Object.keys(emptyTins).length,
     },
   };
 }
@@ -1732,7 +1769,7 @@ function shapePoRows(rawPos) {
 // build_incoming_stock_by_sku() rule-for-rule, with one substantive change
 // per Melanie's pick: run rate is now a TRAILING 3-COMPLETE-MONTH average
 // instead of single-month-divided-by-30 (CA-style smoothing).
-function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
+function buildIncomingBySku(inventory, posRows, monthSalesPayloads, emptyTins = {}) {
   // monthSalesPayloads is an array (newest → oldest) of { skuSales, month }
   // objects from getMonthSales(). v2.2.20: each skuSales row's total_tins
   // now sums col + woo2 + dist + woo + amz — i.e. all five AU channels
@@ -1905,9 +1942,14 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
     else risk = 'stable';
 
     const nextPo = deriveNextPo(inc.pos);
+    // Empty-tin fillability: how many unfilled tins we hold for this scent (and
+    // how many are on order). A finished-goods PO can't be filled beyond this.
+    const et = emptyTins[sku] || { soh: 0, incoming: 0 };
     out.push({
       sku,
       current_stock:    Math.round(stock),
+      empty_tins_soh:      Math.round(et.soh || 0),      // unfilled tins on hand
+      empty_tins_incoming: Math.round(et.incoming || 0), // empty tins on order (~4mo lead)
       // v2.2.42: breakdown so the front-end can show a tooltip on the
       // Current stock cell — loose base-SKU tins vs cartons rolled up.
       stock_loose_tins:   Math.round(stockBreakdown.loose),   // singles in our warehouse
@@ -1952,6 +1994,7 @@ async function buildAuPosPayload(env) {
   //    not worth the complexity for one extra Stock+Products fetch.)
   const inventoryPayload = await buildAuInventoryPayload(env);
   const inventory = inventoryPayload.inventory || [];
+  const emptyTins = inventoryPayload.emptyTins || {};
 
   // 2. Trailing 3 complete calendar months for run rate. "Complete" means
   //    we exclude the current month (which is partial). E.g. on May 11,
@@ -1986,7 +2029,7 @@ async function buildAuPosPayload(env) {
   const pos = shapePoRows(openPos);
 
   // 4. Derive incoming-by-SKU
-  const incomingBySku = buildIncomingBySku(inventory, pos, monthPayloads);
+  const incomingBySku = buildIncomingBySku(inventory, pos, monthPayloads, emptyTins);
 
   return {
     pos,

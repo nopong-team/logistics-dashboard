@@ -1984,13 +1984,12 @@
       <span id="au-fc-yoy-note" style="font-size:12px;color:var(--text-light);"></span>
     </div>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;">
-      <span style="font-size:13px;color:var(--text-secondary);">Plan horizon:</span>
-      <select id="au-forecast-horizon" onchange="renderAuForecastTab()" style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
-        <option value="6">6 months</option>
-        <option value="12" selected>12 months</option>
-      </select>
-      <span style="font-size:13px;color:var(--text-secondary);margin-left:8px;" title="How far ahead you place a manufacturing PO. Order-by = cover minus this.">Order lead:</span>
+      <span style="font-size:13px;color:var(--text-secondary);" title="How far ahead you place a manufacturing PO. Order-by = cover minus this.">Order lead:</span>
       <input id="au-forecast-lead" type="number" value="2" min="0" max="12" step="0.5"
+        style="width:52px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;" onchange="renderAuForecastTab()">
+      <span style="font-size:13px;color:var(--text-secondary);">mo</span>
+      <span style="font-size:13px;color:var(--text-secondary);margin-left:8px;" title="Each suggested PO is sized so a run lasts at least this many months of demand (the smallest batch that clears it, capped at the largest). Slow scents land on the smallest run; fast scents hit the cap and reorder more often.">Min per run:</span>
+      <input id="au-forecast-run-months" type="number" value="2" min="0.5" max="12" step="0.5"
         style="width:52px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;" onchange="renderAuForecastTab()">
       <span style="font-size:13px;color:var(--text-secondary);">mo</span>
       <span style="font-size:13px;color:var(--text-secondary);margin-left:8px;">Monthly manufacturing budget: $</span>
@@ -2000,24 +1999,12 @@
       <span style="margin-left:auto;font-size:12px;color:var(--text-secondary);" id="au-fc-basis">Demand = trimmed average of live CIN7 tins</span>
     </div>
 
-    <div class="cards-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:8px;">
+    <div class="cards-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:12px;">
       <div class="card">
-        <div class="card-label">Scents to order now</div>
+        <div class="card-label">Products to order now</div>
         <div class="card-value" id="au-fc-crit" style="color:var(--red-text);">0</div>
-        <div class="card-sub">cover ≤ order lead</div>
+        <div class="card-sub">PO due this month (or overdue)</div>
       </div>
-      <div class="card">
-        <div class="card-label" id="au-fc-horizon-tins-label">Tins needed — next 12 mo</div>
-        <div class="card-value" id="au-fc-horizon-tins">0</div>
-        <div class="card-sub">all tins, at current demand</div>
-      </div>
-      <div class="card">
-        <div class="card-label" id="au-fc-horizon-pos-label">POs to place — next 12 mo</div>
-        <div class="card-value" id="au-fc-horizon-pos">0</div>
-        <div class="card-sub">across all scents</div>
-      </div>
-    </div>
-    <div class="cards-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:12px;">
       <div class="card">
         <div class="card-label">Manufacturing run-rate /mo</div>
         <div class="card-value" id="au-fc-runrate" style="font-size:22px;">$0</div>
@@ -2039,6 +2026,8 @@
     <div id="au-fc-surge" style="display:none;margin-bottom:12px;padding:12px 14px;border-radius:10px;background:#FCEFE0;border:1px solid #F3C98B;color:#92400E;font-size:13px;line-height:1.5;"></div>
     <!-- Easing-off / decline alert -->
     <div id="au-fc-decline" style="display:none;margin-bottom:12px;padding:12px 14px;border-radius:10px;background:#EAF1FD;border:1px solid #B8D0F0;color:#1D4ED8;font-size:13px;line-height:1.5;"></div>
+    <!-- Empty-tin shortage alert (suggested/entered PO exceeds empty tins on hand) -->
+    <div id="au-fc-tinshort" style="display:none;margin-bottom:12px;padding:12px 14px;border-radius:10px;background:#FCEFE0;border:1px solid #F3C98B;color:#92400E;font-size:13px;line-height:1.5;"></div>
 
     <!-- 35g section -->
     <div class="table-card">
@@ -2057,11 +2046,12 @@
             <th class="num right" title="Every sellable 35g tin = our-warehouse singles + Amazon FBA + cartons (×48) + SRTs, combined. Hover a value for the warehouse / FBA / carton split — the warehouse figure matches CIN7's base-SKU stock.">On hand</th>
             <th class="num right" title="Buffer stock held back = ⅓ month of demand.">Buffer<br><span style="font-weight:400;font-size:10px;">⅓ mo</span></th>
             <th class="num right" title="Tins already on open purchase orders (in transit + on order).">Incoming</th>
+            <th class="num right" title="Unfilled tins for this scent (CIN7 T-… stock). The cell shows on hand; '+N on order' is what's inbound — together they're the fill ceiling for a run. Amber ⚠ when a run exceeds even the tins on order (you must order more empties); blue ℹ when on-hand won't fill it but tins already on order will. ~4-month tin lead; order tins in the AU Packaging forecast.">Empty tins<br><span style="font-weight:400;font-size:10px;">on hand + on order</span></th>
             <th class="num right" title="Per-scent growth override. Blank = use the global growth above. Positive or negative.">Growth<br><span style="font-weight:400;font-size:10px;">± override</span></th>
             <th class="num right" title="Planning demand = the HIGHER of the smoothed baseline and the recent 3-month run-rate, adjusted for growth. Uses the higher so cover doesn't overstate when demand is climbing.">Demand<br><span style="font-weight:400;font-size:10px;">/mo (plan)</span></th>
             <th class="num right" title="The recent actual run-rate (median of the last 3 completed months) and its % change vs the smoothed baseline — the pluses and minuses. The forecast plans for the higher of this and the baseline.">3-mo actual<br><span style="font-weight:400;font-size:10px;">vs base</span></th>
             <th class="num right" title="Months of cover = (On hand − Buffer + Incoming) ÷ Demand.">Cover</th>
-            <th class="num right" title="Recommended run size, snapped to the manufacturing sequence (35g: 15k/30k/45k, 45k Original only). Shows the $ cost of that run beneath.">Suggested<br><span style="font-weight:400;font-size:10px;">PO ($)</span></th>
+            <th class="num right" title="Standard run size for this scent = the smallest batch (35g: 15k/30k/45k, 45k Original only) that lasts at least the 'min per run' months set above, capped at the largest batch. Slow scents land on the smallest run; fast scents hit the cap and reorder more often. $ cost of the run shown beneath. ⚠ appears if the run needs more empty tins than we hold.">Suggested<br><span style="font-weight:400;font-size:10px;">PO ($)</span></th>
             <th class="num right" title="How often you'd place this PO — a suggested run ÷ monthly demand. Hover for POs/year.">Order<br><span style="font-weight:400;font-size:10px;">every</span></th>
             <th class="num right" title="Month to place the next PO = cover minus the order lead. Each cell also shows the projected run-out month. 'Now' = already inside the lead window.">Order by</th>
             <th class="num right" style="background:var(--woo-bg);" title="Enter the quantity of tins you plan to order. Cover recalculates.">To order</th>
@@ -2084,18 +2074,19 @@
         <thead>
           <tr>
             <th class="sticky-col">Products</th>
-            <th class="num right">On hand</th>
-            <th class="num right">Buffer<br><span style="font-weight:400;font-size:10px;">⅓ mo</span></th>
-            <th class="num right">Incoming</th>
-            <th class="num right">Growth<br><span style="font-weight:400;font-size:10px;">± override</span></th>
-            <th class="num right">Demand<br><span style="font-weight:400;font-size:10px;">/mo (plan)</span></th>
-            <th class="num right">3-mo actual<br><span style="font-weight:400;font-size:10px;">vs base</span></th>
-            <th class="num right">Cover</th>
-            <th class="num right">Suggested<br><span style="font-weight:400;font-size:10px;">PO ($)</span></th>
-            <th class="num right">Order<br><span style="font-weight:400;font-size:10px;">every</span></th>
-            <th class="num right">Order by</th>
-            <th class="num right" style="background:var(--woo-bg);">To order</th>
-            <th>Status</th>
+            <th class="num right" title="Every sellable 85g tin = our-warehouse singles + Amazon FBA + cartons + SRTs, combined. Hover a value for the warehouse / FBA / carton split — the warehouse figure matches CIN7's base-SKU stock.">On hand</th>
+            <th class="num right" title="Buffer stock held back = ⅓ month of demand.">Buffer<br><span style="font-weight:400;font-size:10px;">⅓ mo</span></th>
+            <th class="num right" title="Tins already on open purchase orders (in transit + on order).">Incoming</th>
+            <th class="num right" title="Unfilled tins for this scent (CIN7 T-… stock). The cell shows on hand; '+N on order' is what's inbound — together they're the fill ceiling for a run. Amber ⚠ when a run exceeds even the tins on order (you must order more empties); blue ℹ when on-hand won't fill it but tins already on order will. ~4-month tin lead; order tins in the AU Packaging forecast.">Empty tins<br><span style="font-weight:400;font-size:10px;">on hand + on order</span></th>
+            <th class="num right" title="Per-scent growth override. Blank = use the global growth above. Positive or negative.">Growth<br><span style="font-weight:400;font-size:10px;">± override</span></th>
+            <th class="num right" title="Planning demand = the HIGHER of the smoothed baseline and the recent 3-month run-rate, adjusted for growth. Uses the higher so cover doesn't overstate when demand is climbing.">Demand<br><span style="font-weight:400;font-size:10px;">/mo (plan)</span></th>
+            <th class="num right" title="The recent actual run-rate (median of the last 3 completed months) and its % change vs the smoothed baseline — the pluses and minuses. The forecast plans for the higher of this and the baseline.">3-mo actual<br><span style="font-weight:400;font-size:10px;">vs base</span></th>
+            <th class="num right" title="Months of cover = (On hand − Buffer + Incoming) ÷ Demand.">Cover</th>
+            <th class="num right" title="Standard run size for this scent = the smallest batch (85g: 5k/10k/15k) that lasts at least the 'min per run' months set above, capped at the largest batch. Slow scents land on the smallest run; fast scents hit the cap and reorder more often. $ cost of the run shown beneath. ⚠ appears if the run needs more empty tins than we hold.">Suggested<br><span style="font-weight:400;font-size:10px;">PO ($)</span></th>
+            <th class="num right" title="How often you'd place this PO — a suggested run ÷ monthly demand. Hover for POs/year.">Order<br><span style="font-weight:400;font-size:10px;">every</span></th>
+            <th class="num right" title="Month to place the next PO = cover minus the order lead. Each cell also shows the projected run-out month. 'Now' = already inside the lead window.">Order by</th>
+            <th class="num right" style="background:var(--woo-bg);" title="Enter the quantity of tins you plan to order. Cover recalculates.">To order</th>
+            <th title="Red = below buffer / under 2 months cover, Amber = 2–4 months, Green = 4+ months.">Status</th>
           </tr>
         </thead>
         <tbody id="au-fc-85-tbody"></tbody>
@@ -2519,9 +2510,30 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.70</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.73</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.73 &mdash; 2 July 2026 (🥫 AU Forecasting &mdash; empty tins ON ORDER now count toward the fill ceiling)</h4>
+    <ul>
+      <li><strong>Tins on order are now kept in mind for upcoming POs.</strong> The fill ceiling for a run is now <strong>empties on hand + empties already on order</strong> (not just on hand). Two states now: a run is only flagged <strong>⚠ short</strong> if it can&rsquo;t be filled <em>even counting the tins on order</em> (that&rsquo;s when you genuinely need to order more empties); if on-hand alone won&rsquo;t fill it but tins already on order will, it shows a softer blue <strong>ℹ &ldquo;tins on order cover this&rdquo;</strong> note instead &mdash; no new tin order needed, just mind the ~4-month lead vs when you fill. The Empty-tins column header now reads &ldquo;on hand + on order&rdquo;, and the shortage banner only lists products short <em>after</em> counting inbound tins.</li>
+    </ul>
+
+    <h4>v2.2.72 &mdash; 2 July 2026 (🧹 AU Forecasting &mdash; 85g parity, top-card cleanup, tin-info fixes)</h4>
+    <ul>
+      <li><strong>85g section brought to full parity with 35g.</strong> The 85g table shares the exact same engine as 35g (one <code>rowHtml</code> / <code>auSuggestPO</code>) &mdash; but its column headers had lost all their hover explanations, so it looked like it wasn&rsquo;t using the new logic. Restored every tooltip (Empty tins, the re-thought Suggested-PO sizing for the 85g 5k/10k/15k runs, etc.). No behaviour change &mdash; 85g always ran the same maths.</li>
+      <li><strong>Top cards cleaned up.</strong> &ldquo;Scents to order now&rdquo; &rarr; <strong>&ldquo;Products to order now&rdquo;</strong>, and it now counts the products whose PO must actually be <strong>placed this month</strong> (order-by date overdue or in the current calendar month) instead of a vague &ldquo;cover ≤ lead&rdquo; number. Removed the two meaningless headline cards (&ldquo;Tins needed &mdash; next 12 mo&rdquo; and &ldquo;POs to place &mdash; next 12 mo&rdquo;) and the now-unused Plan-horizon control. &ldquo;Scent&rdquo; &rarr; &ldquo;product&rdquo; wording throughout the cards + banners.</li>
+      <li><strong>Suggested-PO hover no longer mentions Health Focus.</strong> Dropped the &ldquo;no Health Focus PO cost on file&rdquo; note (cost is moving to CIN7 <code>Cost AUD</code> &mdash; next up).</li>
+    </ul>
+
+    <h4>v2.2.71 &mdash; 2 July 2026 (🥫 AU Forecasting &mdash; empty-tin fill ceiling + re-thought Suggested PO)</h4>
+    <ul>
+      <li><strong>Empty tins now feed the forecast.</strong> New <strong>Empty tins</strong> column shows the unfilled tins we hold for each scent (CIN7 <code>T-AU-…</code> stock, pulled live), plus any empties on order. It&rsquo;s the ceiling on how many finished tins a run can fill right now &mdash; you can&rsquo;t manufacture more than you have empties for. When a suggested (or entered) run exceeds the empties on hand, the row goes amber with a <strong>&ldquo;⚠ short N tins&rdquo;</strong> flag and a banner lists the affected scents. Warn-only: the finished PO stays as-is, but you&rsquo;re told to order the empty tins first (~4-month lead) &mdash; full tin ordering will live in the AU Packaging forecast.</li>
+      <li><strong>Suggested PO re-thought as a standard run size.</strong> It used to be a &ldquo;top up to ~8 months, capped at one batch&rdquo; number that jittered with stock and silently under-sized the fast movers. It&rsquo;s now the <strong>smallest run that lasts at least the &ldquo;Min per run&rdquo; months</strong> (new control, default 2), capped at the largest batch. Slow scents land on the smallest run (which naturally lasts many months); fast/carton lines (OG) hit the cap and are simply reordered more often. Cadence (&ldquo;lasts ~X mo&rdquo;) sits beside it, and <em>when</em> to order stays on the Order-by date.</li>
+      <li><strong>CSV export</strong> gains Empty tins, Empty tins on order, and Tin shortfall columns.</li>
+      <li><strong>Backend:</strong> <code>incomingBySku</code> rows now carry <code>empty_tins_soh</code> / <code>empty_tins_incoming</code> (POs cache bumped <code>au:pos:v5&rarr;v6</code>).</li>
+      <li><strong>NA dashboard untouched.</strong> NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.70 &mdash; 2 July 2026 (🗓️ AU Forecasting &mdash; order-date emphasis + fixed red/amber colours)</h4>
     <ul>
       <li><strong>Order-by dates now emphasise only what&rsquo;s actionable this cycle.</strong> Ordering is done monthly, so only <strong>overdue</strong> dates (red bold) and dates in the <strong>current calendar month</strong> (amber bold) stand out; any future-month date is now plain. Previously everything within ~2 months was bold, which over-emphasised dates a later monthly run will catch.</li>
@@ -7328,20 +7340,34 @@ function auLeadMonths() { return parseFloat(document.getElementById('au-forecast
 //  • 35g: 15k minimum, in 15k steps (15k / 30k / 45k). 45k is Original-only.
 //  • 85g: 5k / 10k standard (15k possible but rarely run).
 const AU_PO_BATCHES = { '35': [15000, 30000, 45000], '85': [5000, 10000, 15000] };
-const AU_PO_TARGET_RUNWAY_MONTHS = 6;         // aim each PO to add ~6 months on top of lead time
+const AU_PO_MIN_MONTHS_PER_RUN_DEFAULT = 2;   // each PO should last at least this long (editable)
 const AU_MFG_MONTHLY_BUDGET_DEFAULT = 300000; // AUD/month manufacturing spend target (cash-flow guardrail)
 
-// Suggest the run size (snapped to the sequence) that covers the lead time plus
-// ~6 months of runway beyond what's already on hand + on order.
-function auSuggestPO(d, lead) {
+function auMinMonthsPerRun() {
+  return parseFloat(document.getElementById('au-forecast-run-months')?.value) || AU_PO_MIN_MONTHS_PER_RUN_DEFAULT;
+}
+
+// Standard run size for a scent = the SMALLEST batch that lasts at least
+// `minMonths` of demand, capped at the largest allowed batch. This is a property
+// of the scent's DEMAND, not its current stock level — the run size is stable,
+// and "when to order" is answered separately by the Order-by date (cover − lead).
+//
+// The behaviour Melanie wants falls straight out of it:
+//   • Slow movers  → land on the smallest run (15k / 5k), which naturally lasts
+//                    many months. Kept small; reordered rarely.
+//   • Mid movers   → the batch that lands around the 2–3 month mark.
+//   • Fast movers / carton lines (OG) → even the largest run lasts < minMonths,
+//                    so it hits the cap and is simply reordered more often.
+// Cadence ("lasts ~X mo") = suggestedPO ÷ demand, shown next to it.
+function auSuggestPO(d) {
   if (d.demand <= 0) return null;
   const seq = AU_PO_BATCHES[d.size] || [];
   if (!seq.length) return null;
   const allowed = seq.filter(b => b < 45000 || d.sku === 'AU-OG-NPO-35');
-  const need = Math.max(0, d.demand * (lead + AU_PO_TARGET_RUNWAY_MONTHS) - (d.netAvail + d.incoming));
-  if (need <= 0) return null;
-  for (const b of allowed) if (b >= need) return b;
-  return allowed[allowed.length - 1];  // cap at the largest run
+  if (!allowed.length) return null;
+  const minMonths = auMinMonthsPerRun();
+  for (const b of allowed) if (b / d.demand >= minMonths) return b;
+  return allowed[allowed.length - 1];  // even the largest run lasts < minMonths → cap, reorder often
 }
 
 // Most-recent per-tin manufacturing cost per base SKU, from the Health Focus
@@ -7536,9 +7562,29 @@ function getAuForecastData() {
 
     const toOrder = forecastAuOrders[sku] || 0;
     const unitCost = unitCosts[sku] || 0;
-    const suggestedPO = auSuggestPO({ sku, size, demand, netAvail, incoming }, lead);
+    const suggestedPO = auSuggestPO({ sku, size, demand });
     // Cadence: how many months one suggested run lasts (how often to reorder).
     const cadenceMonths = (suggestedPO && demand > 0) ? suggestedPO / demand : null;
+
+    // Empty-tin fillability. Backend supplies empty_tins_soh/_incoming per base
+    // SKU (unfilled T-AU-… tins, on hand + on order). A finished-goods run can
+    // only be filled from empty tins — so the fill ceiling for an UPCOMING run is
+    // empties on hand PLUS empties already on order (they land on their own
+    // ~4-month lead). Two states:
+    //   • tinShort           — even counting empties on order we can't fill the
+    //                          run → you must order MORE empty tins (shortfall).
+    //   • tinCoveredIncoming — on-hand alone won't fill it, but empties already
+    //                          on order will (no new tin order needed; mind the
+    //                          ~4-month lead vs when you need to fill).
+    // Undefined = stale cache without the field → treat as unknown, don't warn.
+    const hasTinData = inc && inc.empty_tins_soh !== undefined;
+    const emptyTins = hasTinData ? (inc.empty_tins_soh || 0) : null;
+    const emptyTinsIncoming = hasTinData ? (inc.empty_tins_incoming || 0) : null;
+    const tinCeiling = hasTinData ? (emptyTins + emptyTinsIncoming) : null;  // on hand + on order
+    const planQty = toOrder > 0 ? toOrder : (suggestedPO || 0);
+    const tinShort = hasTinData && planQty > 0 && planQty > tinCeiling;
+    const tinShortfall = tinShort ? planQty - tinCeiling : 0;              // more empties to order
+    const tinCoveredIncoming = hasTinData && planQty > 0 && planQty > emptyTins && planQty <= tinCeiling;
     const monthlySpend = demand * unitCost;        // steady replacement cost / month
     const suggestedPOCost = suggestedPO ? suggestedPO * unitCost : 0;
     const orderCost = toOrder * unitCost;
@@ -7562,6 +7608,7 @@ function getAuForecastData() {
       cover, coverStockOnly, orderByMonths, yoyPct, lead,
       monthsUsed: window6.length, toOrder,
       unitCost, suggestedPO, cadenceMonths, monthlySpend, suggestedPOCost, orderCost,
+      emptyTins, emptyTinsIncoming, tinCeiling, tinShort, tinShortfall, tinCoveredIncoming,
     });
   });
 
@@ -7640,8 +7687,25 @@ function renderAuForecastTab() {
   const suggestedPOCell = (d) => {
     if (!d.suggestedPO) return '<span style="color:var(--text-light);">—</span>';
     const cost = d.suggestedPOCost > 0 ? `<br><span style="color:var(--text-secondary);font-size:11px;">${fmtAud(d.suggestedPOCost)}</span>` : '';
-    const runLbl = d.suggestedPO >= 1000 ? `${(d.suggestedPO / 1000).toFixed(0)}k run` : '';
-    return `<span title="${runLbl}${d.unitCost > 0 ? ` · ${fmtAud(d.unitCost)}/tin (Health Focus PO)` : ' · no Health Focus PO cost on file'}" style="cursor:help;">${fmtAuNum(d.suggestedPO)}</span>${cost}`;
+    const runLbl = d.suggestedPO >= 1000 ? `${(d.suggestedPO / 1000).toFixed(0)}k run` : 'suggested run';
+    // Fillability flag. Hard short = even empties on order can't fill it → order
+    // more tins. Covered-by-incoming = on-hand won't fill it but on-order will.
+    const warn = d.tinShort
+      ? `<div style="font-size:10px;color:var(--amber-text);font-weight:600;" title="Fill ceiling ${fmtAuNum(d.tinCeiling)} (=${fmtAuNum(d.emptyTins)} on hand + ${fmtAuNum(d.emptyTinsIncoming)} on order) is below this run — ${fmtAuNum(d.tinShortfall)} more empty tins needed. Order them via the Packaging forecast (~4-month lead) first.">⚠ short ${fmtAuNum(d.tinShortfall)} tins</div>`
+      : d.tinCoveredIncoming
+      ? `<div style="font-size:10px;color:#1D4ED8;" title="Only ${fmtAuNum(d.emptyTins)} empty tins on hand, but ${fmtAuNum(d.emptyTinsIncoming)} more are on order — enough to fill this run once they land (~4-month lead). No new tin order needed; just mind the timing vs when you fill.">ℹ tins on order cover this</div>`
+      : '';
+    return `<span title="${runLbl}${d.unitCost > 0 ? ` · ${fmtAud(d.unitCost)}/tin` : ''}" style="cursor:help;">${fmtAuNum(d.suggestedPO)}</span>${cost}${warn}`;
+  };
+  const emptyTinCell = (d) => {
+    if (d.emptyTins === null) return '<span style="color:var(--text-light);" title="Empty-tin stock not in this data yet — reload once the live CIN7 feed refreshes.">—</span>';
+    const onOrder = d.emptyTinsIncoming > 0
+      ? `<div style="font-size:10px;color:${d.tinCoveredIncoming ? '#1D4ED8' : 'var(--text-light)'};">+${fmtAuNum(d.emptyTinsIncoming)} on order</div>` : '';
+    const col = d.tinShort ? 'color:var(--amber-text);font-weight:600;' : '';
+    const title = `Unfilled ${d.size}g tins for this scent (CIN7 T-${d.sku}): ${fmtAuNum(d.emptyTins)} on hand`
+      + (d.emptyTinsIncoming > 0 ? ` + ${fmtAuNum(d.emptyTinsIncoming)} on order (~4-month lead) = ${fmtAuNum(d.tinCeiling)} fill ceiling` : ' fill ceiling')
+      + `. A finished run can only be filled up to this. Full tin ordering lives in the AU Packaging forecast.`;
+    return `<span title="${title}" style="cursor:help;${col}">${fmtAuNum(d.emptyTins)}</span>${onOrder}`;
   };
   const cadenceCell = (d) => {
     if (!d.cadenceMonths) return '<span style="color:var(--text-light);">—</span>';
@@ -7678,6 +7742,7 @@ function renderAuForecastTab() {
       <td class="num right" title="${sohTitle(d)}" style="cursor:help;">${fmtAuNum(d.soh)}${(d.sohFba > 0 || d.sohCartonCount > 0) ? `<div style="font-size:10px;color:var(--text-light);">${fmtAuNum(d.sohWhse)} whse${d.sohFba > 0 ? ` · ${fmtAuNum(d.sohFba)} FBA` : ''}${d.sohCartonCount > 0 ? ` · ${fmtAuNum(d.sohCartonCount)} ctn` : ''}</div>` : ''}</td>
       <td class="num right" style="color:var(--text-secondary);">${d.buffer > 0 ? fmtAuNum(d.buffer) : '—'}</td>
       <td class="num right">${d.incoming > 0 ? fmtAuNum(d.incoming) : '<span style="color:var(--text-light);">—</span>'}</td>
+      <td class="num right">${emptyTinCell(d)}</td>
       <td class="num right"><input type="number" step="1" placeholder="—" value="${ov}"
           style="width:56px;padding:3px 5px;border:1px solid var(--border);border-radius:4px;font-size:13px;text-align:center;"
           title="Per-scent growth override (%). Blank uses the global growth."
@@ -7697,39 +7762,37 @@ function renderAuForecastTab() {
 
   const g35 = data.filter(d => d.size === '35');
   const g85 = data.filter(d => d.size === '85');
-  const empty = '<tr><td colspan="13" style="text-align:center;padding:20px;color:var(--text-secondary);">No sales or stock data loaded yet — give the live CIN7 feed a moment.</td></tr>';
+  const empty = '<tr><td colspan="14" style="text-align:center;padding:20px;color:var(--text-secondary);">No sales or stock data loaded yet — give the live CIN7 feed a moment.</td></tr>';
   const b35 = document.getElementById('au-fc-35-tbody');
   const b85 = document.getElementById('au-fc-85-tbody');
   if (b35) b35.innerHTML = g35.length ? g35.map(rowHtml).join('') : empty;
   if (b85) b85.innerHTML = g85.length ? g85.map(rowHtml).join('') : empty;
 
-  // ── Horizon + cash-flow roll-ups ──
-  const H = parseInt(document.getElementById('au-forecast-horizon')?.value || 12) || 12;
+  // ── Cash-flow roll-ups ──
   const budget = parseFloat(document.getElementById('au-forecast-budget')?.value || AU_MFG_MONTHLY_BUDGET_DEFAULT) || AU_MFG_MONTHLY_BUDGET_DEFAULT;
-  let horizonTins = 0, horizonPOs = 0, runRate = 0, suggTotal = 0, orderTins = 0, orderCost = 0, missingCost = 0;
+  let runRate = 0, suggTotal = 0, orderTins = 0, orderCost = 0, missingCost = 0;
   data.forEach(d => {
-    if (d.demand > 0) {
-      horizonTins += d.demand * H;
-      if (d.suggestedPO) horizonPOs += Math.max(1, Math.round((d.demand * H) / d.suggestedPO));
-    }
     runRate += d.monthlySpend;
     if (d.suggestedPO) suggTotal += d.suggestedPOCost;
     orderTins += d.toOrder;
     orderCost += d.orderCost;
     if ((d.demand > 0 || d.toOrder > 0) && d.unitCost <= 0) missingCost++;
   });
-  const crit = data.filter(d => d.demand > 0 && d.cover <= d.lead).length;
+  // Products whose PO must be placed in THIS monthly cycle: the order-by date is
+  // overdue or lands in the current calendar month (matches the Order-by column).
+  const dueThisCycle = data.filter(d => {
+    if (d.demand <= 0 || d.orderByMonths === null) return false;
+    if (d.orderByMonths <= 0) return true;                       // overdue
+    const by = dateFromNow(d.orderByMonths);
+    return by.getFullYear() === nowDate.getFullYear() && by.getMonth() === nowDate.getMonth();
+  }).length;
   const nOrdered = data.filter(d => d.toOrder > 0).length;
   const maxMonths = data.reduce((m, d) => Math.max(m, d.monthsUsed), 0);
 
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
   const setColored = (id, v, over) => { const el = document.getElementById(id); if (el) { el.textContent = v; el.style.color = over ? 'var(--red-text)' : 'var(--green-text)'; } };
 
-  set('au-fc-crit', crit);
-  set('au-fc-horizon-tins-label', `Tins needed — next ${H} mo`);
-  set('au-fc-horizon-tins', fmtAuNum(horizonTins));
-  set('au-fc-horizon-pos-label', `POs to place — next ${H} mo`);
-  set('au-fc-horizon-pos', horizonPOs);
+  set('au-fc-crit', dueThisCycle);
   set('au-fc-runrate', fmtAud(runRate));
   setColored('au-fc-runrate', fmtAud(runRate), runRate > budget);
   set('au-fc-runrate-sub', `steady replacement · vs ${fmtAud(budget)}/mo target`);
@@ -7737,7 +7800,7 @@ function renderAuForecastTab() {
   set('au-fc-sugg-total-sub', suggTotal > budget ? 'over target — stagger across months' : 'to top everything up now');
   set('au-fc-order', fmtAuNum(orderTins));
   setColored('au-fc-order-cost', fmtAud(orderCost), orderCost > budget);
-  set('au-fc-order-sub', nOrdered ? `${nOrdered} scent${nOrdered !== 1 ? 's' : ''} · vs ${fmtAud(budget)} target` : 'enter quantities below');
+  set('au-fc-order-sub', nOrdered ? `${nOrdered} product${nOrdered !== 1 ? 's' : ''} · vs ${fmtAud(budget)} target` : 'enter quantities below');
   set('au-fc-basis', `Demand = trimmed avg of last ${maxMonths || 0} live CIN7 month${maxMonths !== 1 ? 's' : ''}${missingCost ? ` · ${missingCost} missing PO cost` : ''}`);
 
   // Ramp-up alert banner — lists surging products not yet reflected in growth.
@@ -7770,6 +7833,23 @@ function renderAuForecastTab() {
     }
   }
 
+  // Empty-tin shortage — runs that exceed the fill ceiling (empties on hand PLUS
+  // empties already on order). These genuinely need MORE tins ordered. Runs that
+  // on-hand can't fill but on-order will are NOT listed here (they show an inline
+  // "ℹ tins on order cover this" note instead — no new tin order needed).
+  const tinShortEl = document.getElementById('au-fc-tinshort');
+  if (tinShortEl) {
+    const shorts = data.filter(d => d.tinShort).sort((a, b) => b.tinShortfall - a.tinShortfall);
+    if (shorts.length) {
+      const items = shorts.map(d => `<strong>${d.name || d.sku}</strong> (order ${fmtAuNum(d.tinShortfall)} more)`).join(' &nbsp;·&nbsp; ');
+      tinShortEl.innerHTML = `<strong>⚠ Empty tins short —</strong> ${shorts.length} product${shorts.length !== 1 ? 's have' : ' has'} a run bigger than the empty tins available (on hand + already on order): ${items}. `
+        + `Even counting the empties on order, there aren't enough to fill these runs — order more empty tins (they run a ~4-month lead) in the AU Packaging forecast, then place the finished-goods run.`;
+      tinShortEl.style.display = 'block';
+    } else {
+      tinShortEl.style.display = 'none';
+    }
+  }
+
   renderAuForecastCartons();
 }
 
@@ -7788,11 +7868,12 @@ function renderAuForecastCartons() {
 
 function downloadAuForecastCSV() {
   const data = getAuForecastData();
-  const out = [['SKU', 'Product', 'Size', 'On hand', 'Buffer', 'Incoming', 'Growth %', 'Demand/mo', 'Cover (mo)',
-    'Suggested PO', 'Unit cost', 'PO cost', 'Order every (mo)', 'Order by (mo)', 'To order', 'Order cost']];
-  data.forEach(d => out.push([d.sku, d.name, d.size + 'g', d.soh, d.buffer, d.incoming, d.growthPct,
+  const out = [['SKU', 'Product', 'Size', 'On hand', 'Buffer', 'Incoming', 'Empty tins', 'Empty tins on order', 'Growth %', 'Demand/mo', 'Cover (mo)',
+    'Suggested PO', 'Tin shortfall', 'Unit cost', 'PO cost', 'Order every (mo)', 'Order by (mo)', 'To order', 'Order cost']];
+  data.forEach(d => out.push([d.sku, d.name, d.size + 'g', d.soh, d.buffer, d.incoming,
+    (d.emptyTins === null ? '' : d.emptyTins), (d.emptyTinsIncoming === null ? '' : d.emptyTinsIncoming), d.growthPct,
     d.demand, (d.cover >= 999 ? '' : d.cover.toFixed(1)),
-    (d.suggestedPO || ''), (d.unitCost || ''), (d.suggestedPOCost || ''),
+    (d.suggestedPO || ''), (d.tinShortfall || ''), (d.unitCost || ''), (d.suggestedPOCost || ''),
     (d.cadenceMonths ? d.cadenceMonths.toFixed(1) : ''), (d.orderByMonths === null ? '' : d.orderByMonths.toFixed(1)),
     d.toOrder, (d.orderCost || '')]));
   const csv = out.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
