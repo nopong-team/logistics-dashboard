@@ -2003,7 +2003,7 @@
     <div class="cards-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:8px;">
       <div class="card">
         <div class="card-label">Scents to order now</div>
-        <div class="card-value" id="au-fc-crit" style="color:var(--danger);">0</div>
+        <div class="card-value" id="au-fc-crit" style="color:var(--red-text);">0</div>
         <div class="card-sub">cover ≤ order lead</div>
       </div>
       <div class="card">
@@ -2064,7 +2064,7 @@
             <th class="num right" title="Recommended run size, snapped to the manufacturing sequence (35g: 15k/30k/45k, 45k Original only). Shows the $ cost of that run beneath.">Suggested<br><span style="font-weight:400;font-size:10px;">PO ($)</span></th>
             <th class="num right" title="How often you'd place this PO — a suggested run ÷ monthly demand. Hover for POs/year.">Order<br><span style="font-weight:400;font-size:10px;">every</span></th>
             <th class="num right" title="Month to place the next PO = cover minus the order lead. Each cell also shows the projected run-out month. 'Now' = already inside the lead window.">Order by</th>
-            <th class="num right" style="background:var(--pink-bg);" title="Enter the quantity of tins you plan to order. Cover recalculates.">To order</th>
+            <th class="num right" style="background:var(--woo-bg);" title="Enter the quantity of tins you plan to order. Cover recalculates.">To order</th>
             <th title="Red = below buffer / under 2 months cover, Amber = 2–4 months, Green = 4+ months.">Status</th>
           </tr>
         </thead>
@@ -2094,7 +2094,7 @@
             <th class="num right">Suggested<br><span style="font-weight:400;font-size:10px;">PO ($)</span></th>
             <th class="num right">Order<br><span style="font-weight:400;font-size:10px;">every</span></th>
             <th class="num right">Order by</th>
-            <th class="num right" style="background:var(--pink-bg);">To order</th>
+            <th class="num right" style="background:var(--woo-bg);">To order</th>
             <th>Status</th>
           </tr>
         </thead>
@@ -2519,9 +2519,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.69</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.70</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.70 &mdash; 2 July 2026 (🗓️ AU Forecasting &mdash; order-date emphasis + fixed red/amber colours)</h4>
+    <ul>
+      <li><strong>Order-by dates now emphasise only what&rsquo;s actionable this cycle.</strong> Ordering is done monthly, so only <strong>overdue</strong> dates (red bold) and dates in the <strong>current calendar month</strong> (amber bold) stand out; any future-month date is now plain. Previously everything within ~2 months was bold, which over-emphasised dates a later monthly run will catch.</li>
+      <li><strong>Fixed the red/amber colour coding.</strong> The forecast referenced CSS variables that don&rsquo;t exist in this dashboard (<code>--danger</code>, <code>--amber</code>, <code>--pink-bg</code>), so Cover, Order-by and the spend cards were silently rendering near-black instead of red/amber, and the &ldquo;To order&rdquo; column lost its pink tint. Now uses the real tokens (<code>--red-text</code>, <code>--amber-text</code>, <code>--woo-bg</code>).</li>
+      <li><strong>NA dashboard untouched.</strong> NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.69 &mdash; 2 July 2026 (🔍 AU Forecasting &mdash; baseline behind the 3-mo %, + easing-off alert)</h4>
     <ul>
       <li><strong>The &ldquo;3-mo actual&rdquo; % now shows what it&rsquo;s measured against.</strong> The ▲/▼ % compares the recent 3-month rate to the smoothed baseline &mdash; but for a climbing product the recent rate equals the plan Demand, so the two columns showed the same number with a % that looked like it compared a value to itself. The cell now shows <strong>&ldquo;vs base X · ▲/▼ %&rdquo;</strong> beneath the 3-mo figure, so the % always has a visible reference. (Numbers were correct all along; this is a display fix.)</li>
@@ -7604,8 +7611,8 @@ function renderAuForecastTab() {
   // Urgency = WHEN you must place the PO (orderByMonths = cover − lead):
   //   date already passed → red   within ~2 months → amber   else OK.
   const coverColor = (m) => m >= 999 ? 'color:var(--text-light);'
-    : m <= lead ? 'color:var(--danger);font-weight:700;'
-    : m <= lead + 2 ? 'color:var(--amber);font-weight:600;' : 'color:var(--green-text);';
+    : m <= lead ? 'color:var(--red-text);font-weight:700;'
+    : m <= lead + 2 ? 'color:var(--amber-text);font-weight:600;' : 'color:var(--green-text);';
   const statusBadge = (d) => {
     if (d.demand <= 0) return '<span class="badge">No demand</span>';
     const ob = d.orderByMonths;
@@ -7614,16 +7621,21 @@ function renderAuForecastTab() {
     if (ob <= 2) return '<span class="badge warn">Order soon</span>';
     return '<span class="badge ok">OK</span>';
   };
+  const nowDate = new Date();
   const orderByCell = (d) => {
     if (d.demand <= 0 || d.orderByMonths === null) return '<span style="color:var(--text-light);">—</span>';
-    const byDate  = fmtDate(dateFromNow(d.orderByMonths));   // latest order date = run-out − lead
+    const byObj   = dateFromNow(d.orderByMonths);            // latest order date = run-out − lead
+    const byDate  = fmtDate(byObj);
     const outDate = fmtDate(dateFromNow(d.cover));           // projected run-out (hits buffer)
     const sub = `<br><span style="font-size:11px;color:var(--text-secondary);">runs out ~${outDate}</span>`;
-    // Red only once that date has actually passed; amber if within ~2 months.
-    const col = d.orderByMonths <= 0 ? 'color:var(--danger);font-weight:700;'
-      : d.orderByMonths <= 2 ? 'color:var(--amber);font-weight:600;' : '';
-    const overdue = d.orderByMonths <= 0 ? ' (overdue)' : '';
-    return `<span style="${col}cursor:help;" title="Latest date to place the PO = projected run-out (~${outDate}) − ${d.lead}-month lead.">${byDate}${overdue}</span>${sub}`;
+    // Emphasise ONLY what needs ordering in this monthly cycle: overdue (red bold)
+    // or an order date that falls in the current calendar month (amber bold).
+    // Future months are caught in a later monthly run → plain, no emphasis.
+    const overdue   = d.orderByMonths <= 0;
+    const thisMonth = byObj.getFullYear() === nowDate.getFullYear() && byObj.getMonth() === nowDate.getMonth();
+    const col = overdue ? 'color:var(--red-text);font-weight:700;'
+      : thisMonth ? 'color:var(--amber-text);font-weight:600;' : '';
+    return `<span style="${col}cursor:help;" title="Latest date to place the PO = projected run-out (~${outDate}) − ${d.lead}-month lead.">${byDate}${overdue ? ' (overdue)' : ''}</span>${sub}`;
   };
   const suggestedPOCell = (d) => {
     if (!d.suggestedPO) return '<span style="color:var(--text-light);">—</span>';
@@ -7676,7 +7688,7 @@ function renderAuForecastTab() {
       <td class="num right">${suggestedPOCell(d)}</td>
       <td class="num right" style="color:var(--text-secondary);">${cadenceCell(d)}</td>
       <td class="num right">${orderByCell(d)}</td>
-      <td class="num right" style="background:var(--pink-bg);"><input type="number" min="0" step="500" value="${d.toOrder > 0 ? d.toOrder : ''}"
+      <td class="num right" style="background:var(--woo-bg);"><input type="number" min="0" step="500" value="${d.toOrder > 0 ? d.toOrder : ''}"
           style="width:78px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px;text-align:center;"
           onchange="forecastAuOrders['${d.sku}']=parseInt(this.value)||0;renderAuForecastTab();"></td>
       <td>${statusBadge(d)}</td>
@@ -7711,7 +7723,7 @@ function renderAuForecastTab() {
   const maxMonths = data.reduce((m, d) => Math.max(m, d.monthsUsed), 0);
 
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  const setColored = (id, v, over) => { const el = document.getElementById(id); if (el) { el.textContent = v; el.style.color = over ? 'var(--danger)' : 'var(--green-text)'; } };
+  const setColored = (id, v, over) => { const el = document.getElementById(id); if (el) { el.textContent = v; el.style.color = over ? 'var(--red-text)' : 'var(--green-text)'; } };
 
   set('au-fc-crit', crit);
   set('au-fc-horizon-tins-label', `Tins needed — next ${H} mo`);
