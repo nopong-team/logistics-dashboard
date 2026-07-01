@@ -2037,6 +2037,8 @@
 
     <!-- Ramp-up / surge alert (populated by renderAuForecastTab) -->
     <div id="au-fc-surge" style="display:none;margin-bottom:12px;padding:12px 14px;border-radius:10px;background:#FCEFE0;border:1px solid #F3C98B;color:#92400E;font-size:13px;line-height:1.5;"></div>
+    <!-- Easing-off / decline alert -->
+    <div id="au-fc-decline" style="display:none;margin-bottom:12px;padding:12px 14px;border-radius:10px;background:#EAF1FD;border:1px solid #B8D0F0;color:#1D4ED8;font-size:13px;line-height:1.5;"></div>
 
     <!-- 35g section -->
     <div class="table-card">
@@ -2517,9 +2519,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.68</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.69</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.69 &mdash; 2 July 2026 (🔍 AU Forecasting &mdash; baseline behind the 3-mo %, + easing-off alert)</h4>
+    <ul>
+      <li><strong>The &ldquo;3-mo actual&rdquo; % now shows what it&rsquo;s measured against.</strong> The ▲/▼ % compares the recent 3-month rate to the smoothed baseline &mdash; but for a climbing product the recent rate equals the plan Demand, so the two columns showed the same number with a % that looked like it compared a value to itself. The cell now shows <strong>&ldquo;vs base X · ▲/▼ %&rdquo;</strong> beneath the 3-mo figure, so the % always has a visible reference. (Numbers were correct all along; this is a display fix.)</li>
+      <li><strong>Easing-off alert (decline flag).</strong> Plan demand deliberately keeps ordering to the <em>higher</em> of baseline vs recent rate so we never run out &mdash; but that can over-manufacture a <em>declining</em> product. A new blue banner now lists products whose recent rate is ≥25% <strong>below</strong> baseline, prompting the forecaster to trim those next runs (via the per-product growth override) to protect cash flow. Mirrors the ramp-up alert, the other direction.</li>
+      <li><strong>NA dashboard untouched.</strong> NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.68 &mdash; 2 July 2026 (🔁 AU Forecasting &mdash; refresh on-hand breakdown when live POs land)</h4>
     <ul>
       <li>The Forecasting tab now re-renders when the live PO fetch completes, so the On-hand warehouse / FBA / carton split (from v2.2.67) shows up reliably even if you&rsquo;re already sitting on the tab — no need to switch away and back.</li>
@@ -7533,11 +7542,15 @@ function getAuForecastData() {
     // volume so tiny products don't false-flag on noisy percentages.
     const surgePct = baseRate > 0 ? Math.round((momentum / baseRate - 1) * 100) : 0;
     const surging = window6.length >= 3 && baseRate >= 200 && surgePct >= 25;
+    // Easing off: recent rate well below baseline. The plan still uses the higher
+    // baseline (safety), but flag it so the forecaster can trim future runs and
+    // not over-manufacture a slowing product (cash flow).
+    const declining = window6.length >= 3 && baseRate >= 200 && surgePct <= -25;
 
     rows.push({
       sku, name, size, soh, buffer, incoming, netAvail,
       sohWhse, sohFba, sohCartonTins, sohCartonCount,
-      baseRate: Math.round(baseRate), momentum: Math.round(momentum), surgePct, surging,
+      baseRate: Math.round(baseRate), momentum: Math.round(momentum), surgePct, surging, declining,
       growthPct, growthOverride: override, demand,
       cover, coverStockOnly, orderByMonths, yoyPct, lead,
       monthsUsed: window6.length, toOrder,
@@ -7628,15 +7641,15 @@ function renderAuForecastTab() {
   // (strong ≥25%), ▼ blue when easing off.
   const recentCell = (d) => {
     if (d.demand <= 0 || !d.momentum) return '<span style="color:var(--text-light);">—</span>';
-    const pct = d.surgePct;
-    let badge = '';
-    if (Math.abs(pct) >= 8) {
-      const up = pct > 0, strong = Math.abs(pct) >= 25;
-      const bg = up ? (strong ? '#FCEFE0' : '#FBF4E8') : '#EAF1FD';
-      const fg = up ? '#92400E' : '#1D4ED8';
-      badge = `<div><span title="Recent 3-month run-rate vs the smoothed baseline (${fmtAuNum(d.baseRate)}/mo). The forecast plans for the higher of the two." style="display:inline-block;margin-top:2px;padding:1px 7px;border-radius:10px;background:${bg};color:${fg};font-size:11px;font-weight:${strong ? '600' : '400'};cursor:help;">${up ? '▲ +' : '▼ '}${pct}%</span></div>`;
-    }
-    return `<span title="Median of the last 3 completed months.">${fmtAuNum(d.momentum)}</span>${badge}`;
+    const pct = d.surgePct, up = pct > 0, strong = Math.abs(pct) >= 25;
+    // The % compares the recent 3-mo rate to the smoothed BASELINE, so show the
+    // baseline right here — otherwise (when a climbing product's recent rate ==
+    // the plan demand) the % looks like it's comparing a number to itself.
+    const pill = Math.abs(pct) >= 8
+      ? ` · <span style="display:inline-block;padding:0 6px;border-radius:10px;background:${up ? (strong ? '#FCEFE0' : '#FBF4E8') : '#EAF1FD'};color:${up ? '#92400E' : '#1D4ED8'};font-weight:${strong ? '600' : '400'};">${up ? '▲ +' : '▼ '}${pct}%</span>`
+      : '';
+    return `<span title="Median of the last 3 completed months — the recent actual run-rate. Compared with the smoothed baseline below; the forecast plans for the higher of the two.">${fmtAuNum(d.momentum)}</span>`
+      + `<div style="font-size:10px;color:var(--text-light);margin-top:2px;">vs base ${fmtAuNum(d.baseRate)}${pill}</div>`;
   };
   const sohTitle = (d) => {
     const parts = [`${fmtAuNum(d.sohWhse)} in our warehouse`];
@@ -7726,6 +7739,22 @@ function renderAuForecastTab() {
       surgeEl.style.display = 'block';
     } else {
       surgeEl.style.display = 'none';
+    }
+  }
+
+  // Easing-off alert — products whose recent rate is well BELOW baseline. Plan
+  // still uses the higher baseline (safety), so nudge the forecaster to trim
+  // their next runs manually and avoid over-manufacturing (cash flow).
+  const declineEl = document.getElementById('au-fc-decline');
+  if (declineEl) {
+    const declines = data.filter(d => d.declining).sort((a, b) => a.surgePct - b.surgePct);
+    if (declines.length) {
+      const items = declines.map(d => `<strong>${d.name || d.sku}</strong> ▼ ${d.surgePct}%`).join(' &nbsp;·&nbsp; ');
+      declineEl.innerHTML = `<strong>▼ Easing off —</strong> ${declines.length} product${declines.length !== 1 ? 's are' : ' is'} selling below baseline: ${items}. `
+        + `The plan still orders to the higher baseline to stay safe, so it may over-manufacture these — consider trimming their next runs (drop each one&rsquo;s growth % a little, e.g. −10 to −20) to protect cash flow.`;
+      declineEl.style.display = 'block';
+    } else {
+      declineEl.style.display = 'none';
     }
   }
 
