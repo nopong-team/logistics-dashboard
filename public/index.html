@@ -2056,7 +2056,8 @@
             <th class="num right" title="Buffer stock held back = ⅓ month of demand.">Buffer<br><span style="font-weight:400;font-size:10px;">⅓ mo</span></th>
             <th class="num right" title="Tins already on open purchase orders (in transit + on order).">Incoming</th>
             <th class="num right" title="Per-scent growth override. Blank = use the global growth above. Positive or negative.">Growth<br><span style="font-weight:400;font-size:10px;">± override</span></th>
-            <th class="num right" title="Monthly demand = trimmed (exclude min & max) average of live CIN7 tins, adjusted for growth. Smooths one-off supermarket load-ins.">Demand<br><span style="font-weight:400;font-size:10px;">/mo</span></th>
+            <th class="num right" title="Planning demand = the HIGHER of the smoothed baseline and the recent 3-month run-rate, adjusted for growth. Uses the higher so cover doesn't overstate when demand is climbing.">Demand<br><span style="font-weight:400;font-size:10px;">/mo (plan)</span></th>
+            <th class="num right" title="The recent actual run-rate (median of the last 3 completed months) and its % change vs the smoothed baseline — the pluses and minuses. The forecast plans for the higher of this and the baseline.">3-mo actual<br><span style="font-weight:400;font-size:10px;">vs base</span></th>
             <th class="num right" title="Months of cover = (On hand − Buffer + Incoming) ÷ Demand.">Cover</th>
             <th class="num right" title="Recommended run size, snapped to the manufacturing sequence (35g: 15k/30k/45k, 45k Original only). Shows the $ cost of that run beneath.">Suggested<br><span style="font-weight:400;font-size:10px;">PO ($)</span></th>
             <th class="num right" title="How often you'd place this PO — a suggested run ÷ monthly demand. Hover for POs/year.">Order<br><span style="font-weight:400;font-size:10px;">every</span></th>
@@ -2085,7 +2086,8 @@
             <th class="num right">Buffer<br><span style="font-weight:400;font-size:10px;">⅓ mo</span></th>
             <th class="num right">Incoming</th>
             <th class="num right">Growth<br><span style="font-weight:400;font-size:10px;">± override</span></th>
-            <th class="num right">Demand<br><span style="font-weight:400;font-size:10px;">/mo</span></th>
+            <th class="num right">Demand<br><span style="font-weight:400;font-size:10px;">/mo (plan)</span></th>
+            <th class="num right">3-mo actual<br><span style="font-weight:400;font-size:10px;">vs base</span></th>
             <th class="num right">Cover</th>
             <th class="num right">Suggested<br><span style="font-weight:400;font-size:10px;">PO ($)</span></th>
             <th class="num right">Order<br><span style="font-weight:400;font-size:10px;">every</span></th>
@@ -2515,9 +2517,17 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.65</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.66</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.66 &mdash; 2 July 2026 (🎯 AU Forecasting &mdash; demand now plans for the higher recent rate)</h4>
+    <ul>
+      <li><strong>Cover no longer overstates when a product is ramping.</strong> Planning demand is now the <strong>higher of the smoothed baseline and the recent 3-month run-rate</strong> (median-of-3, so a single load-in still can&rsquo;t inflate it). Cover, Buffer, Order-by and Suggested-PO all use it. Fixes the Midnight-Jazz case (baseline 8,358 said 2.4 mo cover while the real 3-month rate of ~11,800 meant &lt;2 mo) &mdash; the trap that caught Flower Power / Fragrance Free out.</li>
+      <li><strong>New &ldquo;3-mo actual vs base&rdquo; column</strong> beside Demand shows the recent run-rate and its ▲/▼ % change vs baseline &mdash; the pluses and minuses, so the variance is visible at a glance (not just the ramp-up flag).</li>
+      <li>The ramp-up badge moved into that column (informational now that the forecast auto-uses the higher rate); the alert banner still lists surging products.</li>
+      <li><strong>NA dashboard untouched.</strong> NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.65 &mdash; 2 July 2026 (📈 AU Forecasting &mdash; ramp-up / surge flag)</h4>
     <ul>
       <li><strong>Surge detection.</strong> When a product&rsquo;s recent run-rate (median of the last 3 months) is &ge;25% above its smoothed baseline &mdash; i.e. it&rsquo;s ramping up the way Flower Power did in Coles/Woolies &mdash; a <strong>▲ +X%</strong> badge appears under its Demand, and a <strong>ramp-up alert banner</strong> lists the affected products above the table. Guards against false flags on tiny/low-volume SKUs.</li>
@@ -7472,7 +7482,12 @@ function getAuForecastData() {
 
     const override = forecastAuGrowthBySku[sku];
     const growthPct = (override === undefined || override === null || override === '') ? globalGrowth : override;
-    const demand = Math.round(baseRate * (1 + growthPct / 100));
+    // Plan for the HIGHER of the smoothed baseline and the recent 3-month run-rate.
+    // The trimmed baseline lags real growth, so using it alone overstates cover
+    // right as a product ramps (the Flower Power / Midnight Jazz trap). Growth %
+    // is an extra forward adjustment on top of that conservative current rate.
+    const planRate = Math.max(baseRate, momentum);
+    const demand = Math.round(planRate * (1 + growthPct / 100));
 
     const inc = incomingBySku[sku];
     const soh = inc ? (inc.current_stock || 0) : 0;
@@ -7588,21 +7603,24 @@ function renderAuForecastTab() {
     const perYr = 12 / d.cadenceMonths;
     return `<span title="≈ ${perYr.toFixed(1)} POs/year at current demand" style="cursor:help;">every ~${d.cadenceMonths.toFixed(1)} mo</span>`;
   };
-  // Ramp-up badge under the demand number. Amber + clickable until the growth
-  // (global or per-scent) already covers the surge, then a green "applied" tick.
-  const surgeChip = (d) => {
-    if (!d.surging) return '';
-    const addressed = d.growthPct >= d.surgePct - 5;
-    if (addressed) {
-      return `<div><span title="Ramp-up of +${d.surgePct}% is now folded into this product's growth." style="display:inline-block;margin-top:3px;padding:1px 7px;border-radius:10px;background:#E7F3E7;color:#2F6B2F;font-size:11px;">▲ +${d.surgePct}% ✓</span></div>`;
+  // "3-mo actual vs base" cell: the recent median run-rate with its % variance
+  // against the smoothed baseline — the pluses and minuses. ▲ amber when climbing
+  // (strong ≥25%), ▼ blue when easing off.
+  const recentCell = (d) => {
+    if (d.demand <= 0 || !d.momentum) return '<span style="color:var(--text-light);">—</span>';
+    const pct = d.surgePct;
+    let badge = '';
+    if (Math.abs(pct) >= 8) {
+      const up = pct > 0, strong = Math.abs(pct) >= 25;
+      const bg = up ? (strong ? '#FCEFE0' : '#FBF4E8') : '#EAF1FD';
+      const fg = up ? '#92400E' : '#1D4ED8';
+      badge = `<div><span title="Recent 3-month run-rate vs the smoothed baseline (${fmtAuNum(d.baseRate)}/mo). The forecast plans for the higher of the two." style="display:inline-block;margin-top:2px;padding:1px 7px;border-radius:10px;background:${bg};color:${fg};font-size:11px;font-weight:${strong ? '600' : '400'};cursor:help;">${up ? '▲ +' : '▼ '}${pct}%</span></div>`;
     }
-    return `<div><span onclick="auSetGrowthOverride('${d.sku}', ${d.surgePct})" title="Recent 3-month run-rate is +${d.surgePct}% above the smoothed baseline — this product is ramping up. Click to fold that growth into the forecast (cover shrinks, order date pulls in). Check tin stock." style="display:inline-block;margin-top:3px;padding:1px 7px;border-radius:10px;background:#FCEFE0;color:#92400E;font-size:11px;font-weight:600;cursor:pointer;">▲ +${d.surgePct}%</span></div>`;
+    return `<span title="Median of the last 3 completed months.">${fmtAuNum(d.momentum)}</span>${badge}`;
   };
   const rowHtml = (d) => {
     const ov = (d.growthOverride === undefined || d.growthOverride === null || d.growthOverride === '') ? '' : d.growthOverride;
-    const demandTitle = d.yoyPct !== null
-      ? `title="Base ${fmtAuNum(d.baseRate)}/mo (trimmed) · 3-mo momentum ${fmtAuNum(d.momentum)} · same month last year ${d.yoyPct >= 0 ? '+' : ''}${d.yoyPct}%"`
-      : `title="Base ${fmtAuNum(d.baseRate)}/mo (trimmed) · 3-mo momentum ${fmtAuNum(d.momentum)}"`;
+    const demandTitle = `title="Planning rate = the HIGHER of baseline ${fmtAuNum(d.baseRate)} and recent 3-mo ${fmtAuNum(d.momentum)}${d.growthPct ? ` ×${d.growthPct >= 0 ? '+' : ''}${d.growthPct}% growth` : ''}. Cover uses this so it doesn't overstate when demand climbs.${d.yoyPct !== null ? ` Same month last year ${d.yoyPct >= 0 ? '+' : ''}${d.yoyPct}%.` : ''}"`;
     return `<tr style="--row-tint:${auRowTint(d.sku)};">
       <td class="sticky-col"><div class="sku-name"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${auScentColor(d.sku)};margin-right:6px;vertical-align:middle;"></span>${d.sku}</div>${d.name ? `<div style="font-size:10px;line-height:1.25;color:var(--text-light);margin-left:15px;">${d.name}</div>` : ''}</td>
       <td class="num right">${fmtAuNum(d.soh)}</td>
@@ -7612,7 +7630,8 @@ function renderAuForecastTab() {
           style="width:56px;padding:3px 5px;border:1px solid var(--border);border-radius:4px;font-size:13px;text-align:center;"
           title="Per-scent growth override (%). Blank uses the global growth."
           onchange="auSetGrowthOverride('${d.sku}', this.value)"></td>
-      <td class="num right" ${demandTitle} style="cursor:help;">${d.demand > 0 ? fmtAuNum(d.demand) : '<span style="color:var(--text-light);">—</span>'}${surgeChip(d)}</td>
+      <td class="num right" ${demandTitle} style="cursor:help;font-weight:600;">${d.demand > 0 ? fmtAuNum(d.demand) : '<span style="color:var(--text-light);">—</span>'}</td>
+      <td class="num right">${recentCell(d)}</td>
       <td class="num right" style="${coverColor(d.cover)}">${fmtCover(d.cover)}</td>
       <td class="num right">${suggestedPOCell(d)}</td>
       <td class="num right" style="color:var(--text-secondary);">${cadenceCell(d)}</td>
@@ -7626,7 +7645,7 @@ function renderAuForecastTab() {
 
   const g35 = data.filter(d => d.size === '35');
   const g85 = data.filter(d => d.size === '85');
-  const empty = '<tr><td colspan="12" style="text-align:center;padding:20px;color:var(--text-secondary);">No sales or stock data loaded yet — give the live CIN7 feed a moment.</td></tr>';
+  const empty = '<tr><td colspan="13" style="text-align:center;padding:20px;color:var(--text-secondary);">No sales or stock data loaded yet — give the live CIN7 feed a moment.</td></tr>';
   const b35 = document.getElementById('au-fc-35-tbody');
   const b85 = document.getElementById('au-fc-85-tbody');
   if (b35) b35.innerHTML = g35.length ? g35.map(rowHtml).join('') : empty;
@@ -7672,11 +7691,11 @@ function renderAuForecastTab() {
   // Ramp-up alert banner — lists surging products not yet reflected in growth.
   const surgeEl = document.getElementById('au-fc-surge');
   if (surgeEl) {
-    const surges = data.filter(d => d.surging && d.growthPct < d.surgePct - 5).sort((a, b) => b.surgePct - a.surgePct);
+    const surges = data.filter(d => d.surging).sort((a, b) => b.surgePct - a.surgePct);
     if (surges.length) {
       const items = surges.map(d => `<strong>${d.name || d.sku}</strong> ▲ +${d.surgePct}%`).join(' &nbsp;·&nbsp; ');
-      surgeEl.innerHTML = `<strong>▲ Ramp-up alert —</strong> ${surges.length} product${surges.length !== 1 ? 's are' : ' is'} selling well above baseline: ${items}. `
-        + `The trimmed demand may be understating these — check tin stock, and click a <strong>▲ badge</strong> in the Demand column to fold the growth in so cover and order dates catch up.`;
+      surgeEl.innerHTML = `<strong>▲ Ramp-up alert —</strong> ${surges.length} product${surges.length !== 1 ? 's are' : ' is'} running well above baseline: ${items}. `
+        + `The forecast now plans for the higher recent rate, so their cover and order dates already reflect it — double-check tins are secured for these.`;
       surgeEl.style.display = 'block';
     } else {
       surgeEl.style.display = 'none';
