@@ -87,8 +87,10 @@ const KV_INVENTORY_KEY = 'au:inventory:v1';
 // au:pos:v2 (v2.2.14, 2026-05-15) — bumped from v1 to bust a stale snapshot
 // observed showing all POs instead of just open ones. That fix added `'void'`
 // to CLOSED_PO_STATUSES — see the comment on the set below for the history.
+// au:pos:v5 (v2.2.67, 2026-07-02) — current_stock now INCLUDES Amazon FBA on
+// base SKUs (was warehouse-only). Adds stock_fba to the incomingBySku breakdown.
 // Future bumps: any time the response shape or filter logic changes.
-const KV_POS_KEY       = 'au:pos:v4';
+const KV_POS_KEY       = 'au:pos:v5';
 // Per-month sales: `au:sales:YYYY-MM:v4`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because
@@ -1764,25 +1766,29 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
   // front-end can show a breakdown tooltip on the Current stock cell —
   // e.g. "5,123 loose + 551 cartons × 48 = 31,571 tins". Total stock is
   // still the sum of both; the breakdown is purely additional metadata.
-  const baseStock = new Map(); // base → { loose, fromCartons, cartonCount }
-  function _bumpBase(sku, looseDelta, cartonDelta) {
-    const cur = baseStock.get(sku) || { loose: 0, fromCartons: 0, cartonCount: 0 };
+  const baseStock = new Map(); // base → { loose, fromCartons, cartonCount, fba }
+  function _bumpBase(sku, looseDelta, cartonDelta, fbaDelta = 0) {
+    const cur = baseStock.get(sku) || { loose: 0, fromCartons: 0, cartonCount: 0, fba: 0 };
     cur.loose       += looseDelta;
     cur.fromCartons += cartonDelta;
+    cur.fba         += fbaDelta;
     if (cartonDelta > 0) cur.cartonCount += cartonDelta / 48;
     baseStock.set(sku, cur);
   }
   for (const r of inventory) {
     if (r?.discontinued) continue;
-    const soh = r.warehouse_soh ?? r.soh ?? 0;
     if (r.kind === 'base' || r.kind === 'base-b') {
-      _bumpBase(r.sku, soh, 0);
+      // v2.2.67: include Amazon FBA. FBA stock is sellable — it's just held at
+      // Amazon's warehouse, not sold — so it counts toward on-hand. Warehouse
+      // and FBA tracked separately for the front-end breakdown.
+      const wh  = r.warehouse_soh ?? ((r.soh ?? 0) - (r.fba_cin7 ?? 0));
+      const fba = r.fba_cin7 ?? 0;
+      _bumpBase(r.sku, wh, 0, fba);
     } else if (r.kind === 'carton') {
+      // Cartons live in our warehouse only (Amazon doesn't hold cartons).
+      const wh = r.warehouse_soh ?? r.soh ?? 0;
       const m = /^AU-CTN-(.+)-48$/.exec(r.sku);
-      if (m) {
-        const base = `AU-${m[1]}-35`;
-        _bumpBase(base, 0, soh * 48);
-      }
+      if (m) _bumpBase(`AU-${m[1]}-35`, 0, wh * 48);
     }
   }
 
@@ -1883,8 +1889,8 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
 
   const out = [];
   for (const sku of universe) {
-    const stockBreakdown = baseStock.get(sku) || { loose: 0, fromCartons: 0, cartonCount: 0 };
-    const stock = stockBreakdown.loose + stockBreakdown.fromCartons;
+    const stockBreakdown = baseStock.get(sku) || { loose: 0, fromCartons: 0, cartonCount: 0, fba: 0 };
+    const stock = stockBreakdown.loose + stockBreakdown.fromCartons + stockBreakdown.fba;
     const tins  = tinsByBase.get(sku) || 0;
     const rate  = totalDays > 0 ? tins / totalDays : 0;
     const daysLeft = rate > 0 ? stock / rate : null;
@@ -1904,7 +1910,8 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads) {
       current_stock:    Math.round(stock),
       // v2.2.42: breakdown so the front-end can show a tooltip on the
       // Current stock cell — loose base-SKU tins vs cartons rolled up.
-      stock_loose_tins:   Math.round(stockBreakdown.loose),
+      stock_loose_tins:   Math.round(stockBreakdown.loose),   // singles in our warehouse
+      stock_fba:          Math.round(stockBreakdown.fba),     // singles at Amazon (FBA)
       stock_from_cartons: Math.round(stockBreakdown.fromCartons),
       stock_carton_count: Math.round(stockBreakdown.cartonCount),
       run_rate_per_day: Math.round(rate * 10) / 10,

@@ -2052,7 +2052,7 @@
         <thead>
           <tr>
             <th class="sticky-col">Products</th>
-            <th class="num right" title="All 35g tins on hand — loose base tins plus cartons and SRTs rolled up (× their tin count).">On hand</th>
+            <th class="num right" title="Every sellable 35g tin = our-warehouse singles + Amazon FBA + cartons (×48) + SRTs, combined. Hover a value for the warehouse / FBA / carton split — the warehouse figure matches CIN7's base-SKU stock.">On hand</th>
             <th class="num right" title="Buffer stock held back = ⅓ month of demand.">Buffer<br><span style="font-weight:400;font-size:10px;">⅓ mo</span></th>
             <th class="num right" title="Tins already on open purchase orders (in transit + on order).">Incoming</th>
             <th class="num right" title="Per-scent growth override. Blank = use the global growth above. Positive or negative.">Growth<br><span style="font-weight:400;font-size:10px;">± override</span></th>
@@ -2517,9 +2517,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.66</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.67</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.67 &mdash; 2 July 2026 (📦 AU Forecasting &mdash; On-hand now includes Amazon FBA + shows its make-up)</h4>
+    <ul>
+      <li><strong>On-hand now includes Amazon FBA stock.</strong> It was warehouse-only, which understated on-hand &mdash; FBA tins are sellable, just held at Amazon&rsquo;s warehouse. Backend <code>current_stock</code> for base SKUs now = warehouse singles + FBA (cartons stay warehouse-only, since Amazon doesn&rsquo;t hold cartons). KV cache bumped <code>au:pos:v4→v5</code>.</li>
+      <li><strong>On-hand shows its breakdown.</strong> Each value now shows a <strong>&ldquo;X whse · Y FBA · Z ctn&rdquo;</strong> split beneath it, with a full hover &mdash; so it reconciles against CIN7 (the warehouse figure matches CIN7&rsquo;s base SKU; the rest is FBA + tins packed in cartons/SRTs). Dropped the &ldquo;loose&rdquo; jargon.</li>
+      <li><strong>NA dashboard untouched.</strong> NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.66 &mdash; 2 July 2026 (🎯 AU Forecasting &mdash; demand now plans for the higher recent rate)</h4>
     <ul>
       <li><strong>Cover no longer overstates when a product is ramping.</strong> Planning demand is now the <strong>higher of the smoothed baseline and the recent 3-month run-rate</strong> (median-of-3, so a single load-in still can&rsquo;t inflate it). Cover, Buffer, Order-by and Suggested-PO all use it. Fixes the Midnight-Jazz case (baseline 8,358 said 2.4 mo cover while the real 3-month rate of ~11,800 meant &lt;2 mo) &mdash; the trap that caught Flower Power / Fragrance Free out.</li>
@@ -7492,6 +7499,12 @@ function getAuForecastData() {
     const inc = incomingBySku[sku];
     const soh = inc ? (inc.current_stock || 0) : 0;
     const incoming = inc ? (inc.incoming_qty || 0) : 0;
+    // Breakdown of on-hand (for the hover): our-warehouse singles, Amazon FBA
+    // singles, and tins packed inside cartons.
+    const sohWhse = inc ? (inc.stock_loose_tins ?? soh) : soh;
+    const sohFba = inc ? (inc.stock_fba || 0) : 0;
+    const sohCartonTins = inc ? (inc.stock_from_cartons || 0) : 0;
+    const sohCartonCount = inc ? (inc.stock_carton_count || 0) : 0;
     const buffer = demand > 0 ? Math.round(demand / 3) : 0;
     const netAvail = soh - buffer;
     const cover = demand > 0 ? (netAvail + incoming) / demand : 999;
@@ -7517,6 +7530,7 @@ function getAuForecastData() {
 
     rows.push({
       sku, name, size, soh, buffer, incoming, netAvail,
+      sohWhse, sohFba, sohCartonTins, sohCartonCount,
       baseRate: Math.round(baseRate), momentum: Math.round(momentum), surgePct, surging,
       growthPct, growthOverride: override, demand,
       cover, coverStockOnly, orderByMonths, yoyPct, lead,
@@ -7618,12 +7632,19 @@ function renderAuForecastTab() {
     }
     return `<span title="Median of the last 3 completed months.">${fmtAuNum(d.momentum)}</span>${badge}`;
   };
+  const sohTitle = (d) => {
+    const parts = [`${fmtAuNum(d.sohWhse)} in our warehouse`];
+    if (d.sohFba > 0) parts.push(`${fmtAuNum(d.sohFba)} at Amazon (FBA)`);
+    if (d.sohCartonCount > 0) parts.push(`${fmtAuNum(d.sohCartonCount)} cartons ×48 = ${fmtAuNum(d.sohCartonTins)} tins`);
+    const sum = parts.length > 1 ? ` = ${fmtAuNum(d.soh)} total` : '';
+    return `On hand: ${parts.join(' + ')}${sum}. Every sellable 35g tin — our warehouse + Amazon FBA + tins packed in cartons/SRTs. The warehouse figure matches CIN7's stock for this base SKU.`;
+  };
   const rowHtml = (d) => {
     const ov = (d.growthOverride === undefined || d.growthOverride === null || d.growthOverride === '') ? '' : d.growthOverride;
     const demandTitle = `title="Planning rate = the HIGHER of baseline ${fmtAuNum(d.baseRate)} and recent 3-mo ${fmtAuNum(d.momentum)}${d.growthPct ? ` ×${d.growthPct >= 0 ? '+' : ''}${d.growthPct}% growth` : ''}. Cover uses this so it doesn't overstate when demand climbs.${d.yoyPct !== null ? ` Same month last year ${d.yoyPct >= 0 ? '+' : ''}${d.yoyPct}%.` : ''}"`;
     return `<tr style="--row-tint:${auRowTint(d.sku)};">
       <td class="sticky-col"><div class="sku-name"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${auScentColor(d.sku)};margin-right:6px;vertical-align:middle;"></span>${d.sku}</div>${d.name ? `<div style="font-size:10px;line-height:1.25;color:var(--text-light);margin-left:15px;">${d.name}</div>` : ''}</td>
-      <td class="num right">${fmtAuNum(d.soh)}</td>
+      <td class="num right" title="${sohTitle(d)}" style="cursor:help;">${fmtAuNum(d.soh)}${(d.sohFba > 0 || d.sohCartonCount > 0) ? `<div style="font-size:10px;color:var(--text-light);">${fmtAuNum(d.sohWhse)} whse${d.sohFba > 0 ? ` · ${fmtAuNum(d.sohFba)} FBA` : ''}${d.sohCartonCount > 0 ? ` · ${fmtAuNum(d.sohCartonCount)} ctn` : ''}</div>` : ''}</td>
       <td class="num right" style="color:var(--text-secondary);">${d.buffer > 0 ? fmtAuNum(d.buffer) : '—'}</td>
       <td class="num right">${d.incoming > 0 ? fmtAuNum(d.incoming) : '<span style="color:var(--text-light);">—</span>'}</td>
       <td class="num right"><input type="number" step="1" placeholder="—" value="${ov}"
