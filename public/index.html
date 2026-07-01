@@ -2517,9 +2517,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.67</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.68</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.68 &mdash; 2 July 2026 (🔁 AU Forecasting &mdash; refresh on-hand breakdown when live POs land)</h4>
+    <ul>
+      <li>The Forecasting tab now re-renders when the live PO fetch completes, so the On-hand warehouse / FBA / carton split (from v2.2.67) shows up reliably even if you&rsquo;re already sitting on the tab — no need to switch away and back.</li>
+      <li><strong>NA dashboard untouched.</strong> NA stays at v2.35.2.</li>
+    </ul>
+
     <h4>v2.2.67 &mdash; 2 July 2026 (📦 AU Forecasting &mdash; On-hand now includes Amazon FBA + shows its make-up)</h4>
     <ul>
       <li><strong>On-hand now includes Amazon FBA stock.</strong> It was warehouse-only, which understated on-hand &mdash; FBA tins are sellable, just held at Amazon&rsquo;s warehouse. Backend <code>current_stock</code> for base SKUs now = warehouse singles + FBA (cartons stay warehouse-only, since Amazon doesn&rsquo;t hold cartons). KV cache bumped <code>au:pos:v4→v5</code>.</li>
@@ -8326,6 +8332,9 @@ async function loadLiveAuPos() {
     renderAuPoKpis();
     renderAuPoTable();
     renderAuIncomingBySku();
+    // Forecast reads AU_INCOMING_BY_SKU for on-hand (incl. FBA + carton breakdown),
+    // so refresh it too if the user is currently on the Forecasting tab.
+    if (typeof auTab !== 'undefined' && auTab === 'au-forecast' && typeof renderAuForecastTab === 'function') renderAuForecastTab();
 
     _auChipFromResp('au-pos-source-chip', data, 'CIN7 live');
 
