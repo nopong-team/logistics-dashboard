@@ -93,7 +93,7 @@ const KV_INVENTORY_KEY = 'au:inventory:v1';
 // empty_tins_incoming (unfilled T-AU-… tin stock) so the forecast can flag a
 // suggested finished PO that exceeds the empty tins available to fill it.
 // Future bumps: any time the response shape or filter logic changes.
-const KV_POS_KEY       = 'au:pos:v6';
+const KV_POS_KEY       = 'au:pos:v7';
 // Per-month sales: `au:sales:YYYY-MM:v4`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because
@@ -1692,6 +1692,19 @@ function shapePoRows(rawPos) {
     else if (buckets.carton_tray > 0) type = 'finished'; // standalone carton-only PO
     else type = 'other';
 
+    // Total units for the PO. A Finished (or Soap) PO from HFM lists the empty
+    // tins (T-AU-… → raw_tin) alongside the finished good — that's the SAME
+    // physical run in component form, so summing both double-counts. Count only
+    // the PO's primary product bucket by type. Pure Tins / Packaging POs still
+    // count their own product. (v2.2.77 — was: sum of every bucket.)
+    let totalUnits;
+    if (type === 'finished')       totalUnits = buckets.finished + buckets.carton_tray;
+    else if (type === 'soap')      totalUnits = buckets.soap;
+    else if (type === 'tins')      totalUnits = buckets.raw_tin;
+    else if (type === 'packaging') totalUnits = buckets.packaging;
+    else totalUnits = buckets.finished + buckets.soap + buckets.raw_tin
+                    + buckets.packaging + buckets.carton_tray + buckets.other;
+
     // Distinct SKU count — matches the CA dashboard's "SKUs" column. Excludes
     // freight/KittingFee/discount rows (any line that classifies as 'fees').
     const skuSet = new Set();
@@ -1753,8 +1766,7 @@ function shapePoRows(rawPos) {
       raw_tin_units:   buckets.raw_tin,
       packaging_units: buckets.packaging,
       fee_lines:       buckets.fees < 10 ? Math.round(buckets.fees) : 0,
-      total_units:     buckets.finished + buckets.soap + buckets.raw_tin
-                     + buckets.packaging + buckets.carton_tray + buckets.other,
+      total_units:     totalUnits,
       type,
       lines,
     });

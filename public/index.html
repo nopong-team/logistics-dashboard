@@ -2524,9 +2524,14 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.76</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.77</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.77 &mdash; 9 July 2026 (🔢 Purchase Orders &mdash; finished POs no longer double-count empty tins)</h4>
+    <ul>
+      <li><strong>Total units on a Finished PO now counts only the finished product, not the empty tins.</strong> HFM finished POs list the finished good <em>and</em> its empty-tin component (e.g. <code>AU-OG-BCF-35</code> + <code>T-AU-OG-BCF-35</code>) &mdash; the same physical run in two forms &mdash; so the old &ldquo;sum every line&rdquo; total double-counted (e.g. showed 30,000 for a 15,000-unit run). Total units now reflects the PO&rsquo;s primary product by type. Genuine raw-tin and packaging POs still count their own units. (Cache key <code>au:pos</code> bumped v6&rarr;v7.)</li>
+    </ul>
+
     <h4>v2.2.76 &mdash; 9 July 2026 (🩹 fix: ETD "Write" button was invisible)</h4>
     <ul>
       <li>The &ldquo;Write selected ETDs to CIN7&rdquo; button used a <code>--pink</code> CSS variable this dashboard doesn&rsquo;t define, so it rendered white-on-white (invisible). Switched to <code>--accent</code> so the button shows.</li>
