@@ -1834,6 +1834,20 @@
       <strong>Live from CIN7 (v2.35).</strong> Phase 2b wires the <code>/PurchaseOrders</code> endpoint live, so created-date, expected-date, and status fields are now populated (the manual CSV export was missing those). Days-until-arrival and late-PO detection follow in the next polish pass — the data is here, just needs the column wiring on the table.
     </div>
 
+    <div class="table-card" style="margin-bottom:16px;">
+      <div class="table-card-header"><div class="table-card-title">Update ETDs from HFM screenshot</div></div>
+      <div style="padding:0 20px 16px;">
+        <p style="font-size:12px;color:var(--text-secondary);margin:0 0 12px;">Upload the HFM production-schedule screenshot. It reads each PO's fill date, matches it to CIN7 (<code>PO-&lt;number&gt;</code>), previews current &rarr; new ETD, and on confirm writes <code>estimatedDeliveryDate</code> back to CIN7. Date ranges and split fills use the <strong>earliest</strong> date.</p>
+        <div class="upload-zone" id="etd-upload-zone" onclick="document.getElementById('etd-file-input').click()">
+          <input type="file" id="etd-file-input" accept="image/*" onchange="handleEtdUpload(event)">
+          <div class="upload-zone-icon">📋</div>
+          <div class="upload-zone-text">Drop the HFM screenshot here, or <strong>browse</strong></div>
+          <div class="upload-zone-text" style="font-size:10px;margin-top:2px;">PNG or JPG</div>
+        </div>
+        <div id="etd-result" style="margin-top:16px;"></div>
+      </div>
+    </div>
+
     <div class="cards-grid cards-4" id="au-po-kpis"></div>
 
     <div class="table-card">
@@ -2510,9 +2524,17 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.73</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.74</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.74 &mdash; 8 July 2026 (📋 Purchase Orders &mdash; update ETDs from an HFM screenshot)</h4>
+    <ul>
+      <li><strong>New on the Purchase Orders tab: &ldquo;Update ETDs from HFM screenshot&rdquo;.</strong> Upload the HFM (Health Focus Manufacturers) production-schedule screenshot; the dashboard reads each row, matches the Cust PO# to its CIN7 purchase order (<code>PO-&lt;number&gt;</code>), and shows a preview of the current &rarr; new ETD. Tick the rows you want and it writes <code>estimatedDeliveryDate</code> straight back to CIN7 (<code>PUT /PurchaseOrders</code>).</li>
+      <li><strong>Earliest-date rule for ranges / split fills</strong> &mdash; <code>17 &amp; 24 Jul</code> &rarr; 17 Jul, <code>30-31 Jul</code> &rarr; 30 Jul; the year is inferred. Rows where the fill date lands after the due date are flagged (⚑) for a second look, and PO numbers not found in CIN7 are listed rather than silently skipped.</li>
+      <li><strong>Screenshot reading uses Cloudflare Workers AI</strong> (the <code>AI</code> binding &mdash; no external key). If an <code>ANTHROPIC_API_KEY</code> secret is set, Claude vision is used instead for higher accuracy. Every write is logged to KV (<code>au:etd:audit:*</code>).</li>
+      <li>New endpoints <code>POST /api/au/etd/scan</code> (parse + preview, no writes) and <code>POST /api/au/etd/apply</code> (gated write). Nothing is written until you confirm.</li>
+    </ul>
+
     <h4>v2.2.73 &mdash; 2 July 2026 (🥫 AU Forecasting &mdash; empty tins ON ORDER now count toward the fill ceiling)</h4>
     <ul>
       <li><strong>Tins on order are now kept in mind for upcoming POs.</strong> The fill ceiling for a run is now <strong>empties on hand + empties already on order</strong> (not just on hand). Two states now: a run is only flagged <strong>⚠ short</strong> if it can&rsquo;t be filled <em>even counting the tins on order</em> (that&rsquo;s when you genuinely need to order more empties); if on-hand alone won&rsquo;t fill it but tins already on order will, it shows a softer blue <strong>ℹ &ldquo;tins on order cover this&rdquo;</strong> note instead &mdash; no new tin order needed, just mind the ~4-month lead vs when you fill. The Empty-tins column header now reads &ldquo;on hand + on order&rdquo;, and the shortage banner only lists products short <em>after</em> counting inbound tins.</li>
@@ -10222,6 +10244,66 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Update sync status "time ago" labels every minute
   setInterval(() => updateSyncStatusBar(), 60 * 1000);
 });
+</script>
+
+<!-- HFM screenshot → CIN7 ETD update (AU Purchase Orders tab). Self-contained. -->
+<script>
+(function(){
+  function esc(s){ if(s==null) return ''; return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+  let rows = [];
+  function fileFrom(e){
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) return e.dataTransfer.files[0];
+    if (e.target && e.target.files && e.target.files.length) return e.target.files[0];
+    return null;
+  }
+  window.handleEtdUpload = async function(e){
+    const file = fileFrom(e); const result = document.getElementById('etd-result'); if (!file) return;
+    if (!/^image\//.test(file.type)) { result.innerHTML = '<div style="color:#B91C1C;padding:12px;">Please upload an image (PNG or JPG).</div>'; return; }
+    result.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-secondary);">Reading screenshot… (a few seconds)</div>';
+    try {
+      const dataUrl = await new Promise(function(res, rej){ const fr = new FileReader(); fr.onload = function(){ res(fr.result); }; fr.onerror = function(){ rej(new Error('Could not read the file')); }; fr.readAsDataURL(file); });
+      const resp = await fetch('/api/au/etd/scan', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ image: dataUrl }) });
+      const txt = await resp.text(); let data = {}; try { data = JSON.parse(txt); } catch(_){}
+      if (!resp.ok) throw new Error((data && data.error) || ('HTTP ' + resp.status));
+      renderPreview(data.rows || []);
+    } catch(err){ result.innerHTML = '<div style="color:#B91C1C;padding:12px;">Couldn\'t read the screenshot: ' + esc(err.message) + '</div>'; }
+  };
+  function renderPreview(r){
+    rows = r; const result = document.getElementById('etd-result');
+    const changing = r.filter(function(x){return x.change==='change';});
+    const nomatch  = r.filter(function(x){return x.change==='nomatch';});
+    const same     = r.filter(function(x){return x.change==='same';});
+    const badge = { change:'<span style="color:#059669;">will update</span>', same:'<span style="color:#6B7280;">unchanged</span>', nomatch:'<span style="color:#B91C1C;">not in CIN7</span>', baddate:'<span style="color:#B91C1C;">unreadable date</span>', skip:'<span style="color:#6B7280;">skip</span>' };
+    let html = '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">Parsed ' + r.length + ' rows · <strong style="color:#059669;">' + changing.length + '</strong> to change · ' + same.length + ' unchanged · <strong style="color:' + (nomatch.length?'#B91C1C':'inherit') + ';">' + nomatch.length + '</strong> not found</div>';
+    html += '<div class="table-scroll"><table><thead><tr><th></th><th>PO</th><th>Fill (raw)</th><th>Current ETD</th><th>New ETD</th><th>Status</th></tr></thead><tbody>';
+    r.forEach(function(x, i){
+      const can = x.change==='change';
+      const flag = (x.flags && x.flags.length) ? ' <span title="' + esc(x.flags.join('; ')) + '" style="color:#B45309;cursor:help;">⚑</span>' : '';
+      html += '<tr><td><input type="checkbox" data-i="' + i + '" ' + (can?'checked':'disabled') + '></td><td>' + esc(x.reference||x.cust_po||'—') + flag + '</td><td>' + esc(x.fill_raw||'') + '</td><td>' + esc(x.current_etd||'—') + '</td><td style="font-weight:600;">' + esc(x.new_etd||'—') + '</td><td>' + (badge[x.change]||esc(x.change)) + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    html += '<div style="margin-top:14px;"><button id="etd-apply-btn" onclick="applyEtd()" style="background:var(--pink);color:#fff;border:none;border-radius:6px;padding:10px 16px;font-weight:600;cursor:pointer;">Write selected ETDs to CIN7</button> <span style="font-size:11px;color:var(--text-secondary);margin-left:8px;">Only checked rows are written. Each change is logged.</span></div>';
+    result.innerHTML = html;
+  }
+  window.applyEtd = async function(){
+    const result = document.getElementById('etd-result'); const btn = document.getElementById('etd-apply-btn');
+    const boxes = Array.prototype.slice.call(document.querySelectorAll('#etd-result input[type=checkbox]:checked'));
+    const changes = boxes.map(function(b){ return rows[Number(b.dataset.i)]; }).filter(Boolean).map(function(x){ return { po_id:x.po_id, reference:x.reference, current_etd:x.current_etd, new_etd:x.new_etd }; });
+    if (!changes.length) { alert('Nothing selected to write.'); return; }
+    if (!confirm('Write ' + changes.length + ' ETD' + (changes.length>1?'s':'') + ' to CIN7?')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Writing…'; }
+    try {
+      const resp = await fetch('/api/au/etd/apply', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ changes }) });
+      const data = await resp.json(); if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+      const allGood = data.updated === data.total;
+      let html = '<div style="padding:4px 0;font-weight:600;color:' + (allGood?'#059669':'#B45309') + ';">Updated ' + data.updated + ' of ' + data.total + '.</div><ul style="font-size:12px;margin:6px 0 0;padding-left:18px;">' + (data.results||[]).map(function(x){ return '<li>' + (x.success?'✅':'❌') + ' ' + esc(x.reference||'') + (x.new_etd?' → '+esc(x.new_etd):'') + (x.error?' — '+esc(x.error):'') + '</li>'; }).join('') + '</ul>';
+      result.insertAdjacentHTML('afterbegin', '<div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:14px;background:var(--bg);">' + html + '</div>');
+      if (btn) btn.textContent = 'Done';
+    } catch(err){ if (btn) { btn.disabled = false; btn.textContent = 'Write selected ETDs to CIN7'; } alert('Write failed: ' + err.message); }
+  };
+  function wire(){ const z = document.getElementById('etd-upload-zone'); if (!z || z._wired) return; z.addEventListener('dragover', function(e){ e.preventDefault(); z.classList.add('drag-over'); }); z.addEventListener('dragleave', function(){ z.classList.remove('drag-over'); }); z.addEventListener('drop', function(e){ e.preventDefault(); z.classList.remove('drag-over'); window.handleEtdUpload(e); }); z._wired = true; }
+  if (document.readyState !== 'loading') wire(); else document.addEventListener('DOMContentLoaded', wire);
+})();
 </script>
 
 </body>

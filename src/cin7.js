@@ -2435,3 +2435,210 @@ auRoutes.get('/inventory', async (c) => {
     throw e; // global onError sanitizes + returns 500
   }
 });
+
+// ════════════════════════════════════════════════════════════
+//  HFM screenshot → CIN7 ETD update  (AU Purchase Orders tab)
+//  POST /api/au/etd/scan  — upload a screenshot → vision parse → match each
+//    Cust PO# to CIN7 reference (PO-<num>) → preview current vs new ETD.
+//  POST /api/au/etd/apply — write estimatedDeliveryDate back to CIN7 for the
+//    approved rows, with a KV audit entry per run.
+//  CIN7 write validated 2026-07-08: PUT /PurchaseOrders [{id,estimatedDeliveryDate}]
+//  is a partial update; needs the connection's PurchaseOrders→Update privilege.
+// ════════════════════════════════════════════════════════════
+
+const ETD_MONTHS = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+
+// Resolve an HFM "fill date" cell to a single YYYY-MM-DD using the EARLIEST-date
+// rule. Handles "1-2 Jul", "3-Jul", "17 & 24 Jul", "30-31 Jul", "29 Jul & 3 Aug".
+function resolveFillDate(raw, refToday = new Date()) {
+  if (!raw) return { date: null, note: 'empty' };
+  const s = String(raw).toLowerCase().replace(/&/g, ' ').replace(/\s+/g, ' ').trim();
+  const monthMatches = [];
+  const mre = /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/g;
+  let m;
+  while ((m = mre.exec(s)) !== null) monthMatches.push({ mon: ETD_MONTHS[m[1]], idx: m.index });
+  if (!monthMatches.length) return { date: null, note: 'no month found' };
+  const days = [];
+  const dre = /\d{1,2}/g;
+  while ((m = dre.exec(s)) !== null) {
+    const d = parseInt(m[0], 10);
+    if (d >= 1 && d <= 31) days.push({ day: d, idx: m.index });
+  }
+  if (!days.length) return { date: null, note: 'no day found' };
+  const y0 = refToday.getFullYear();
+  const dated = days.map(({ day, idx }) => {
+    const mt = monthMatches.find((x) => x.idx >= idx) || monthMatches[monthMatches.length - 1];
+    let dt = new Date(Date.UTC(y0, mt.mon, day));
+    if ((refToday - dt) > 120 * 864e5) dt = new Date(Date.UTC(y0 + 1, mt.mon, day));
+    return dt;
+  });
+  const earliest = dated.reduce((a, b) => (a < b ? a : b));
+  const iso = earliest.toISOString().slice(0, 10);
+  const note = days.length > 1 ? `earliest of ${days.map((d) => d.day).join(' / ')}` : '';
+  return { date: iso, note };
+}
+
+// "2026-07-01" -> "2026-07-01T00:00:00Z" (= 10am AEST; never rolls a day back in AU)
+function etdToIso(ymd) {
+  const m = String(ymd).trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}T00:00:00Z` : null;
+}
+function etdDayOf(v) { return v ? String(v).slice(0, 10) : ''; }
+
+// Parse a due-date cell like "10/7/2026" (d/m/y) -> YYYY-MM-DD for the anomaly check.
+function parseEtdDueDate(raw) {
+  const m = String(raw || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  if (!m) return null;
+  let [, d, mo, y] = m; y = y.length === 2 ? '20' + y : y;
+  return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function extractJsonArray(text) {
+  let t = String(text || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```$/, '').trim();
+  const s = t.indexOf('['), e = t.lastIndexOf(']');
+  if (s >= 0 && e > s) t = t.slice(s, e + 1);
+  const arr = JSON.parse(t);
+  if (!Array.isArray(arr)) throw new Error('AI response was not a JSON array');
+  return arr;
+}
+
+const ETD_VISION_PROMPT =
+  'You are reading a screenshot of a manufacturer\'s production-schedule table. Extract EVERY data row. ' +
+  'Columns are typically: Cust PO#, Description, Size, Quantity, Due Date, Fill Date. ' +
+  'Return ONLY a JSON array (no prose, no markdown fences), one object per row, each with these exact keys: ' +
+  '"cust_po" (string, digits only), "description" (string), "size" (string), "quantity" (string), ' +
+  '"due_date" (string exactly as written), "fill_date" (string exactly as written, e.g. "1-2 Jul" or "17 & 24 Jul"). ' +
+  'Copy the dates EXACTLY as shown — do not normalise or interpret ranges. Skip fully empty rows.';
+
+// Read the screenshot. Prefers Claude vision when ANTHROPIC_API_KEY is set
+// (more reliable on dense tables); otherwise uses Cloudflare Workers AI (env.AI),
+// which needs no external key.
+async function extractEtdRowsFromImage(env, base64, mediaType) {
+  const key = (env.ANTHROPIC_API_KEY || '').trim();
+  if (key) {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: (env.ANTHROPIC_MODEL || 'claude-sonnet-5').trim(),
+        max_tokens: 4096,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+            { type: 'text', text: ETD_VISION_PROMPT },
+          ],
+        }],
+      }),
+    });
+    const txt = await resp.text();
+    if (!resp.ok) throw new Error(`Anthropic ${resp.status}: ${txt.slice(0, 200)}`);
+    const data = JSON.parse(txt);
+    return extractJsonArray(data?.content?.[0]?.text || '');
+  }
+  if (env.AI) {
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const model = env.AU_ETD_VISION_MODEL || '@cf/meta/llama-3.2-11b-vision-instruct';
+    const out = await env.AI.run(model, { image: [...bytes], prompt: ETD_VISION_PROMPT, max_tokens: 4096 });
+    return extractJsonArray(out?.response || '');
+  }
+  throw new Error('No AI configured to read the screenshot — add the Workers AI binding (env.AI) or set ANTHROPIC_API_KEY.');
+}
+
+// CIN7 write. PUT /PurchaseOrders with an array of {id, ...fieldsToUpdate}.
+async function cin7Put(env, endpoint, body) {
+  const auth = cin7AuthHeader(env);
+  if (!auth) throw new Error('CIN7 not configured.');
+  const resp = await fetch(`${CIN7_BASE}/${endpoint}`, {
+    method: 'PUT',
+    headers: { Authorization: auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await resp.text();
+  let json; try { json = JSON.parse(text); } catch (_) { json = null; }
+  return { ok: resp.ok, status: resp.status, json, text };
+}
+
+// Upload a screenshot → parsed + matched preview rows. No writes.
+auRoutes.post('/etd/scan', async (c) => {
+  try {
+    if (!cin7Configured(c.env)) return c.json({ error: 'CIN7 not configured.' }, 503);
+    const body = await c.req.json().catch(() => ({}));
+    let { image, mediaType } = body || {};
+    if (!image) return c.json({ error: 'No image provided.' }, 400);
+    const dm = /^data:([^;]+);base64,(.*)$/s.exec(image);
+    if (dm) { mediaType = mediaType || dm[1]; image = dm[2]; }
+    mediaType = mediaType || 'image/png';
+
+    const raw = await extractEtdRowsFromImage(c.env, image, mediaType);
+    const pos = await fetchAllPurchaseOrders(c.env);
+    const byRef = new Map();
+    for (const p of pos) if (p.reference) byRef.set(String(p.reference).toUpperCase(), p);
+    const today = new Date();
+
+    const rows = raw.map((r) => {
+      const cust = String(r.cust_po || '').replace(/[^0-9]/g, '');
+      const ref = cust ? ('PO-' + cust).toUpperCase() : '';
+      const resolved = resolveFillDate(r.fill_date, today);
+      const po = ref ? byRef.get(ref) : null;
+      const currentDay = po ? etdDayOf(po.estimatedDeliveryDate) : '';
+      const newDay = resolved.date || '';
+      const flags = [];
+      if (resolved.note && /earliest/.test(resolved.note)) flags.push(resolved.note);
+      const due = parseEtdDueDate(r.due_date);
+      if (due && newDay && newDay > due) flags.push('fill date is after the due date');
+      let change = 'skip';
+      if (!po) change = 'nomatch';
+      else if (!newDay) change = 'baddate';
+      else if (currentDay === newDay) change = 'same';
+      else change = 'change';
+      return {
+        cust_po: cust, reference: ref, description: r.description || '', size: r.size || '',
+        quantity: r.quantity || '', due_date: r.due_date || '', fill_raw: r.fill_date || '',
+        po_id: po ? po.id : null, current_etd: currentDay, new_etd: newDay, change, flags,
+      };
+    });
+    return c.json({ rows, parsed: raw.length });
+  } catch (e) {
+    return c.json({ error: String(e?.message || e) }, 500);
+  }
+});
+
+// Write the approved ETDs to CIN7. Body: { changes: [{po_id, reference, current_etd, new_etd}] }
+auRoutes.post('/etd/apply', async (c) => {
+  try {
+    if (!cin7Configured(c.env)) return c.json({ error: 'CIN7 not configured.' }, 503);
+    const body = await c.req.json().catch(() => ({}));
+    const changes = (body && body.changes) || [];
+    if (!Array.isArray(changes) || !changes.length) return c.json({ error: 'No changes to apply.' }, 400);
+
+    const results = [];
+    for (const ch of changes) {
+      const iso = etdToIso(ch.new_etd);
+      if (!ch.po_id || !iso) { results.push({ reference: ch.reference, po_id: ch.po_id, success: false, error: 'missing PO id or bad date' }); continue; }
+      const put = await cin7Put(c.env, 'PurchaseOrders', [{ id: Number(ch.po_id), estimatedDeliveryDate: iso }]);
+      const ok = put.ok && Array.isArray(put.json) && put.json[0] && put.json[0].success;
+      results.push({
+        reference: ch.reference, po_id: ch.po_id,
+        old_etd: etdDayOf(ch.current_etd), new_etd: etdDayOf(ch.new_etd),
+        success: !!ok, http: put.status, error: ok ? '' : String(put.text).slice(0, 200),
+      });
+      await sleep(PAGE_DELAY_MS); // stay under CIN7's 3/sec rate limit
+    }
+
+    // Audit log to KV (180-day TTL) — old→new ETD per PO, for traceability.
+    try {
+      if (c.env.CACHE) {
+        const stamp = new Date().toISOString();
+        await c.env.CACHE.put(`au:etd:audit:${stamp}`, JSON.stringify({ stamp, results }), { expirationTtl: 60 * 60 * 24 * 180 });
+      }
+    } catch (_) {}
+
+    const good = results.filter((r) => r.success).length;
+    return c.json({ results, updated: good, total: changes.length });
+  } catch (e) {
+    return c.json({ error: String(e?.message || e) }, 500);
+  }
+});

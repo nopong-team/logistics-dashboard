@@ -28,6 +28,13 @@
 	"observability": {
 		"enabled": true
 	},
+	// Workers AI binding — used by /api/au/etd/scan to read the HFM production-
+	// schedule screenshot (vision) and extract each PO's fill date. Billed on the
+	// No Pong Cloudflare account; no external API key needed. If ANTHROPIC_API_KEY
+	// is set as a secret, that (Claude vision) is preferred for accuracy instead.
+	"ai": {
+		"binding": "AI"
+	},
 	// KV: response-cache namespace used by /api/woo/sales (15-min TTL).
 	// `remote: true` means `wrangler dev` reads/writes the real namespace
 	// instead of a local mock — fine for low-stakes cache data that auto-expires.
