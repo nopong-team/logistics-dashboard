@@ -93,7 +93,7 @@ const KV_INVENTORY_KEY = 'au:inventory:v1';
 // empty_tins_incoming (unfilled T-AU-… tin stock) so the forecast can flag a
 // suggested finished PO that exceeds the empty tins available to fill it.
 // Future bumps: any time the response shape or filter logic changes.
-const KV_POS_KEY       = 'au:pos:v7';
+const KV_POS_KEY       = 'au:pos:v8';
 // Per-month sales: `au:sales:YYYY-MM:v4`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because

@@ -2529,7 +2529,7 @@
   <div id="changelog-panel-au" class="changelog-panel">
     <h4>v2.2.78 &mdash; 9 July 2026 (⏰ Incoming by SKU &mdash; overdue POs now surface)</h4>
     <ul>
-      <li><strong>The &ldquo;Next PO (days)&rdquo; column now shows an overdue PO instead of hiding it behind a later one.</strong> The rule used to be &ldquo;a future PO always wins,&rdquo; so a SKU with an overdue PO <em>and</em> a far-off future PO (e.g. AU-EF-BCF-35) only showed the future one &mdash; the overdue supply was invisible. Now it shows the <strong>earliest-dated open PO</strong> for the SKU, whether overdue (negative days, red) or upcoming, so late arrivals are visible where they matter most.</li>
+      <li><strong>The &ldquo;Next PO (days)&rdquo; column now shows an overdue PO instead of hiding it behind a later one.</strong> The rule used to be &ldquo;a future PO always wins,&rdquo; so a SKU with an overdue PO <em>and</em> a far-off future PO (e.g. AU-EF-BCF-35) only showed the future one &mdash; the overdue supply was invisible. Now it shows the <strong>earliest-dated open PO</strong> for the SKU, whether overdue (negative days, red) or upcoming, so late arrivals are visible where they matter most. (Cache key <code>au:pos</code> bumped v7&rarr;v8.)</li>
     </ul>
 
     <h4>v2.2.77 &mdash; 9 July 2026 (🔢 Purchase Orders &mdash; finished POs no longer double-count empty tins)</h4>
