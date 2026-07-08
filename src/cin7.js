@@ -1894,34 +1894,25 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads, emptyTins = 
     return d.getTime();
   })();
   function deriveNextPo(posList) {
-    let bestDays = null;
+    // The "next PO" is the earliest-dated open PO for this SKU — whether it's
+    // overdue or upcoming. An overdue PO (stock that should already have landed)
+    // is the NEXT expected arrival and the most urgent to surface, so it must
+    // not be hidden behind a later future PO. Overdue shows as negative days
+    // (rendered red). (v2.2.78 — previously a future PO always won, which hid
+    // overdue supply whenever any future PO also existed for the SKU.)
+    let bestTs = null;
     let bestRef = null;
-    let earliestOverdueDays = null;
-    let earliestOverdueRef = null;
     for (const p of posList) {
       if (!p.date) continue;
       const ts = Date.parse(String(p.date).slice(0, 10) + 'T00:00:00Z');
       if (!Number.isFinite(ts)) continue;
-      const days = Math.round((ts - todayUtcMs) / 86400000);
-      if (days >= 0) {
-        if (bestDays == null || days < bestDays) {
-          bestDays = days;
-          bestRef = p.ref;
-        }
-      } else {
-        // Overdue. Keep the LEAST overdue (largest negative number = closest
-        // to today) — that's the next one likely to actually land.
-        if (earliestOverdueDays == null || days > earliestOverdueDays) {
-          earliestOverdueDays = days;
-          earliestOverdueRef = p.ref;
-        }
+      if (bestTs == null || ts < bestTs) {
+        bestTs = ts;
+        bestRef = p.ref;
       }
     }
-    // Future PO wins. Only fall back to overdue if there's literally no
-    // future-dated PO for this SKU.
-    if (bestDays != null) return { days: bestDays, ref: bestRef };
-    if (earliestOverdueDays != null) return { days: earliestOverdueDays, ref: earliestOverdueRef };
-    return { days: null, ref: null };
+    if (bestTs == null) return { days: null, ref: null };
+    return { days: Math.round((bestTs - todayUtcMs) / 86400000), ref: bestRef };
   }
 
   // Eligible universe: only finished-tin base SKUs that exist in inventory
