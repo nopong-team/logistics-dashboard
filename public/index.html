@@ -2524,9 +2524,14 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.78</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.79</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.79 &mdash; 9 July 2026 (📅 Forecasting CSV &mdash; Order-by date added)</h4>
+    <ul>
+      <li><strong>The Forecasting CSV export now includes the actual <em>Order by</em> date</strong> (e.g. &ldquo;5 Aug 2026&rdquo;, or &ldquo;… (overdue)&rdquo;), not just the months-from-now number. New <code>Order by (date)</code> column sits next to <code>Order by (mo)</code> and matches the date shown on screen.</li>
+    </ul>
+
     <h4>v2.2.78 &mdash; 9 July 2026 (⏰ Incoming by SKU &mdash; overdue POs now surface)</h4>
     <ul>
       <li><strong>The &ldquo;Next PO (days)&rdquo; column now shows an overdue PO instead of hiding it behind a later one.</strong> The rule used to be &ldquo;a future PO always wins,&rdquo; so a SKU with an overdue PO <em>and</em> a far-off future PO (e.g. AU-EF-BCF-35) only showed the future one &mdash; the overdue supply was invisible. Now it shows the <strong>earliest-dated open PO</strong> for the SKU, whether overdue (negative days, red) or upcoming, so late arrivals are visible where they matter most. (Cache key <code>au:pos</code> bumped v7&rarr;v8.)</li>
@@ -7905,13 +7910,21 @@ function renderAuForecastCartons() {
 
 function downloadAuForecastCSV() {
   const data = getAuForecastData();
+  // Same date maths the on-screen "Order by" cell uses (dateFromNow + fmtDate,
+  // which are local to renderAuForecastTab), replicated here so the export
+  // carries the actual order-by DATE, not just the months-from-now number.
+  const _dateFromNow = (months) => { const dt = new Date(); dt.setDate(dt.getDate() + Math.round(months * 30.44)); return dt; };
+  const _fmtDate = (dt) => dt.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' });
+  const _orderByDate = (d) => (d.demand <= 0 || d.orderByMonths === null) ? ''
+    : _fmtDate(_dateFromNow(d.orderByMonths)) + (d.orderByMonths <= 0 ? ' (overdue)' : '');
   const out = [['SKU', 'Product', 'Size', 'On hand', 'Buffer', 'Incoming', 'Empty tins', 'Empty tins on order', 'Growth %', 'Demand/mo', 'Cover (mo)',
-    'Suggested PO', 'Tin shortfall', 'Unit cost', 'PO cost', 'Order every (mo)', 'Order by (mo)', 'To order', 'Order cost']];
+    'Suggested PO', 'Tin shortfall', 'Unit cost', 'PO cost', 'Order every (mo)', 'Order by (mo)', 'Order by (date)', 'To order', 'Order cost']];
   data.forEach(d => out.push([d.sku, d.name, d.size + 'g', d.soh, d.buffer, d.incoming,
     (d.emptyTins === null ? '' : d.emptyTins), (d.emptyTinsIncoming === null ? '' : d.emptyTinsIncoming), d.growthPct,
     d.demand, (d.cover >= 999 ? '' : d.cover.toFixed(1)),
     (d.suggestedPO || ''), (d.tinShortfall || ''), (d.unitCost || ''), (d.suggestedPOCost || ''),
     (d.cadenceMonths ? d.cadenceMonths.toFixed(1) : ''), (d.orderByMonths === null ? '' : d.orderByMonths.toFixed(1)),
+    _orderByDate(d),
     d.toOrder, (d.orderCost || '')]));
   const csv = out.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
