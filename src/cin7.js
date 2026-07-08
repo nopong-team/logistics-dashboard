@@ -2541,7 +2541,23 @@ async function extractEtdRowsFromImage(env, base64, mediaType) {
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const model = env.AU_ETD_VISION_MODEL || '@cf/meta/llama-3.2-11b-vision-instruct';
-    const out = await env.AI.run(model, { image: [...bytes], prompt: ETD_VISION_PROMPT, max_tokens: 4096 });
+    const input = { image: [...bytes], prompt: ETD_VISION_PROMPT, max_tokens: 4096 };
+    let out;
+    try {
+      out = await env.AI.run(model, input);
+    } catch (e) {
+      // Workers AI error 5016: the Llama vision model requires a one-time
+      // Community-License acceptance ("submit the prompt 'agree'") before first
+      // use. No Pong is an Australian company (not EU-domiciled), so accept it
+      // once for the account, then retry the real request.
+      const msg = String(e?.message || e);
+      if (/\b5016\b/.test(msg) || /submit the prompt 'agree'/i.test(msg)) {
+        try { await env.AI.run(model, { prompt: 'agree' }); } catch (_) {}
+        out = await env.AI.run(model, input);
+      } else {
+        throw e;
+      }
+    }
     return extractJsonArray(out?.response || '');
   }
   throw new Error('No AI configured to read the screenshot — add the Workers AI binding (env.AI) or set ANTHROPIC_API_KEY.');
@@ -2566,13 +2582,21 @@ auRoutes.post('/etd/scan', async (c) => {
   try {
     if (!cin7Configured(c.env)) return c.json({ error: 'CIN7 not configured.' }, 503);
     const body = await c.req.json().catch(() => ({}));
-    let { image, mediaType } = body || {};
-    if (!image) return c.json({ error: 'No image provided.' }, 400);
-    const dm = /^data:([^;]+);base64,(.*)$/s.exec(image);
-    if (dm) { mediaType = mediaType || dm[1]; image = dm[2]; }
-    mediaType = mediaType || 'image/png';
-
-    const raw = await extractEtdRowsFromImage(c.env, image, mediaType);
+    let raw;
+    if (Array.isArray(body?.rows)) {
+      // Spreadsheet path (default) — rows already parsed client-side from the
+      // uploaded Excel/CSV, so no AI is involved. Each row: { cust_po, fill_date, due_date? }.
+      raw = body.rows;
+    } else {
+      // Image path (fallback only) — read a screenshot with vision. Requires an
+      // AI provider to be configured (env.AI binding or ANTHROPIC_API_KEY).
+      let { image, mediaType } = body || {};
+      if (!image) return c.json({ error: 'No spreadsheet rows or image provided.' }, 400);
+      const dm = /^data:([^;]+);base64,(.*)$/s.exec(image);
+      if (dm) { mediaType = mediaType || dm[1]; image = dm[2]; }
+      mediaType = mediaType || 'image/png';
+      raw = await extractEtdRowsFromImage(c.env, image, mediaType);
+    }
     const pos = await fetchAllPurchaseOrders(c.env);
     const byRef = new Map();
     for (const p of pos) if (p.reference) byRef.set(String(p.reference).toUpperCase(), p);

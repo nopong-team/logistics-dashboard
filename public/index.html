@@ -1835,14 +1835,14 @@
     </div>
 
     <div class="table-card" style="margin-bottom:16px;">
-      <div class="table-card-header"><div class="table-card-title">Update ETDs from HFM screenshot</div></div>
+      <div class="table-card-header"><div class="table-card-title">Update ETDs from HFM schedule</div></div>
       <div style="padding:0 20px 16px;">
-        <p style="font-size:12px;color:var(--text-secondary);margin:0 0 12px;">Upload the HFM production-schedule screenshot. It reads each PO's fill date, matches it to CIN7 (<code>PO-&lt;number&gt;</code>), previews current &rarr; new ETD, and on confirm writes <code>estimatedDeliveryDate</code> back to CIN7. Date ranges and split fills use the <strong>earliest</strong> date.</p>
+        <p style="font-size:12px;color:var(--text-secondary);margin:0 0 12px;">Upload the HFM production schedule as an <strong>Excel or CSV</strong> file (columns: Cust PO#, Description, Size, Quantity, Due Date, Fill Date). It reads each PO's fill date, matches it to CIN7 (<code>PO-&lt;number&gt;</code>), previews current &rarr; new ETD, and on confirm writes <code>estimatedDeliveryDate</code> back to CIN7. Date ranges and split fills use the <strong>earliest</strong> date.</p>
         <div class="upload-zone" id="etd-upload-zone" onclick="document.getElementById('etd-file-input').click()">
-          <input type="file" id="etd-file-input" accept="image/*" onchange="handleEtdUpload(event)">
-          <div class="upload-zone-icon">📋</div>
-          <div class="upload-zone-text">Drop the HFM screenshot here, or <strong>browse</strong></div>
-          <div class="upload-zone-text" style="font-size:10px;margin-top:2px;">PNG or JPG</div>
+          <input type="file" id="etd-file-input" accept=".xlsx,.xls,.csv" onchange="handleEtdUpload(event)">
+          <div class="upload-zone-icon">📄</div>
+          <div class="upload-zone-text">Drop the HFM Excel/CSV here, or <strong>browse</strong></div>
+          <div class="upload-zone-text" style="font-size:10px;margin-top:2px;">.xlsx, .xls or .csv</div>
         </div>
         <div id="etd-result" style="margin-top:16px;"></div>
       </div>
@@ -2524,15 +2524,20 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.74</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.76</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
-    <h4>v2.2.74 &mdash; 8 July 2026 (📋 Purchase Orders &mdash; update ETDs from an HFM screenshot)</h4>
+    <h4>v2.2.76 &mdash; 9 July 2026 (🩹 fix: ETD "Write" button was invisible)</h4>
     <ul>
-      <li><strong>New on the Purchase Orders tab: &ldquo;Update ETDs from HFM screenshot&rdquo;.</strong> Upload the HFM (Health Focus Manufacturers) production-schedule screenshot; the dashboard reads each row, matches the Cust PO# to its CIN7 purchase order (<code>PO-&lt;number&gt;</code>), and shows a preview of the current &rarr; new ETD. Tick the rows you want and it writes <code>estimatedDeliveryDate</code> straight back to CIN7 (<code>PUT /PurchaseOrders</code>).</li>
+      <li>The &ldquo;Write selected ETDs to CIN7&rdquo; button used a <code>--pink</code> CSS variable this dashboard doesn&rsquo;t define, so it rendered white-on-white (invisible). Switched to <code>--accent</code> so the button shows.</li>
+    </ul>
+
+    <h4>v2.2.75 &mdash; 9 July 2026 (📄 Purchase Orders &mdash; update ETDs from the HFM schedule)</h4>
+    <ul>
+      <li><strong>New on the Purchase Orders tab: &ldquo;Update ETDs from HFM schedule&rdquo;.</strong> Upload the HFM (Health Focus Manufacturers) production schedule as an <strong>Excel or CSV</strong> file; the dashboard reads each row, matches the Cust PO# to its CIN7 purchase order (<code>PO-&lt;number&gt;</code>), and shows a preview of the current &rarr; new ETD. Tick the rows you want and it writes <code>estimatedDeliveryDate</code> straight back to CIN7 (<code>PUT /PurchaseOrders</code>).</li>
+      <li><strong>Reads the spreadsheet directly in the browser (SheetJS)</strong> &mdash; no AI involved, nothing to configure. Auto-detects the Cust PO# and Fill Date columns from the header row.</li>
       <li><strong>Earliest-date rule for ranges / split fills</strong> &mdash; <code>17 &amp; 24 Jul</code> &rarr; 17 Jul, <code>30-31 Jul</code> &rarr; 30 Jul; the year is inferred. Rows where the fill date lands after the due date are flagged (⚑) for a second look, and PO numbers not found in CIN7 are listed rather than silently skipped.</li>
-      <li><strong>Screenshot reading uses Cloudflare Workers AI</strong> (the <code>AI</code> binding &mdash; no external key). If an <code>ANTHROPIC_API_KEY</code> secret is set, Claude vision is used instead for higher accuracy. Every write is logged to KV (<code>au:etd:audit:*</code>).</li>
-      <li>New endpoints <code>POST /api/au/etd/scan</code> (parse + preview, no writes) and <code>POST /api/au/etd/apply</code> (gated write). Nothing is written until you confirm.</li>
+      <li>New endpoints <code>POST /api/au/etd/scan</code> (parse + preview, no writes) and <code>POST /api/au/etd/apply</code> (gated write, logged to KV <code>au:etd:audit:*</code>). Nothing is written until you confirm.</li>
     </ul>
 
     <h4>v2.2.73 &mdash; 2 July 2026 (🥫 AU Forecasting &mdash; empty tins ON ORDER now count toward the fill ceiling)</h4>
@@ -10256,17 +10261,56 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (e.target && e.target.files && e.target.files.length) return e.target.files[0];
     return null;
   }
+  // Find the header row + column indices in the sheet, then pull out the data rows.
+  function extractHfmRows(aoa){
+    let hIdx = -1, cPo = -1, cFill = -1, cDue = -1, cDesc = -1, cSize = -1, cQty = -1;
+    for (let i = 0; i < Math.min(aoa.length, 25); i++){
+      const row = (aoa[i] || []).map(function(x){ return String(x == null ? '' : x).toLowerCase().trim(); });
+      const po = row.findIndex(function(x){ return /cust.*po|\bpo\s*#|\bpo\s*number|^po$/.test(x); });
+      const fill = row.findIndex(function(x){ return /fill/.test(x); });
+      if (po >= 0 && fill >= 0){
+        hIdx = i; cPo = po; cFill = fill;
+        cDue  = row.findIndex(function(x){ return /due/.test(x); });
+        cDesc = row.findIndex(function(x){ return /desc/.test(x); });
+        cSize = row.findIndex(function(x){ return /size/.test(x); });
+        cQty  = row.findIndex(function(x){ return /qty|quantity/.test(x); });
+        break;
+      }
+    }
+    if (hIdx < 0) return [];
+    const out = [];
+    for (let i = hIdx + 1; i < aoa.length; i++){
+      const r = aoa[i]; if (!r) continue;
+      const cust = String(r[cPo] == null ? '' : r[cPo]).trim();
+      const fill = String(r[cFill] == null ? '' : r[cFill]).trim();
+      if (!cust) continue;
+      out.push({
+        cust_po: cust, fill_date: fill,
+        due_date:    cDue  >= 0 ? String(r[cDue]  == null ? '' : r[cDue]).trim()  : '',
+        description: cDesc >= 0 ? String(r[cDesc] == null ? '' : r[cDesc]).trim() : '',
+        size:        cSize >= 0 ? String(r[cSize] == null ? '' : r[cSize]).trim() : '',
+        quantity:    cQty  >= 0 ? String(r[cQty]  == null ? '' : r[cQty]).trim()  : '',
+      });
+    }
+    return out;
+  }
+
   window.handleEtdUpload = async function(e){
     const file = fileFrom(e); const result = document.getElementById('etd-result'); if (!file) return;
-    if (!/^image\//.test(file.type)) { result.innerHTML = '<div style="color:#B91C1C;padding:12px;">Please upload an image (PNG or JPG).</div>'; return; }
-    result.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-secondary);">Reading screenshot… (a few seconds)</div>';
+    if (!/\.(xlsx|xls|csv)$/i.test(file.name)) { result.innerHTML = '<div style="color:#B91C1C;padding:12px;">Please upload an Excel or CSV file (.xlsx, .xls or .csv).</div>'; return; }
+    result.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-secondary);">Reading spreadsheet…</div>';
     try {
-      const dataUrl = await new Promise(function(res, rej){ const fr = new FileReader(); fr.onload = function(){ res(fr.result); }; fr.onerror = function(){ rej(new Error('Could not read the file')); }; fr.readAsDataURL(file); });
-      const resp = await fetch('/api/au/etd/scan', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ image: dataUrl }) });
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+      const rows = extractHfmRows(aoa);
+      if (!rows.length) { result.innerHTML = '<div style="color:#B91C1C;padding:12px;">Couldn\'t find a <strong>Cust PO#</strong> and <strong>Fill Date</strong> column in that file. Check the column headers and try again.</div>'; return; }
+      const resp = await fetch('/api/au/etd/scan', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ rows }) });
       const txt = await resp.text(); let data = {}; try { data = JSON.parse(txt); } catch(_){}
       if (!resp.ok) throw new Error((data && data.error) || ('HTTP ' + resp.status));
       renderPreview(data.rows || []);
-    } catch(err){ result.innerHTML = '<div style="color:#B91C1C;padding:12px;">Couldn\'t read the screenshot: ' + esc(err.message) + '</div>'; }
+    } catch(err){ result.innerHTML = '<div style="color:#B91C1C;padding:12px;">Couldn\'t read the spreadsheet: ' + esc(err.message) + '</div>'; }
   };
   function renderPreview(r){
     rows = r; const result = document.getElementById('etd-result');
@@ -10282,7 +10326,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       html += '<tr><td><input type="checkbox" data-i="' + i + '" ' + (can?'checked':'disabled') + '></td><td>' + esc(x.reference||x.cust_po||'—') + flag + '</td><td>' + esc(x.fill_raw||'') + '</td><td>' + esc(x.current_etd||'—') + '</td><td style="font-weight:600;">' + esc(x.new_etd||'—') + '</td><td>' + (badge[x.change]||esc(x.change)) + '</td></tr>';
     });
     html += '</tbody></table></div>';
-    html += '<div style="margin-top:14px;"><button id="etd-apply-btn" onclick="applyEtd()" style="background:var(--pink);color:#fff;border:none;border-radius:6px;padding:10px 16px;font-weight:600;cursor:pointer;">Write selected ETDs to CIN7</button> <span style="font-size:11px;color:var(--text-secondary);margin-left:8px;">Only checked rows are written. Each change is logged.</span></div>';
+    html += '<div style="margin-top:14px;"><button id="etd-apply-btn" onclick="applyEtd()" style="background:var(--accent,#E6007E);color:#fff;border:none;border-radius:6px;padding:10px 18px;font-weight:700;font-size:14px;cursor:pointer;">Write selected ETDs to CIN7</button> <span style="font-size:11px;color:var(--text-secondary);margin-left:8px;">Only checked rows are written. Each change is logged.</span></div>';
     result.innerHTML = html;
   }
   window.applyEtd = async function(){
