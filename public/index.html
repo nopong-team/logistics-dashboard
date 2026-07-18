@@ -1359,8 +1359,12 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.39</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.39.1</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.39.1 &mdash; 18 July 2026 (Remove stale "(×48)" note from the totals row)</h4>
+    <ul>
+      <li>Dropped the "(×48)" label on the Xero column's "Total single tins" footer. It was left over from before v2.39, when only the footer converted cartons to tins &mdash; now every Xero cell already shows tins (with a "(N&nbsp;cart)" note on carton rows), so the footer is just their sum and the label was misleading (most of that total was never multiplied).</li>
+    </ul>
     <h4>v2.39 &mdash; 18 July 2026 (Monthly SKU Sales: wholesale cartons counted in single tins everywhere)</h4>
     <ul>
       <li><strong>Wholesale carton volume is no longer understated.</strong> A Xero CTN carton = 48 tins, but the Total column, the "units" summary card, the % column and the CSV all counted a carton as <strong>1</strong> — while the "Total single tins" footer counted it as 48. So the summary card and the footer never matched (e.g. 660 vs 1,130) and a big wholesale line showed as ~1.5% and sorted last. Now cartons are normalized to single tins at the source, so <strong>every figure shares one unit and reconciles</strong>: the summary card equals the footer, the % reflects real tin volume, the CSV matches the screen, and carton lines sort by actual volume. The Xero cell shows the tin figure with a small "(N&nbsp;cart)" note so the carton count is still visible.</li>
@@ -5101,7 +5105,7 @@ function renderMonthlyTab() {
         <td colspan="4" style="text-align:right;padding-right:12px;">Total single tins</td>
         <td class="num right">${fmtNum(totalWoo)}</td>
         <td class="num right">${fmtNum(totalAmz)}</td>
-        <td class="num right"${hideXeroTotal}>${fmtNum(totalXeroTins)}${data.some(d => d.isCarton && d.xeroQty > 0) ? ' <span style="font-size:10px;font-weight:400;color:var(--text-secondary);">(×48)</span>' : ''}</td>
+        <td class="num right"${hideXeroTotal}>${fmtNum(totalXeroTins)}</td>
         <td class="num right"><strong>${fmtNum(grandTotal)}</strong></td>
         <td class="num right">100%</td>
       </tr>`;
