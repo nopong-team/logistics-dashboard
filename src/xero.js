@@ -471,6 +471,31 @@ xeroRoutes.get('/purchase-orders', async (c) => {
 
 const EXCLUDED_INVOICE_CONTACTS = ['metorik', 'amazon'];
 
+// Fetch every ACCREC invoice DATED on/after `since`, across all pages.
+// Two fixes over the old single-page + If-Modified-Since call:
+//  • Paginate (like fetchAllPurchaseOrders) — the old code fetched page 1 only
+//    (max 100), silently dropping the oldest invoices once volume passed 100.
+//  • Filter on the invoice `Date` via a `where` clause, not `If-Modified-Since`
+//    (which filters on UpdatedDateUTC) — so "last 6 months" means invoices
+//    *dated* in the window, not merely *touched* in it.
+async function fetchAllInvoices(env, accessToken, tenantId, since) {
+  const y = since.getUTCFullYear(), m = since.getUTCMonth() + 1, d = since.getUTCDate();
+  const where = `Type=="ACCREC" AND Date >= DateTime(${y},${m},${d})`;
+  const all = [];
+  let page = 1;
+  const HARD_CAP = 20; // ~2000 invoices — well past anything realistic
+  while (page <= HARD_CAP) {
+    const data = await xeroApiGet(env, accessToken, tenantId, '/api.xro/2.0/Invoices',
+      { where, order: 'Date DESC', page });
+    const batch = data?.Invoices || [];
+    if (batch.length === 0) break;
+    all.push(...batch);
+    page++;
+    if (batch.length >= 100) await new Promise((r) => setTimeout(r, 1500)); // Xero rate-limit politeness
+  }
+  return all;
+}
+
 xeroRoutes.get('/invoices', async (c) => {
   try {
     const { accessToken, tenantId } = await getXeroAuth(c.env);
@@ -478,17 +503,7 @@ xeroRoutes.get('/invoices', async (c) => {
     const sixMonthsAgo = new Date();
     sixMonthsAgo.setUTCMonth(sixMonthsAgo.getUTCMonth() - 6);
 
-    const data = await xeroApiGet(
-      c.env, accessToken, tenantId, '/api.xro/2.0/Invoices',
-      {
-        where: 'Type=="ACCREC"',
-        order: 'Date DESC',
-        page:  1,
-      },
-      { 'If-Modified-Since': sixMonthsAgo.toUTCString() },
-    );
-
-    const all = data?.Invoices || [];
+    const all = await fetchAllInvoices(c.env, accessToken, tenantId, sixMonthsAgo);
     const filtered = all.filter((inv) => {
       const name = (inv.Contact?.Name || '').toLowerCase();
       return !EXCLUDED_INVOICE_CONTACTS.some((exc) => name.includes(exc));

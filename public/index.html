@@ -1359,8 +1359,12 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.40</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.41</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.41 &mdash; 18 July 2026 (Xero invoices: paginate + filter by invoice date)</h4>
+    <ul>
+      <li><strong>Xero invoice list no longer silently drops the oldest invoices.</strong> The endpoint fetched only the first page (max 100), so once more than 100 ACCREC invoices fell in the window the older-dated ones just vanished from the finance view. It now paginates through all pages (like the purchase-orders path). It also filters on the invoice <strong>Date</strong> via a <code>where</code> clause instead of <code>If-Modified-Since</code> (which filtered on <em>last-updated</em> date) &mdash; so "last 6 months" now means invoices <em>dated</em> in the window, not merely ones touched in it.</li>
+    </ul>
     <h4>v2.40 &mdash; 18 July 2026 (Woo refunds/cancellations stop counting as revenue &mdash; modified-date safety-net)</h4>
     <ul>
       <li><strong>Refunded and cancelled orders no longer count as revenue forever.</strong> The incremental Woo sync advanced its watermark on <em>create</em> date and pulled each order only once, at creation &mdash; so an order that later flipped <code>completed/processing → refunded</code> stayed counted in D1 (revenue overcounted), and an <code>unpaid → paid</code> upgrade never landed (undercounted). A new weekly <strong>modified-date safety-net</strong> re-fetches every order <em>modified</em> in the last 30 days (CA + US) and upserts it, correcting status + line items in place. Mirrors the CIN7 safety-net already used on the AU side. A shared <code>buildWooOrderStatements</code> helper keeps the incremental + safety-net paths from drifting. Manual trigger: <code>POST /api/admin/woo/safetynet</code>.</li>
