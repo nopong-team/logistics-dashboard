@@ -1354,8 +1354,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.35.2</span> &middot; May 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.36</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.36 &mdash; 18 July 2026 (Amazon SKU dedup made structural &mdash; no more manual cleanup)</h4>
+    <ul>
+      <li><strong>The Amazon "Run cleanup" chore is gone.</strong> Amazon SKU quantities no longer creep upward with no real sales, and the Data Health dedup check now stays green on its own &mdash; no periodic cleaning. Root cause: the report window filters on <em>last-updated/shipment</em> date, but rows were stored by <em>purchase date</em> and cleared by a date-window <code>DELETE</code> that keyed on purchase date &mdash; three mismatched axes, so re-fetching an active range left stale copies behind that the SKU totals then summed.</li>
+      <li><strong>Fix: a stable per-line key.</strong> <code>amazon_items</code> now captures <code>shipment_item_id</code> (migration <code>0008</code>) with a UNIQUE index; ingest supersedes the whole re-fetched <code>range_label</code> and upserts on the line id, so exactly one row survives per real order line &mdash; even if a line migrates between report windows. Duplicates are now structurally impossible, not cleaned up after the fact.</li>
+      <li><strong>New Data Health checks:</strong> "Amazon duplicate order lines" (the true 0-or-bust invariant, counted by <code>shipment_item_id</code>) and a "rows missing line id" guard that trips if the report ever stops delivering the column.</li>
+      <li><em>One-time:</em> legacy pre-<code>0008</code> rows carry no line id and clear as active ranges re-fetch; the existing "Run cleanup" button still handles any older residue.</li>
+    </ul>
     <h4>v2.35.2 &mdash; 11 May 2026 (NA changelog cleanup)</h4>
     <ul>
       <li><strong>Removed inadvertent v2.35 + v2.35.1 entries from this NA panel.</strong> Those bumps were AU-only changes (Phase 2b CIN7 work) that should have stayed in the AU changelog only per the per-region versioning rule. NA dashboard behaviour is unchanged since v2.34.2 &mdash; the AU work didn't touch any NA code paths. Cleanup logged on the AU side as v2.2.5.</li>
@@ -9574,6 +9581,39 @@ async function runDataHealthChecks() {
     } else {
       checks.push({ status: 'pass', name: 'Amazon SKU ingest dedup',
         detail: 'No amazon_items rows from superseded report jobs — re-ingest is replacing prior data correctly' });
+    }
+
+    // ── Check 3d: TRUE dedup invariant (v2.36 / migration 0008) ──
+    // Counts order lines that appear more than once by (market, shipment_item_id).
+    // This is the real "is anything double-counted" test — it catches duplicates
+    // across range_labels too, which the superseded check above cannot. With the
+    // unique-line-key upsert in place this must sit at 0 permanently, with no
+    // manual cleanup — the whole point of the v2.36 fix.
+    const caDup = audit.amazon.caDuplicateIdentityCount || 0;
+    const usDup = audit.amazon.usDuplicateIdentityCount || 0;
+    if (caDup + usDup > 0) {
+      checks.push({
+        status: 'fail',
+        name: 'Amazon duplicate order lines',
+        detail: `${(caDup + usDup).toLocaleString()} order lines duplicated by shipment_item_id (${caDup.toLocaleString()} CA, ${usDup.toLocaleString()} US). The unique-key upsert should make this impossible — investigate the ingest path.`,
+        action: { label: 'Run cleanup', handler: 'runAmazonDedupe' }
+      });
+    } else {
+      checks.push({ status: 'pass', name: 'Amazon duplicate order lines',
+        detail: 'Exactly one row per order line (shipment_item_id) — dedup is structural, no cleanup needed' });
+    }
+
+    // ── Check 3e: line-identity coverage guard ──
+    // Rows in the live window with no shipment_item_id fall back to weaker
+    // range-only dedup. Should trend to 0 as active ranges re-fetch post-0008.
+    const caMiss = audit.amazon.caMissingLineIdCount || 0;
+    const usMiss = audit.amazon.usMissingLineIdCount || 0;
+    if (caMiss + usMiss > 0) {
+      checks.push({
+        status: 'warn',
+        name: 'Amazon rows missing line id',
+        detail: `${(caMiss + usMiss).toLocaleString()} rows in the last 6 months have no shipment_item_id (${caMiss.toLocaleString()} CA, ${usMiss.toLocaleString()} US). Legacy rows clear as ranges re-fetch; if this stays high the report stopped delivering the column.`
+      });
     }
   }
 

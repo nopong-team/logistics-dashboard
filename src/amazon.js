@@ -692,32 +692,53 @@ async function ingestReadyJobs(env, market, maxJobs, deadlineMs) {
       const doc = await spApiRequest(env, market, `/reports/2021-06-30/documents/${job.document_id}`);
       const text = await downloadReportDocument(doc);
       const parsed = parseAmazonReportTsv(text, market);
-      // Re-ingestion: clean any prior rows covering this job's date window —
-      // not just rows tagged with this job_id. Active ranges (this/last month)
-      // are re-fetched roughly every 24h and each re-fetch creates a new
-      // report_jobs row with a fresh id. The old "DELETE WHERE report_job_id = ?"
-      // only wiped this job's own rows, leaving every prior superseded job's
-      // rows for the same date range in place. Aggregations in
-      // handleAmazonSalesRequest sum across job_ids, so the per-SKU monthly
-      // totals scaled by the number of cron cycles that had already touched
-      // an active range — visible as Amazon SKU quantities that grow week
-      // over week with no underlying business activity. (Fixed v2.29.)
+      if (parsed.identityMissing > 0) {
+        // The report should always carry shipment-item-id (see migration 0008).
+        // If it ever doesn't, those rows fall back to range-supersede-only dedup
+        // and the Data Health "Amazon rows missing line id" check goes non-zero.
+        console.warn(`Amazon ${market} ${job.range_label}: ${parsed.identityMissing} matched rows missing shipment_item_id`);
+      }
+      // Re-ingestion dedup — two complementary layers, replacing the v2.29
+      // date-window DELETE (which keyed on purchase_date while the report window
+      // filters on last-updated date, so it could never fully clear a range):
+      //
+      //  (1) Supersede the whole range: a re-fetch fully re-downloads its
+      //      range_label, so the new job is authoritative — delete every row
+      //      from PRIOR ingested jobs of the same (market, range_label). This
+      //      also clears legacy pre-0008 rows (NULL shipment_item_id).
+      //  (2) Upsert on the stable line identity: if the same order line ever
+      //      migrates to a DIFFERENT range_label (e.g. re-shipped/refunded
+      //      across a half-month boundary), ON CONFLICT replaces the prior copy
+      //      instead of duplicating it across ranges — the case (1) alone can't
+      //      catch. Verified against SQLite's partial-index upsert semantics.
       await env.DB.prepare(
         `DELETE FROM amazon_items
            WHERE market = ?
-             AND date_created >= ?
-             AND date_created <  ?`,
-      ).bind(market, job.data_start_time, job.data_end_time).run();
+             AND report_job_id IN (
+               SELECT id FROM report_jobs
+               WHERE source = 'amazon' AND market = ? AND range_label = ? AND id <> ?
+             )`,
+      ).bind(market, market, job.range_label, job.id).run();
       if (parsed.rows.length > 0) {
         const stmts = [];
         for (const r of parsed.rows) {
           stmts.push(
             env.DB.prepare(
               `INSERT INTO amazon_items
-                 (market, seller_sku, dashboard_sku, name, quantity, total, date_created, local_date, report_job_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 (market, seller_sku, dashboard_sku, name, quantity, total, date_created, local_date, report_job_id, shipment_item_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(market, shipment_item_id) WHERE shipment_item_id IS NOT NULL
+               DO UPDATE SET
+                 seller_sku    = excluded.seller_sku,
+                 dashboard_sku = excluded.dashboard_sku,
+                 name          = excluded.name,
+                 quantity      = excluded.quantity,
+                 total         = excluded.total,
+                 date_created  = excluded.date_created,
+                 local_date    = excluded.local_date,
+                 report_job_id = excluded.report_job_id`,
             ).bind(
-              market, r.sellerSku, r.dashboardSku, r.name, r.quantity, r.total, r.dateCreated, r.localDate, job.id,
+              market, r.sellerSku, r.dashboardSku, r.name, r.quantity, r.total, r.dateCreated, r.localDate, job.id, r.shipmentItemId,
             ),
           );
         }
@@ -783,6 +804,11 @@ function parseAmazonReportTsv(text, market) {
   // GET_FBA_FULFILLMENT_CUSTOMER_SHIPMENT_SALES_DATA (fallback) uses 'item-price-per-unit'.
   const priceCol       = headers.findIndex((h) => h === 'item_price' || h === 'item_price_per_unit' || h === 'price' || h === 'item_total');
   const dateCol        = headers.findIndex((h) => h === 'purchase_date' || h === 'last_updated_date' || h === 'shipment_date' || h === 'payments_date');
+  // Stable per-line identity for dedup. 'shipment-item-id' / "Shipment Item ID"
+  // both normalise to 'shipment_item_id'. Fall back to 'amazon_order_item_id' if
+  // a report variant omits the shipment id. This is the key the UNIQUE index +
+  // upsert rely on (migration 0008) — the same column the AU importer dedups on.
+  const lineIdCol      = headers.findIndex((h) => h === 'shipment_item_id' || h === 'amazon_order_item_id' || h === 'order_item_id');
   const channelCol     = headers.findIndex((h) => h === 'sales_channel');
   const currencyCol    = headers.findIndex((h) => h === 'currency');
   const shipCountryCol = headers.findIndex((h) => h === 'ship_country' || h === 'ship_to_country' || h === 'ship_country_code');
@@ -793,7 +819,7 @@ function parseAmazonReportTsv(text, market) {
     : 'NONE';
 
   const rows = [];
-  let matched = 0, unmatched = 0, wrongMarket = 0;
+  let matched = 0, unmatched = 0, wrongMarket = 0, identityMissing = 0;
   for (let i = 1; i < lines.length; i++) {
     const cols = lines[i].split('\t');
     const sellerSku   = skuCol >= 0 ? (cols[skuCol] || '').trim() : '';
@@ -801,6 +827,7 @@ function parseAmazonReportTsv(text, market) {
     const qty         = qtyCol >= 0 ? parseInt(cols[qtyCol] || '0', 10) : 1;
     const price       = priceCol >= 0 ? parseFloat(cols[priceCol] || '0') : 0;
     const dateStr     = dateCol >= 0 ? (cols[dateCol] || '').trim() : '';
+    const lineId      = lineIdCol >= 0 ? (cols[lineIdCol] || '').trim() : '';
 
     // Marketplace filter — three signals in priority order. If none of them
     // apply, accept the row (filterSignal === 'NONE' surfaces this in
@@ -828,22 +855,25 @@ function parseAmazonReportTsv(text, market) {
     const dashSku = matchAmzItemToSku(productName, sellerSku);
     if (!dashSku) { unmatched++; continue; }
     matched++;
+    if (!lineId) identityMissing++;  // guard: surfaced in report_jobs + Data Health if the report ever drops the id
     rows.push({
       sellerSku,
-      dashboardSku: dashSku,
-      name:         productName || null,
-      quantity:     qty,
-      total:        price,
-      dateCreated:  dateStr,
-      localDate:    toBusinessLocalDate(dateStr),
+      dashboardSku:   dashSku,
+      name:           productName || null,
+      quantity:       qty,
+      total:          price,
+      dateCreated:    dateStr,
+      localDate:      toBusinessLocalDate(dateStr),
+      shipmentItemId: lineId || null,  // null only if the report omitted the column — then dedup falls back to range-supersede
     });
   }
   return {
     rows,
-    totalRows:        lines.length - 1,
-    matchedCount:     matched,
-    unmatchedCount:   unmatched,
-    wrongMarketCount: wrongMarket,
+    totalRows:          lines.length - 1,
+    matchedCount:       matched,
+    unmatchedCount:     unmatched,
+    wrongMarketCount:   wrongMarket,
+    identityMissing,    // matched rows with no shipment_item_id — should be 0
     filterSignal,
   };
 }

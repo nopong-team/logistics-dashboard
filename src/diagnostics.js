@@ -397,9 +397,40 @@ async function countAmazonSupersededRows(env, market) {
   return res?.n || 0;
 }
 
+// TRUE dedup invariant (post-migration 0008): count how many extra rows exist
+// beyond one per (market, shipment_item_id). Must be 0. Unlike the superseded
+// check this catches duplicates ACROSS range_labels too, and it's independent of
+// job bookkeeping — it's the real "is any order line double-counted" question.
+async function countAmazonDuplicateIdentities(env, market) {
+  const res = await env.DB.prepare(
+    `SELECT COALESCE(SUM(extra), 0) AS n FROM (
+       SELECT COUNT(*) - 1 AS extra
+       FROM amazon_items
+       WHERE market = ? AND shipment_item_id IS NOT NULL
+       GROUP BY shipment_item_id
+       HAVING COUNT(*) > 1
+     )`,
+  ).bind(market).first();
+  return res?.n || 0;
+}
+
+// Guard: matched rows in the live window with no stable line id. Should trend to
+// 0 as active ranges re-fetch post-0008. >0 = the report stopped delivering
+// shipment-item-id (those rows dedup on range-supersede only). Legacy frozen
+// ranges are excluded by the window so this reflects the live ingest path.
+async function countAmazonMissingLineId(env, market, startDate) {
+  const res = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM amazon_items
+     WHERE market = ? AND dashboard_sku IS NOT NULL
+       AND shipment_item_id IS NULL AND local_date >= ?`,
+  ).bind(market, startDate).first();
+  return res?.n || 0;
+}
+
 async function buildAmazonAudit(env) {
   const { startDate } = buildMonthWindow();
-  const [caSku, usSku, caState, usState, caJobs, usJobs, caSuperseded, usSuperseded] = await Promise.all([
+  const [caSku, usSku, caState, usState, caJobs, usJobs, caSuperseded, usSuperseded,
+         caDupIdentity, usDupIdentity, caMissingId, usMissingId] = await Promise.all([
     env.DB.prepare(
       `SELECT COUNT(DISTINCT dashboard_sku) AS n
        FROM amazon_items
@@ -432,6 +463,10 @@ async function buildAmazonAudit(env) {
     ).first(),
     countAmazonSupersededRows(env, 'CA'),
     countAmazonSupersededRows(env, 'US'),
+    countAmazonDuplicateIdentities(env, 'CA'),
+    countAmazonDuplicateIdentities(env, 'US'),
+    countAmazonMissingLineId(env, 'CA', startDate),
+    countAmazonMissingLineId(env, 'US', startDate),
   ]);
 
   const splitSignals = (s) => (s ? String(s).split(',').filter(Boolean) : []);
@@ -463,6 +498,14 @@ async function buildAmazonAudit(env) {
     // climbs after a clean run — the ingest fix has regressed.
     caSupersededRowCount: caSuperseded,
     usSupersededRowCount: usSuperseded,
+    // v2.36 bulletproof dedup (migration 0008). duplicateIdentityCount is the
+    // true invariant — 0 means no order line is double-counted anywhere, across
+    // ranges included. missingLineIdCount flags rows the report delivered with
+    // no shipment-item-id (dedup then falls back to range-supersede only).
+    caDuplicateIdentityCount: caDupIdentity,
+    usDuplicateIdentityCount: usDupIdentity,
+    caMissingLineIdCount: caMissingId,
+    usMissingLineIdCount: usMissingId,
   };
 }
 
