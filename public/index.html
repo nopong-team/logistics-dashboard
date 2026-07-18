@@ -1359,8 +1359,12 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.39.1</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.40</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.40 &mdash; 18 July 2026 (Woo refunds/cancellations stop counting as revenue &mdash; modified-date safety-net)</h4>
+    <ul>
+      <li><strong>Refunded and cancelled orders no longer count as revenue forever.</strong> The incremental Woo sync advanced its watermark on <em>create</em> date and pulled each order only once, at creation &mdash; so an order that later flipped <code>completed/processing → refunded</code> stayed counted in D1 (revenue overcounted), and an <code>unpaid → paid</code> upgrade never landed (undercounted). A new weekly <strong>modified-date safety-net</strong> re-fetches every order <em>modified</em> in the last 30 days (CA + US) and upserts it, correcting status + line items in place. Mirrors the CIN7 safety-net already used on the AU side. A shared <code>buildWooOrderStatements</code> helper keeps the incremental + safety-net paths from drifting. Manual trigger: <code>POST /api/admin/woo/safetynet</code>.</li>
+    </ul>
     <h4>v2.39.1 &mdash; 18 July 2026 (Remove stale "(×48)" note from the totals row)</h4>
     <ul>
       <li>Dropped the "(×48)" label on the Xero column's "Total single tins" footer. It was left over from before v2.39, when only the footer converted cartons to tins &mdash; now every Xero cell already shows tins (with a "(N&nbsp;cart)" note on carton rows), so the footer is just their sum and the label was misleading (most of that total was never multiplied).</li>

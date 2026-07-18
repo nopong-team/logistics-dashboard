@@ -12,7 +12,7 @@
 
 import { Hono } from 'hono';
 import { wooRoutes, invalidateWooSalesCache } from './woo.js';
-import { adminRoutes, runBackfillChunk } from './admin.js';
+import { adminRoutes, runBackfillChunk, runWooSafetyNetBackfill } from './admin.js';
 import { salesBinderRoutes, runSalesBinderCronSync } from './salesbinder.js';
 import { amazonRoutes, runAmazonOrdersChunk, runAmazonReportsTick, runAmazonInventoryCronSync, invalidateAmazonSalesCache } from './amazon.js';
 import { diagnosticsRoutes } from './diagnostics.js';
@@ -315,6 +315,32 @@ async function runCin7SafetyNetCron(env) {
   }
 }
 
+// Woo modified-date safety-net (NA: CA + US). Re-fetches every order MODIFIED in
+// the last 30 days and INSERT OR REPLACEs it, so status changes the create-date
+// incremental sync never re-pulls (refunds/cancellations that must stop counting
+// as revenue; unpaid→paid upgrades that must start counting) get corrected.
+// Runs on the same weekly safety-net invocation as CIN7 (own subrequest budget).
+async function runWooSafetyNetCron(env) {
+  if (!env.DB) {
+    console.log('Woo safety-net skipped: DB binding not configured');
+    return;
+  }
+  for (const market of ['CA', 'US']) {
+    try {
+      const r = await runWooSafetyNetBackfill(env, market, { sinceDays: 30 });
+      if (r.skipped) { console.log(`Woo safety-net ${market}: skipped (${r.reason})`); continue; }
+      console.log(
+        `Woo safety-net ${market}: swept ${r.pagesFetched} page(s) since ${r.sinceISO}, ` +
+        `${r.ordersUpserted} orders re-synced, ${r.itemsUpserted} items` +
+        (r.more ? ' [hit page cap — window not fully covered]' : '') +
+        ` (${r.durationMs}ms)`,
+      );
+    } catch (e) {
+      console.error(`Woo safety-net ${market} failed:`, redactSecrets(e?.message || String(e)));
+    }
+  }
+}
+
 async function runCronSync(env) {
   if (!env.DB) {
     console.log('cron sync skipped: DB binding not configured');
@@ -348,8 +374,9 @@ export default {
     if (event.cron === FIFTEEN_MIN_CRON) {
       ctx.waitUntil(runCronSync(env));
     } else {
-      // Any non-15-min trigger is the weekly safety-net.
-      ctx.waitUntil(runCin7SafetyNetCron(env));
+      // Any non-15-min trigger is the weekly safety-net (CIN7 + Woo), each in
+      // its own error boundary so one failing can't skip the other.
+      ctx.waitUntil(Promise.allSettled([runCin7SafetyNetCron(env), runWooSafetyNetCron(env)]));
     }
   },
 };

@@ -118,6 +118,50 @@ const PER_PAGE = 100;
 const DEFAULT_PAGES_PER_CALL = 1;
 const MAX_PAGES_PER_CALL = 20; // protective cap so one call can't run forever
 
+// Build the D1 upsert statements for a batch of Woo orders — an order row
+// (INSERT OR REPLACE, keyed on the Woo order id) plus a delete-then-insert of
+// its line items. Shared by the incremental backfill and the modified-date
+// safety-net so the two paths can never drift on how a row is written. The
+// INSERT OR REPLACE is exactly what lets the safety-net correct an order's
+// status in place (e.g. completed → refunded) when it re-pulls by modified date.
+function buildWooOrderStatements(env, market, store, orders) {
+  const stmts = [];
+  let itemsAdded = 0;
+  for (const o of orders) {
+    // local_date is the canonical Eastern bucket key. Woo's date_created is
+    // already Eastern-naive (both stores configured to America/Toronto and
+    // America/New_York), so substring(0,10) extracts the Eastern YYYY-MM-DD
+    // directly — no timezone conversion at write time (see src/timezone.js).
+    const localDate = (o.date_created || '').substring(0, 10) || null;
+    stmts.push(
+      env.DB.prepare(
+        `INSERT OR REPLACE INTO orders
+           (id, market, number, status, date_created, local_date, total, currency, raw_json, synced_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, strftime('%Y-%m-%dT%H:%M:%SZ','now'))`,
+      ).bind(
+        o.id, market, o.number || String(o.id), o.status || 'unknown',
+        o.date_created || '', localDate, parseFloat(o.total || 0), o.currency || store.currency,
+      ),
+    );
+    stmts.push(env.DB.prepare(`DELETE FROM order_items WHERE order_id = ?`).bind(o.id));
+    for (const item of (o.line_items || [])) {
+      itemsAdded++;
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO order_items
+             (order_id, market, sku, name, quantity, total, date_created, local_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          o.id, market, item.sku || null, item.name || null,
+          parseInt(item.quantity || 0, 10), parseFloat(item.total || 0),
+          o.date_created || '', localDate,
+        ),
+      );
+    }
+  }
+  return { stmts, itemsAdded };
+}
+
 /**
  * Run one Woo→D1 backfill chunk.
  *
@@ -174,63 +218,15 @@ export async function runBackfillChunk(env, market, pages, action = 'backfill') 
   let itemsAdded = 0;
 
   if (orders.length > 0) {
-    // Build the batch: order upserts, then delete-then-insert for items.
-    const stmts = [];
-    for (const o of orders) {
-      // raw_json deliberately set to NULL for backfill — JSON.stringify(o)
-      // for ~500 orders/chunk eats 1.5–3s of pure CPU and we don't read
-      // raw_json anywhere yet. Add back later if ever needed.
-      //
-      // local_date is the canonical Eastern bucket key. Woo's date_created is
-      // already Eastern-naive (both stores configured to America/Toronto and
-      // America/New_York), so substring(0, 10) extracts the Eastern YYYY-MM-DD
-      // directly — no timezone conversion required at write time. See
-      // src/timezone.js for the full rationale and the Amazon counterpart.
-      const localDate = (o.date_created || '').substring(0, 10) || null;
-      stmts.push(
-        env.DB.prepare(
-          `INSERT OR REPLACE INTO orders
-             (id, market, number, status, date_created, local_date, total, currency, raw_json, synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, strftime('%Y-%m-%dT%H:%M:%SZ','now'))`,
-        ).bind(
-          o.id,
-          market,
-          o.number || String(o.id),
-          o.status || 'unknown',
-          o.date_created || '',
-          localDate,
-          parseFloat(o.total || 0),
-          o.currency || store.currency,
-        ),
-      );
-      stmts.push(
-        env.DB.prepare(`DELETE FROM order_items WHERE order_id = ?`).bind(o.id),
-      );
-      for (const item of (o.line_items || [])) {
-        itemsAdded++;
-        stmts.push(
-          env.DB.prepare(
-            `INSERT INTO order_items
-               (order_id, market, sku, name, quantity, total, date_created, local_date)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          ).bind(
-            o.id,
-            market,
-            item.sku || null,
-            item.name || null,
-            parseInt(item.quantity || 0, 10),
-            parseFloat(item.total || 0),
-            o.date_created || '',
-            localDate,
-          ),
-        );
-      }
-    }
+    // Build the batch via the shared helper (see buildWooOrderStatements) so the
+    // incremental path and the modified-date safety-net write rows identically.
+    const built = buildWooOrderStatements(env, market, store, orders);
+    itemsAdded = built.itemsAdded;
     // D1 batch is transactional: all-or-nothing within a single batch call.
     // Chunk if we get above ~500 statements to stay polite under the limit.
     const CHUNK = 500;
-    for (let i = 0; i < stmts.length; i += CHUNK) {
-      await env.DB.batch(stmts.slice(i, i + CHUNK));
+    for (let i = 0; i < built.stmts.length; i += CHUNK) {
+      await env.DB.batch(built.stmts.slice(i, i + CHUNK));
     }
 
     // Advance watermark to the LATEST date_created we just wrote.
@@ -287,6 +283,91 @@ export async function runBackfillChunk(env, market, pages, action = 'backfill') 
     durationMs: Date.now() - startMs,
   };
 }
+
+// ─── Woo modified-date safety-net ────────────────────────────────────────────
+// The incremental backfill advances its watermark on date_created and fetches
+// each order exactly once, at creation — so a later status change never gets
+// re-pulled. A completed→refunded/cancelled flip stays 'completed' in D1 (the
+// read filter still counts it → revenue OVERcounted), and an unpaid→paid
+// upgrade never lands (UNDERcounted). This sweep re-fetches every order MODIFIED
+// in the last `sinceDays` (orderby=modified, all statuses) and INSERT OR REPLACEs
+// it, correcting status + line items in place. Idempotent, bounded, stateless —
+// mirrors runCin7SafetyNetBackfill. It deliberately does NOT touch sync_state:
+// the incremental watermark is independent of this sweep. Runs on the weekly
+// safety-net cron (its own invocation/subrequest budget), not the 15-min tick.
+export async function runWooSafetyNetBackfill(env, market, { sinceDays = 30 } = {}) {
+  const startMs = Date.now();
+  const store = storeFromEnv(env, market);
+  if (!store?.url || !store?.key || !store?.secret) {
+    return { market, skipped: true, reason: 'store not configured' };
+  }
+  const sinceISO = new Date(Date.now() - sinceDays * 86400000).toISOString();
+
+  const allOrders = [];
+  let pagesFetched = 0;
+  let woo;
+  const MAX_PAGES = 40; // ~4000 orders/market/sweep — ample for a 30-day window
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    woo = await wooFetch(store, '/orders', {
+      modified_after: sinceISO,
+      status: WOO_STATUSES_ALL,
+      per_page: String(PER_PAGE),
+      page: String(page),
+      orderby: 'modified',
+      order: 'asc',
+    });
+    pagesFetched++;
+    allOrders.push(...woo.data);
+    if (page >= woo.totalPages) break;
+  }
+  const more = !!(woo && pagesFetched < woo.totalPages);
+
+  // Dedup (Woo can return overlapping pages on the boundary).
+  const seen = new Set();
+  const orders = allOrders.filter(o => {
+    const id = String(o.id);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+
+  let itemsUpserted = 0;
+  if (orders.length > 0) {
+    const built = buildWooOrderStatements(env, market, store, orders);
+    itemsUpserted = built.itemsAdded;
+    const CHUNK = 500;
+    for (let i = 0; i < built.stmts.length; i += CHUNK) {
+      await env.DB.batch(built.stmts.slice(i, i + CHUNK));
+    }
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO sync_logs
+       (run_at, source, market, action, pages_fetched, orders_added, items_added,
+        watermark_before, watermark_after, status, duration_ms)
+     VALUES (strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'woo', ?, 'woo-safetynet', ?, ?, ?, ?, ?, 'ok', ?)`,
+  ).bind(
+    market, pagesFetched, orders.length, itemsUpserted, sinceISO, sinceISO, Date.now() - startMs,
+  ).run();
+
+  return { market, sinceISO, pagesFetched, ordersUpserted: orders.length, itemsUpserted, more, durationMs: Date.now() - startMs };
+}
+
+// Manual trigger for the Woo safety-net (verification + on-demand re-sync).
+// POST /api/admin/woo/safetynet?market=CA[&days=30]  (omit market for both).
+adminRoutes.post('/woo/safetynet', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'D1 binding DB not configured' }, 500);
+  const one = (c.req.query('market') || '').toUpperCase();
+  const days = Math.min(Math.max(parseInt(c.req.query('days') || '30', 10) || 30, 1), 90);
+  const markets = one ? [one] : ['CA', 'US'];
+  const results = [];
+  for (const m of markets) {
+    if (!['CA', 'US'].includes(m)) { results.push({ market: m, error: 'market must be CA or US' }); continue; }
+    try { results.push(await runWooSafetyNetBackfill(c.env, m, { sinceDays: days })); }
+    catch (e) { results.push({ market: m, error: redactSecrets(e?.message || String(e)) }); }
+  }
+  return c.json({ ok: true, results });
+});
 
 adminRoutes.post('/backfill', async (c) => {
   const market = (c.req.query('market') || '').toUpperCase();
