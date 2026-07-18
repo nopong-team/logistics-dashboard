@@ -205,6 +205,16 @@ async function fetchAndCacheInventory(env) {
     lastSync: new Date().toISOString(),
   };
   if (env.CACHE) {
+    // Empty-response guard: a transient SalesBinder glitch that returns 200 with
+    // an empty array must NOT overwrite a good snapshot with zero rows — that
+    // would then be served as a real "0 stock" reading until the next 4h cron.
+    // Keep the prior non-empty snapshot instead (flagged as a stale fallback).
+    if (inventory.length === 0) {
+      const prev = await env.CACHE.get(KV_INVENTORY_KEY, 'json');
+      if (prev?.inventory?.length) {
+        return { ...prev, staleFallback: true, note: 'upstream returned 0 items — kept prior snapshot' };
+      }
+    }
     await env.CACHE.put(KV_INVENTORY_KEY, JSON.stringify(result));
   }
   return result;

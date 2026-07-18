@@ -57,6 +57,7 @@ export const logiwaRoutes = new Hono();
 // Single KV key — Logiwa stock is point-in-time, not append-only, so each
 // upload fully replaces the previous snapshot.
 const KV_KEY = 'logiwa:inventory:current';
+const LOGIWA_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000; // flag an upload as stale after 7 days
 
 // Defensive caps. The current Logiwa export is a few hundred rows × ~5 fields,
 // well under both — but rejecting absurd payloads up front keeps a misbehaving
@@ -136,7 +137,11 @@ logiwaRoutes.get('/inventory', async (c) => {
     // data.inventory and short-circuits if falsy.
     return c.json({ inventory: null, message: 'No inventory uploaded yet' });
   }
-  return c.json(snapshot);
+  // Logiwa is upload-only (no cron), so an old upload keeps serving as "live"
+  // forever. Surface its age + a stale flag past 7 days so the UI can flag it
+  // rather than feed a weeks-old 3PL count into the SOH comparison as current.
+  const ageMs = snapshot.uploadedAt ? (Date.now() - new Date(snapshot.uploadedAt).getTime()) : null;
+  return c.json({ ...snapshot, ageMs, stale: ageMs != null && ageMs > LOGIWA_STALE_AFTER_MS });
 });
 
 // ─── GET /api/logiwa/test ───────────────────────────────────────────────────
@@ -177,12 +182,15 @@ export async function readLogiwaStatus(env) {
   try {
     const snapshot = await env.CACHE.get(KV_KEY, 'json');
     if (!snapshot?.inventory?.length) return baseShape;
+    const ageMs = snapshot.uploadedAt ? (Date.now() - new Date(snapshot.uploadedAt).getTime()) : null;
     return {
       ...baseShape,
       connected: true,
       count: snapshot.inventory.length,
       fileName: snapshot.fileName || null,
       uploadedAt: snapshot.uploadedAt || null,
+      ageMs,
+      stale: ageMs != null && ageMs > LOGIWA_STALE_AFTER_MS,
     };
   } catch {
     return baseShape;

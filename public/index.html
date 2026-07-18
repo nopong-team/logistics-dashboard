@@ -1359,8 +1359,13 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.41</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.42</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.42 &mdash; 18 July 2026 (Inventory freshness: SalesBinder empty-response guard + Logiwa stale flag)</h4>
+    <ul>
+      <li><strong>SalesBinder can't wipe good stock data on a glitch.</strong> If SalesBinder returned 200 with an empty list (a transient upstream hiccup), the cron used to cache <code>0 items</code> over the good snapshot &mdash; and then serve "0 stock" as real until the next 4h refresh. It now keeps the prior non-empty snapshot instead (flagged <code>staleFallback</code>).</li>
+      <li><strong>Logiwa 3PL uploads now carry an age + stale flag.</strong> Logiwa is upload-only with no automatic refresh, so a weeks-old export kept reading as live inventory. The API now returns <code>ageMs</code> + <code>stale</code> (past 7 days) so a stale 3PL count can be flagged rather than silently fed into the stock-on-hand comparison.</li>
+    </ul>
     <h4>v2.41 &mdash; 18 July 2026 (Xero invoices: paginate + filter by invoice date)</h4>
     <ul>
       <li><strong>Xero invoice list no longer silently drops the oldest invoices.</strong> The endpoint fetched only the first page (max 100), so once more than 100 ACCREC invoices fell in the window the older-dated ones just vanished from the finance view. It now paginates through all pages (like the purchase-orders path). It also filters on the invoice <strong>Date</strong> via a <code>where</code> clause instead of <code>If-Modified-Since</code> (which filtered on <em>last-updated</em> date) &mdash; so "last 6 months" now means invoices <em>dated</em> in the window, not merely ones touched in it.</li>
