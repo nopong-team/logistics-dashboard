@@ -26,7 +26,17 @@
  */
 
 import { Hono } from 'hono';
-import { buildMonthWindow, getWeekKey } from './timezone.js';
+import { buildMonthWindow, getWeekKey, getBusinessToday } from './timezone.js';
+
+// First day of LAST month (Eastern) — the start of the "active" report ranges
+// (this month + last month) that re-fetch on a ~24h gate. Rows older than this
+// live in frozen ranges that never re-seed, so they must NOT be counted by the
+// line-id coverage guard (they'd never clear and would nag forever).
+function activeRangeStart() {
+  let [y, m] = getBusinessToday().split('-').map(Number);
+  m -= 1; if (m === 0) { m = 12; y -= 1; }
+  return `${y}-${String(m).padStart(2, '0')}-01`;
+}
 
 export const diagnosticsRoutes = new Hono();
 
@@ -414,23 +424,28 @@ async function countAmazonDuplicateIdentities(env, market) {
   return res?.n || 0;
 }
 
-// Guard: matched rows in the live window with no stable line id. Should trend to
-// 0 as active ranges re-fetch post-0008. >0 = the report stopped delivering
-// shipment-item-id (those rows dedup on range-supersede only). Legacy frozen
-// ranges are excluded by the window so this reflects the live ingest path.
-async function countAmazonMissingLineId(env, market, startDate) {
+// Line-id coverage across the ACTIVE report ranges only (this + last month).
+// Returns { missing, withId }. `missing` = matched rows with no shipment_item_id;
+// `withId` = matched rows that have one. Scoped to activeRangeStart so frozen
+// historical rows (which never re-seed and keep their legacy NULL id forever)
+// don't count. The frontend uses withId to tell "just deployed, waiting for the
+// first re-fetch" (withId 0 → calm) apart from a genuine problem.
+async function amazonLineIdCoverage(env, market, activeStart) {
   const res = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM amazon_items
-     WHERE market = ? AND dashboard_sku IS NOT NULL
-       AND shipment_item_id IS NULL AND local_date >= ?`,
-  ).bind(market, startDate).first();
-  return res?.n || 0;
+    `SELECT
+       COALESCE(SUM(CASE WHEN shipment_item_id IS NULL     THEN 1 ELSE 0 END), 0) AS missing,
+       COALESCE(SUM(CASE WHEN shipment_item_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS with_id
+     FROM amazon_items
+     WHERE market = ? AND dashboard_sku IS NOT NULL AND local_date >= ?`,
+  ).bind(market, activeStart).first();
+  return { missing: res?.missing || 0, withId: res?.with_id || 0 };
 }
 
 async function buildAmazonAudit(env) {
   const { startDate } = buildMonthWindow();
+  const activeStart = activeRangeStart();
   const [caSku, usSku, caState, usState, caJobs, usJobs, caSuperseded, usSuperseded,
-         caDupIdentity, usDupIdentity, caMissingId, usMissingId] = await Promise.all([
+         caDupIdentity, usDupIdentity, caCoverage, usCoverage] = await Promise.all([
     env.DB.prepare(
       `SELECT COUNT(DISTINCT dashboard_sku) AS n
        FROM amazon_items
@@ -465,8 +480,8 @@ async function buildAmazonAudit(env) {
     countAmazonSupersededRows(env, 'US'),
     countAmazonDuplicateIdentities(env, 'CA'),
     countAmazonDuplicateIdentities(env, 'US'),
-    countAmazonMissingLineId(env, 'CA', startDate),
-    countAmazonMissingLineId(env, 'US', startDate),
+    amazonLineIdCoverage(env, 'CA', activeStart),
+    amazonLineIdCoverage(env, 'US', activeStart),
   ]);
 
   const splitSignals = (s) => (s ? String(s).split(',').filter(Boolean) : []);
@@ -504,8 +519,13 @@ async function buildAmazonAudit(env) {
     // no shipment-item-id (dedup then falls back to range-supersede only).
     caDuplicateIdentityCount: caDupIdentity,
     usDuplicateIdentityCount: usDupIdentity,
-    caMissingLineIdCount: caMissingId,
-    usMissingLineIdCount: usMissingId,
+    // Active-range line-id coverage (this + last month). *MissingLineIdCount =
+    // rows still on the legacy NULL id; *LineIdActiveCount = rows already carrying
+    // one. A calm "waiting for first re-fetch" state = missing>0 while active==0.
+    caMissingLineIdCount:  caCoverage.missing,
+    usMissingLineIdCount:  usCoverage.missing,
+    caLineIdActiveCount:   caCoverage.withId,
+    usLineIdActiveCount:   usCoverage.withId,
   };
 }
 

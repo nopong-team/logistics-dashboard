@@ -201,6 +201,20 @@ function classifyDistributor(order) {
   const attr = attributeCin7Order(order);
   if (attr === null || attr === 'refund') return null;
 
+  // Amazon retail orders are NOT distributors — they're individual Seller
+  // Central / FBM sales that CIN7 mirrors for fulfilment, and they flow
+  // through the ShipStation open-queue KPIs above, not the CIN7 distributor
+  // panels. attributeCin7Order returns 'amz' for them (by company
+  // "Amazon Seller …" OR by the NNN-NNNNNNN-NNNNNNN order-ID reference).
+  //
+  // This guard is load-bearing: before v2.2.47/v2.2.52 attributeCin7Order
+  // returned null for Amazon, so the fall-through below never saw them. Once
+  // Amazon attribution was added to power the Monthly SKU Sales tab, every
+  // 'amz' order started falling straight through to the otherDistributors
+  // bucket — the docstring always said "null for Amazon mirrors", but the
+  // code no longer matched it. Drop them here explicitly.
+  if (attr === 'amz') return null;
+
   const company = String(order?.company || '').trim();
   const cl = company.toLowerCase();
 
@@ -246,15 +260,22 @@ function classifyDistributor(order) {
     };
   }
 
-  // attr === 'dist' — other wholesale customers (Momentum, AVO, indie
-  // pharmacies, etc.). Show the company name as the label.
-  return {
-    group: 'otherDistributors',
-    retailer: 'dist',
-    label: company || 'Distributor',
-    state: null,
-    shipDayBefore: false,
-  };
+  if (attr === 'dist') {
+    // Other wholesale customers (Momentum, AVO, indie pharmacies, etc.).
+    // Show the company name as the label.
+    return {
+      group: 'otherDistributors',
+      retailer: 'dist',
+      label: company || 'Distributor',
+      state: null,
+      shipDayBefore: false,
+    };
+  }
+
+  // Any other / future attribution value (e.g. a new retail channel) is not
+  // a distributor order — don't surface it on the warehouse distributor
+  // panels. Fail closed rather than mis-bucketing it into otherDistributors.
+  return null;
 }
 
 // ─── Line-item math (cartons + stock comparison) ───────────────────────────

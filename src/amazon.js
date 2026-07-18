@@ -1167,10 +1167,13 @@ async function fetchFbaInventoryFromSpApi(env, market) {
       dashboardSku:  dashboardSku || null,
       fnSku:         item.fnSku || '',
       productName,
-      // Legacy field semantics — fall back to totalQuantity when inventoryDetails
-      // is absent (which happens for items with zero stock on certain accounts).
-      fulfillable:   item.inventoryDetails?.fulfillableQuantity
-                       || item.totalQuantity || 0,
+      // Sellable stock only. Fall back to totalQuantity ONLY when inventoryDetails
+      // is absent — NOT when fulfillable is a real 0. A genuine 0 (stock all
+      // inbound/reserved during a restock) must stay 0; `|| totalQuantity` used to
+      // leak inbound+reserved units into "sellable" and under-flag reorders.
+      fulfillable:   item.inventoryDetails
+                       ? (item.inventoryDetails.fulfillableQuantity ?? 0)
+                       : (item.totalQuantity || 0),
       inbound:       item.inventoryDetails?.inboundWorkingQuantity || 0,
       reserved:      item.inventoryDetails?.reservedQuantity?.totalReservedQuantity || 0,
       unfulfillable: item.inventoryDetails?.unfulfillableQuantity?.totalUnfulfillableQuantity || 0,

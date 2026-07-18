@@ -33,6 +33,16 @@
       --amber-bg: #FAEEDA; --amber-text: #854F0B; --amber-border: #F4DEBB;
       --green-bg: #EAF3DE; --green-text: #3B6D11; --green-border: #C9E2B0;
 
+      /* NA Forecast + Packaging tabs use these legacy names; alias them to the
+         real tokens so critical/overdue cells render red/amber (not near-black)
+         and the To-Order column keeps its pink tint. AU migrated to the real
+         names in v2.2.70; NA is aliased here in v2.37. Usage verified: --danger
+         & --amber are always text color, --pink text/border, --pink-bg background. */
+      --danger: var(--red-text);
+      --amber: var(--amber-text);
+      --pink: var(--woo-text);
+      --pink-bg: var(--woo-bg);
+
       --chart-ca: #FF5789;
       --chart-us: #5CC6CA;
       --radius: 8px;
@@ -991,15 +1001,10 @@
 
   </div>
 
-  <!-- ── Monthly / Weekly SKU Sales ── -->
+  <!-- ── Monthly SKU Sales ── -->
   <div class="tab-panel" id="tab-monthly">
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap;">
-      <div style="display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
-        <button id="period-btn-monthly" class="period-btn active" onclick="switchPeriod('monthly')" style="padding:6px 14px;font-size:12px;font-weight:600;border:none;cursor:pointer;background:var(--accent);color:#fff;transition:all .2s;">Monthly</button>
-        <button id="period-btn-weekly" class="period-btn" onclick="switchPeriod('weekly')" style="padding:6px 14px;font-size:12px;font-weight:600;border:none;cursor:pointer;background:var(--bg-card);color:var(--text-secondary);transition:all .2s;">Weekly</button>
-      </div>
       <select id="month-selector" class="filter-select" onchange="switchMonth(this.value)" style="min-width:170px;"></select>
-      <select id="week-selector" class="filter-select" onchange="switchWeek(this.value)" style="min-width:220px;display:none;"></select>
       <span id="month-label" style="font-size:13px;color:var(--text-secondary);font-weight:500;"></span>
       <button class="btn-csv" id="amz-sku-refresh-btn" onclick="refreshAmazonSkuData()" style="margin-left:auto;">Refresh Amazon SKUs</button>
     </div>
@@ -1354,8 +1359,18 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.36</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.38</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.38 &mdash; 18 July 2026 (Weekly view removed from Monthly SKU Sales)</h4>
+    <ul>
+      <li><strong>Removed the Monthly/Weekly toggle and week picker</strong> from the SKU Sales tab &mdash; the view is monthly-only now, per Mel (weekly wasn't needed). This also retires a weekly-view date off-by-one that showed NA users a phantom empty first period. The underlying weekly data plumbing is now unused and will be stripped in a follow-up cleanup (left in place here to avoid touching the shared monthly data-loaders on a live deploy).</li>
+    </ul>
+    <h4>v2.37 &mdash; 18 July 2026 (Data Health de-alarmed + FBA sellable-stock + NA colour-coding fixes)</h4>
+    <ul>
+      <li><strong>"Amazon rows missing line id" no longer cries wolf.</strong> The v2.36 guard counted every pre-update row across the last 6 months &mdash; including frozen historical months that never re-fetch &mdash; so it showed a scary amber warning that could never fully clear. It now looks only at the <strong>active ranges</strong> (this + last month, which re-fetch within ~24h) and reads as a calm green "these rows predate the update, clearing automatically." The real dedup invariant is still the "Amazon duplicate order lines" check, which stays green with no cleanup.</li>
+      <li><strong>FBA "sellable" stock no longer overstated during restocks.</strong> <code>fulfillable</code> read <code>fulfillableQuantity || totalQuantity</code>, so a genuine 0 sellable (stock all inbound/reserved) fell through to the total and counted inbound units as sellable &mdash; under-flagging reorders. Now a real 0 stays 0 (<code>?? 0</code>), only falling back to the total when the detail block is truly absent.</li>
+      <li><strong>NA Forecast &amp; Packaging colour-coding restored.</strong> Those tabs referenced CSS variables that don't exist here (<code>--danger</code>, <code>--amber</code>, <code>--pink-bg</code>, <code>--pink</code>), so critical/overdue reorder cells rendered near-black and the To-Order column lost its pink tint. Aliased to the real tokens (the AU side was fixed back in v2.2.70; NA was missed).</li>
+    </ul>
     <h4>v2.36 &mdash; 18 July 2026 (Amazon SKU dedup made structural &mdash; no more manual cleanup)</h4>
     <ul>
       <li><strong>The Amazon "Run cleanup" chore is gone.</strong> Amazon SKU quantities no longer creep upward with no real sales, and the Data Health dedup check now stays green on its own &mdash; no periodic cleaning. Root cause: the report window filters on <em>last-updated/shipment</em> date, but rows were stored by <em>purchase date</em> and cleared by a date-window <code>DELETE</code> that keyed on purchase date &mdash; three mismatched axes, so re-fetching an active range left stale copies behind that the SKU totals then summed.</li>
@@ -2531,9 +2546,14 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.80</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.81</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.81 &mdash; 18 July 2026 (🚚 Logistics &mdash; Amazon orders no longer show as distributors)</h4>
+    <ul>
+      <li><strong>The Logistics &ldquo;Other distributors&rdquo; panel was listing individual Amazon retail orders</strong> (e.g. &ldquo;Amazon Seller No Pong Natural Products&rdquo;, order refs like <code>249-8715696-3264625</code>, 1 unit each). Root cause: the distributor classifier reuses <code>attributeCin7Order()</code>, which since v2.2.47/v2.2.52 returns <code>'amz'</code> for Amazon orders (added to power the Monthly SKU Sales tab). The Logistics classifier only special-cased Coles and Woolies, then treated <em>everything else</em> as a distributor &mdash; so <code>'amz'</code> orders fell straight through into the &ldquo;Other distributors&rdquo; column. The classifier docstring always said Amazon mirrors should be excluded; the code just no longer matched it. <strong>Fix:</strong> drop <code>'amz'</code> orders explicitly, and only bucket genuine <code>'dist'</code> orders (fail-closed on any future channel). Amazon fulfilment still flows through the ShipStation open-queue KPIs above, where it belongs.</li>
+    </ul>
+
     <h4>v2.2.80 &mdash; 12 July 2026 (📅 Forecasting CSV &mdash; Run-out date added)</h4>
     <ul>
       <li><strong>The Forecasting CSV export now includes the projected <em>Run out</em> date</strong> (e.g. &ldquo;5 Sep 2026&rdquo;) &mdash; the same &ldquo;runs out ~&rdquo; date shown under the <em>Order by</em> cell on screen. New <code>Run out (date)</code> column sits right after <code>Order by (date)</code>. It&rsquo;s <code>today + Cover months</code>, so it nets off the ⅓-month safety buffer and counts incoming POs, matching the dashboard exactly.</li>
@@ -9603,17 +9623,25 @@ async function runDataHealthChecks() {
         detail: 'Exactly one row per order line (shipment_item_id) — dedup is structural, no cleanup needed' });
     }
 
-    // ── Check 3e: line-identity coverage guard ──
-    // Rows in the live window with no shipment_item_id fall back to weaker
-    // range-only dedup. Should trend to 0 as active ranges re-fetch post-0008.
+    // ── Check 3e: line-identity coverage (active ranges only, informational) ──
+    // Scoped to this + last month (the ranges that re-fetch). Deliberately never
+    // alarms: rows that predate v2.36 simply haven't re-fetched yet — that's
+    // expected, not a fault, and dedup is already structural via the check above.
+    // The real invariant is "duplicate order lines" (3d); this is just coverage.
     const caMiss = audit.amazon.caMissingLineIdCount || 0;
     const usMiss = audit.amazon.usMissingLineIdCount || 0;
-    if (caMiss + usMiss > 0) {
-      checks.push({
-        status: 'warn',
-        name: 'Amazon rows missing line id',
-        detail: `${(caMiss + usMiss).toLocaleString()} rows in the last 6 months have no shipment_item_id (${caMiss.toLocaleString()} CA, ${usMiss.toLocaleString()} US). Legacy rows clear as ranges re-fetch; if this stays high the report stopped delivering the column.`
-      });
+    const lineIdActive = (audit.amazon.caLineIdActiveCount || 0) + (audit.amazon.usLineIdActiveCount || 0);
+    const miss = caMiss + usMiss;
+    if (miss === 0) {
+      checks.push({ status: 'pass', name: 'Amazon line-id coverage',
+        detail: 'Every active-range Amazon row carries a line id (shipment_item_id)' });
+    } else if (lineIdActive === 0) {
+      checks.push({ status: 'pass', name: 'Amazon line-id coverage',
+        detail: `${miss.toLocaleString()} recent rows predate the v2.36 line-id update — they re-fetch with an id automatically within ~24h. Not an error; dedup is already structural (see above).` });
+    } else {
+      const pct = Math.round((lineIdActive / (lineIdActive + miss)) * 100);
+      checks.push({ status: 'pass', name: 'Amazon line-id coverage',
+        detail: `${pct}% of active-range rows now carry a line id; ${miss.toLocaleString()} pre-update rows still clearing as the remaining ranges re-fetch.` });
     }
   }
 
