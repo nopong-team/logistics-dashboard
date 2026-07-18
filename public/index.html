@@ -1359,8 +1359,12 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.38</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.39</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.39 &mdash; 18 July 2026 (Monthly SKU Sales: wholesale cartons counted in single tins everywhere)</h4>
+    <ul>
+      <li><strong>Wholesale carton volume is no longer understated.</strong> A Xero CTN carton = 48 tins, but the Total column, the "units" summary card, the % column and the CSV all counted a carton as <strong>1</strong> — while the "Total single tins" footer counted it as 48. So the summary card and the footer never matched (e.g. 660 vs 1,130) and a big wholesale line showed as ~1.5% and sorted last. Now cartons are normalized to single tins at the source, so <strong>every figure shares one unit and reconciles</strong>: the summary card equals the footer, the % reflects real tin volume, the CSV matches the screen, and carton lines sort by actual volume. The Xero cell shows the tin figure with a small "(N&nbsp;cart)" note so the carton count is still visible.</li>
+    </ul>
     <h4>v2.38 &mdash; 18 July 2026 (Weekly view removed from Monthly SKU Sales)</h4>
     <ul>
       <li><strong>Removed the Monthly/Weekly toggle and week picker</strong> from the SKU Sales tab &mdash; the view is monthly-only now, per Mel (weekly wasn't needed). This also retires a weekly-view date off-by-one that showed NA users a phantom empty first period. The underlying weekly data plumbing is now unused and will be stripped in a follow-up cleanup (left in place here to avoid touching the shared monthly data-loaders on a live deploy).</li>
@@ -4968,7 +4972,13 @@ function getMonthlySkuData() {
     const wooQty  = woo  ? (woo.monthlyQty[idx]  || 0) : 0;
     const amzQty  = amz  ? (amz.monthlyQty[idx]  || 0) : 0;
     const xeroQty = xero ? (xero.monthlyQty[idx] || 0) : 0;
-    const total = wooQty + amzQty + xeroQty;
+    const isCarton = !!carton && !tin;
+    // Normalize wholesale cartons (Xero CTN) to single tins so every figure in
+    // this tab — the Total column, the summary "units" card, the %, the sort
+    // order and the CSV — shares one unit and reconciles with the "Total single
+    // tins" footer. 1 carton = 48 tins. Woo/Amazon qty are already in tins.
+    const xeroTins = isCarton ? xeroQty * 48 : xeroQty;
+    const total = wooQty + amzQty + xeroTins;
     if (total <= 0) continue;
 
     results.push({
@@ -4976,8 +4986,8 @@ function getMonthlySkuData() {
       scent: tin ? tin.scent : (carton ? sku.split('-')[2] || '' : ''),
       form:  tin ? tin.form  : '',
       size:  tin ? tin.size  : (carton ? 'Carton' : ''),
-      wooQty, amzQty, xeroQty, total,
-      isCarton: !!carton && !tin,
+      wooQty, amzQty, xeroQty, xeroTins, total,
+      isCarton,
     });
   }
   return results.sort((a, b) => b.total - a.total);
@@ -5070,7 +5080,7 @@ function renderMonthlyTab() {
         <td>${SIZE_MAP[d.size]||d.size||'—'}</td>
         <td class="num right">${d.wooQty > 0 ? fmtNum(d.wooQty) : '<span style="color:var(--text-light);">—</span>'}</td>
         <td class="num right">${d.amzQty > 0 ? fmtNum(d.amzQty) : '<span style="color:var(--text-light);">—</span>'}</td>
-        <td class="num right"${hideXero}>${d.xeroQty > 0 ? fmtNum(d.xeroQty) : '<span style="color:var(--text-light);">—</span>'}</td>
+        <td class="num right"${hideXero}>${d.xeroTins > 0 ? fmtNum(d.xeroTins) + (d.isCarton ? ` <span style="font-size:10px;font-weight:400;color:var(--text-secondary);">(${fmtNum(d.xeroQty)} cart)</span>` : '') : '<span style="color:var(--text-light);">—</span>'}</td>
         <td class="num right"><strong>${fmtNum(d.total)}</strong></td>
         <td class="num right">${pct}%</td>
       </tr>`;
@@ -5082,7 +5092,7 @@ function renderMonthlyTab() {
     data.forEach(d => {
       totalWoo += d.wooQty;
       totalAmz += d.amzQty;
-      totalXeroTins += d.isCarton ? (d.xeroQty * 48) : d.xeroQty;
+      totalXeroTins += d.xeroTins;
     });
     const grandTotal = totalWoo + totalAmz + totalXeroTins;
     const hideXeroTotal = market === 'us' ? ' style="display:none;"' : '';
@@ -5112,7 +5122,7 @@ function downloadMonthlyCSV() {
   const rows = [['SKU','Scent','Formula','Size','WooCommerce','Amazon','Xero','Total','% of Total']];
   data.forEach(d => {
     const pct = totalUnits > 0 ? ((d.total / totalUnits) * 100).toFixed(1) : '0.0';
-    rows.push([d.sku, SCENT_MAP[d.scent]||d.scent, FORM_MAP[d.form]||d.form, SIZE_MAP[d.size]||d.size, d.wooQty, d.amzQty, d.xeroQty, d.total, pct]);
+    rows.push([d.sku, SCENT_MAP[d.scent]||d.scent, FORM_MAP[d.form]||d.form, SIZE_MAP[d.size]||d.size, d.wooQty, d.amzQty, d.xeroTins, d.total, pct]);
   });
   downloadCSV(`sku-units-${label}.csv`, rows.map(r => r.join(',')).join('\n'));
 }
