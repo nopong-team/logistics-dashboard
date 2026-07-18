@@ -125,15 +125,16 @@ const MAX_PAGES_PER_CALL = 20; // protective cap so one call can't run forever
 // INSERT OR REPLACE is exactly what lets the safety-net correct an order's
 // status in place (e.g. completed → refunded) when it re-pulls by modified date.
 function buildWooOrderStatements(env, market, store, orders) {
-  const stmts = [];
+  const groups = [];   // one array of statements per order — kept together when batching
   let itemsAdded = 0;
   for (const o of orders) {
+    const g = [];
     // local_date is the canonical Eastern bucket key. Woo's date_created is
     // already Eastern-naive (both stores configured to America/Toronto and
     // America/New_York), so substring(0,10) extracts the Eastern YYYY-MM-DD
     // directly — no timezone conversion at write time (see src/timezone.js).
     const localDate = (o.date_created || '').substring(0, 10) || null;
-    stmts.push(
+    g.push(
       env.DB.prepare(
         `INSERT OR REPLACE INTO orders
            (id, market, number, status, date_created, local_date, total, currency, raw_json, synced_at)
@@ -143,10 +144,10 @@ function buildWooOrderStatements(env, market, store, orders) {
         o.date_created || '', localDate, parseFloat(o.total || 0), o.currency || store.currency,
       ),
     );
-    stmts.push(env.DB.prepare(`DELETE FROM order_items WHERE order_id = ?`).bind(o.id));
+    g.push(env.DB.prepare(`DELETE FROM order_items WHERE order_id = ?`).bind(o.id));
     for (const item of (o.line_items || [])) {
       itemsAdded++;
-      stmts.push(
+      g.push(
         env.DB.prepare(
           `INSERT INTO order_items
              (order_id, market, sku, name, quantity, total, date_created, local_date)
@@ -158,8 +159,26 @@ function buildWooOrderStatements(env, market, store, orders) {
         ),
       );
     }
+    groups.push(g);
   }
-  return { stmts, itemsAdded };
+  return { groups, itemsAdded };
+}
+
+// Run per-order statement groups as D1 batches WITHOUT ever splitting an order's
+// statements across two batches. D1 batches are transactional, so keeping an
+// order's DELETE + item-INSERTs in the same batch makes the item rewrite atomic
+// — a mid-run failure can't leave an order with its items deleted but not
+// re-inserted (which the old flat 500-statement chunking could do at a boundary).
+async function runOrderSafeBatches(env, groups, maxPerBatch = 500) {
+  let batch = [];
+  for (const g of groups) {
+    if (batch.length && batch.length + g.length > maxPerBatch) {
+      await env.DB.batch(batch);
+      batch = [];
+    }
+    batch.push(...g);
+  }
+  if (batch.length) await env.DB.batch(batch);
 }
 
 /**
@@ -222,12 +241,9 @@ export async function runBackfillChunk(env, market, pages, action = 'backfill') 
     // incremental path and the modified-date safety-net write rows identically.
     const built = buildWooOrderStatements(env, market, store, orders);
     itemsAdded = built.itemsAdded;
-    // D1 batch is transactional: all-or-nothing within a single batch call.
-    // Chunk if we get above ~500 statements to stay polite under the limit.
-    const CHUNK = 500;
-    for (let i = 0; i < built.stmts.length; i += CHUNK) {
-      await env.DB.batch(built.stmts.slice(i, i + CHUNK));
-    }
+    // Batch on order boundaries so each order's rewrite is atomic (see
+    // runOrderSafeBatches). Chunks at ~500 statements to stay under the limit.
+    await runOrderSafeBatches(env, built.groups);
 
     // Advance watermark to the LATEST date_created we just wrote.
     watermarkAfter = orders.reduce((max, o) => {
@@ -335,10 +351,7 @@ export async function runWooSafetyNetBackfill(env, market, { sinceDays = 30 } = 
   if (orders.length > 0) {
     const built = buildWooOrderStatements(env, market, store, orders);
     itemsUpserted = built.itemsAdded;
-    const CHUNK = 500;
-    for (let i = 0; i < built.stmts.length; i += CHUNK) {
-      await env.DB.batch(built.stmts.slice(i, i + CHUNK));
-    }
+    await runOrderSafeBatches(env, built.groups);
   }
 
   await env.DB.prepare(
