@@ -2222,7 +2222,7 @@
       <span class="pkg-ctl" title="Generic/blank outer cartons and non-mailer boxes. Placeholder value — set this to whatever the team actually reorders at.">Generic outers
         <input id="au-pkg-outer-floor" class="pkg-lead" style="width:74px;" type="number" value="300" min="0" step="50"
                onchange="renderAuPackagingTab()"></span>
-      <span class="pkg-ctl" title="Postcard inserts (PCI). A marketing expense rather than a per-order consumable, so there's no forecast — just a stock floor. Placeholder value.">Inserts
+      <span class="pkg-ctl" title="PCIs — Print Customer Inserts. A marketing expense rather than a per-order consumable, so there's no forecast — just a stock floor. Placeholder value.">PCIs
         <input id="au-pkg-insert-floor" class="pkg-lead" style="width:74px;" type="number" value="5000" min="0" step="500"
                onchange="renderAuPackagingTab()"></span>
       <span style="font-size:12px;color:var(--text-light);">both are placeholders &mdash; set them to what the team actually uses</span>
@@ -2351,7 +2351,7 @@
           <div class="table-card-title">Watch list &mdash; no forecast</div>
           <button class="btn-csv" onclick="downloadAuPackagingCSV('watch')">Export CSV</button>
         </div>
-        <div class="table-hint">Generic outers, postcard inserts and blank engraving tins have no forecastable demand, so these are flagged on stock level alone rather than runway &mdash; at or below the floor means reorder. Blank tins are engraving stock (AU doesn't sticker blanks onto branded runs); inserts are a marketing expense rather than a per-order consumable.</div>
+        <div class="table-hint">Generic outers, PCIs and blank engraving tins have no forecastable demand, so these are flagged on stock level alone rather than runway &mdash; at or below the floor means reorder. Blank tins are engraving stock (AU doesn't sticker blanks onto branded runs); PCIs are a marketing expense rather than a per-order consumable.</div>
       </div>
       <div class="table-scroll-sticky"><table>
         <thead><tr>
@@ -2756,9 +2756,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.87</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.88</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.88 &mdash; 20 July 2026 (✏️ &ldquo;Inserts&rdquo; renamed to PCIs)</h4>
+    <ul>
+      <li>The reorder-floor control, its tooltip and the watch-list hint now say <strong>PCIs</strong> rather than &ldquo;Inserts&rdquo; &mdash; matching what the team actually calls them. The NA tab already used &ldquo;Postcard Inserts (PCIs)&rdquo;; AU now agrees.</li>
+      <li><strong>Correction to v2.2.87.</strong> That entry cited PCI stock as &ldquo;20,000 at Health Focus and 11,072 in our warehouse&rdquo;. Those figures came from a <em>10 May</em> CSV export, not live CIN7, and were quoted as though current &mdash; Mel flagged that there are no PCIs at Health Focus. The tab itself reads live and always has, so whatever it shows is current; only the example in that note was stale. If the live data does still attribute PCI stock to Health Focus, that's a CIN7 attribution issue at source rather than a dashboard one &mdash; <code>/api/au/stock/debug?code=PCI</code> shows the raw per-branch rows.</li>
+    </ul>
+
     <h4>v2.2.87 &mdash; 20 July 2026 (📍 Stock now shows which location it's in)</h4>
     <ul>
       <li><strong>The totals were already right; the label wasn't.</strong> Mel asked whether stock at Brisbane Logistics and Health Focus was being counted. It always has been &mdash; <code>fetchStockBySku</code> sums <code>stockOnHand</code> across every branch row CIN7 returns, filtering nothing, and only <em>also</em> tracks Amazon FBA separately so a warehouse-only figure can be derived where that's useful. Verified with a multi-branch test: Main Branch + No Pong Warehouse + Health Focus + Brisbane + FBA all land in the total. But the Stock column tooltip read &ldquo;our warehouse + Health Focus&rdquo;, which named two locations and silently omitted Brisbane &mdash; a fair reason to doubt the number.</li>
