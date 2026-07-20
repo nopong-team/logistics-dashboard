@@ -382,6 +382,12 @@ export async function fetchStockBySku(env) {
       fba_soh: 0,
       fba_avail: 0,
       fba_incoming: 0,
+      // Per-branch split, branchName → { soh, incoming }. Stock is spread
+      // across No Pong Warehouse, Health Focus and Brisbane Logistics — HFM
+      // alone holds more units than our own warehouse — so a bare total hides
+      // where the stock physically is. Kept so the UI can show the breakdown
+      // rather than implying it all sits in one place (Mel, 2026-07-20).
+      branches: {},
     };
     const stockOnHand = Number(row.stockOnHand) || 0;
     const available   = Number(row.available)   || 0;
@@ -390,10 +396,21 @@ export async function fetchStockBySku(env) {
     // silently zero this out again — whichever is present wins, and if both
     // ever disappear the diagnostic at /api/au/stock/debug lists every field.
     const incoming = Number(row.incoming ?? row.openPurchaseOrders) || 0;
-    // Total accumulates across every branch
+    // Total accumulates across every branch — No Pong Warehouse, Health Focus,
+    // Brisbane Logistics, Amazon FBA, anything else CIN7 returns. No branch is
+    // filtered out of the total; FBA is only ALSO tracked separately below so
+    // the warehouse-only figure can be derived where that's the useful one.
     acc.soh      += stockOnHand;
     acc.avail    += available;
     acc.incoming += incoming;
+    // Per-branch split for the UI breakdown. Skip empty rows — CIN7 returns a
+    // row per (product × branch) whether or not that branch holds any.
+    if (stockOnHand || incoming) {
+      const bName = String(row.branchName || 'Unknown').trim();
+      const b = acc.branches[bName] || (acc.branches[bName] = { soh: 0, incoming: 0 });
+      b.soh      += stockOnHand;
+      b.incoming += incoming;
+    }
     // FBA branch is captured separately for drift detection + warehouse split
     if (isFbaBranchName(row.branchName)) {
       acc.fba_soh      += stockOnHand;
@@ -490,6 +507,10 @@ function buildAuPackagingBySku(stockBySku) {
       soh:      s.soh      || 0,
       avail:    s.avail    || 0,
       incoming: s.incoming || 0,
+      // Where that stock physically sits. Packaging and empty tins in
+      // particular are heavily weighted to Health Focus and Brisbane rather
+      // than our own warehouse, so the total alone is misleading.
+      branches: s.branches || {},
       linkedSku:    null,   // finished SKU whose sales drive this row's demand
       capacity:     null,   // tins per tray / SRTs per carton
       manualDemand: false,  // no derivable link — demand entered by hand
