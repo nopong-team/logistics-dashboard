@@ -451,7 +451,7 @@ const SRT_TIN_CAPACITY   = 12;  // tins per shelf-ready tray
 const CARTON_SRT_CAPACITY = 4;  // SRTs per printed outer carton (= 48 tins)
 
 function buildAuPackagingBySku(stockBySku) {
-  const srt = [], cartons = [], envelopes = [], blankTins = [];
+  const srt = [], cartons = [], envelopes = [], blankTins = [], inserts = [];
 
   // A derived link is only real if that finished SKU still exists in CIN7.
   // Retired lines keep their packaging on the shelf long after the finished
@@ -529,6 +529,16 @@ function buildAuPackagingBySku(stockBySku) {
       continue;
     }
 
+    // Postcard inserts. Bare code, no prefix — same shape of trap as ENVELOPES.
+    // v2.2.82 claimed these weren't stock-tracked in CIN7; they are (31,072 on
+    // hand, 5,000 incoming), and that wrong claim is why they were left out.
+    // Watch-list only for now (Mel, 2026-07-20) — they're a marketing expense
+    // rather than a per-order consumable, so no forecast is attached.
+    if (code === 'PCI') {
+      inserts.push({ ...row, manualDemand: true });
+      continue;
+    }
+
     if (code.startsWith('T-AU-BLANK-')) {
       // Engraving stock. AU does not sticker blanks onto branded runs, so this
       // is a standalone line with its own reorder point — none of the NA blank
@@ -545,6 +555,7 @@ function buildAuPackagingBySku(stockBySku) {
     cartons:   cartons.sort(bySku),
     envelopes: envelopes.sort(bySku),
     blankTins: blankTins.sort(bySku),
+    inserts:   inserts.sort(bySku),
   };
 }
 
@@ -2840,6 +2851,70 @@ auRoutes.get('/packaging-demand', async (c) => {
   } catch (e) {
     console.error('AU packaging-demand error:', e?.message || e);
     return c.json({ error: 'Failed to build packaging demand', detail: String(e?.message || e) }, 500);
+  }
+});
+
+// ── Stock field diagnostic ────────────────────────────────────────────────
+//
+//   GET /api/au/stock/debug?code=P-ENV-A1
+//
+// Why this exists: the Packaging tab showed Incoming as 0 for P-ENV-A1 while
+// CIN7's own UI showed 24,000 incoming (Mel, 2026-07-20). We read incoming
+// from the `openPurchaseOrders` field on /Stock, which is what CIN7's field
+// list documents — but the UI column is labelled "Incoming Stock", and a CSV
+// export of the same data calls it `IncomingStock`. Those may or may not be
+// the same underlying number, and guessing which is wrong would just be
+// another assumption on top of the one that produced the bug.
+//
+// So this fetches /Stock with NO `fields` restriction — every field CIN7 will
+// return — and dumps the raw rows for one product code. That makes the actual
+// field names and values visible instead of inferred. `numericFields` lists
+// every non-zero numeric field found, which is where the real incoming figure
+// will be hiding if it isn't `openPurchaseOrders`.
+//
+// Deliberately does not touch the main fetch path: adding an unknown field to
+// the `fields` param risks CIN7 rejecting the whole request and taking the
+// inventory endpoint down with it.
+auRoutes.get('/stock/debug', async (c) => {
+  const code = (c.req.query('code') || '').trim();
+  if (!code) {
+    return c.json({ error: 'Pass a product code, e.g. /api/au/stock/debug?code=P-ENV-A1' }, 400);
+  }
+  try {
+    const rows = await cin7FetchAll(c.env, 'Stock', {});
+    const want = code.toUpperCase();
+    const match = rows.filter(r =>
+      String(r?.code || r?.styleCode || '').trim().toUpperCase() === want);
+
+    // Every numeric field that is non-zero on at least one matching row —
+    // the shortlist for "which field actually carries incoming stock".
+    const numericFields = {};
+    for (const r of match) {
+      for (const [k, v] of Object.entries(r || {})) {
+        const n = Number(v);
+        if (Number.isFinite(n) && n !== 0) {
+          numericFields[k] = (numericFields[k] || 0) + n;
+        }
+      }
+    }
+
+    return c.json({
+      code,
+      matchedRows: match.length,
+      totalStockRows: rows.length,
+      // What the dashboard currently computes, for side-by-side comparison.
+      dashboardReads: {
+        field: 'openPurchaseOrders',
+        incoming: match.reduce((s, r) => s + (Number(r?.openPurchaseOrders) || 0), 0),
+        soh:      match.reduce((s, r) => s + (Number(r?.stockOnHand) || 0), 0),
+      },
+      numericFieldTotals: numericFields,
+      allFieldNames: match.length ? Object.keys(match[0]).sort() : [],
+      rawRows: match,
+    });
+  } catch (e) {
+    console.error('AU stock debug error:', e?.message || e);
+    return c.json({ error: 'Stock fetch failed', detail: String(e?.message || e) }, 500);
   }
 });
 

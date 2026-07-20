@@ -2222,6 +2222,9 @@
       <span class="pkg-ctl" title="Generic/blank outer cartons and non-mailer boxes. Placeholder value — set this to whatever the team actually reorders at.">Generic outers
         <input id="au-pkg-outer-floor" class="pkg-lead" style="width:74px;" type="number" value="300" min="0" step="50"
                onchange="renderAuPackagingTab()"></span>
+      <span class="pkg-ctl" title="Postcard inserts (PCI). A marketing expense rather than a per-order consumable, so there's no forecast — just a stock floor. Placeholder value.">Inserts
+        <input id="au-pkg-insert-floor" class="pkg-lead" style="width:74px;" type="number" value="5000" min="0" step="500"
+               onchange="renderAuPackagingTab()"></span>
       <span style="font-size:12px;color:var(--text-light);">both are placeholders &mdash; set them to what the team actually uses</span>
     </div>
 
@@ -2348,7 +2351,7 @@
           <div class="table-card-title">Watch list &mdash; no forecast</div>
           <button class="btn-csv" onclick="downloadAuPackagingCSV('watch')">Export CSV</button>
         </div>
-        <div class="table-hint">Generic outers and blank engraving tins have no forecastable demand, so these are flagged on stock level alone rather than runway. Blank tins are engraving stock &mdash; AU doesn't sticker blanks onto branded runs.</div>
+        <div class="table-hint">Generic outers, postcard inserts and blank engraving tins have no forecastable demand, so these are flagged on stock level alone rather than runway &mdash; at or below the floor means reorder. Blank tins are engraving stock (AU doesn't sticker blanks onto branded runs); inserts are a marketing expense rather than a per-order consumable.</div>
       </div>
       <div class="table-scroll-sticky"><table>
         <thead><tr>
@@ -2753,9 +2756,17 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.84</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.85</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.85 &mdash; 20 July 2026 (🔍 Stock-field diagnostic + PCI on the watch list)</h4>
+    <ul>
+      <li><strong>Incoming stock reads 0 when CIN7 says otherwise, and this adds the tool to find out why.</strong> P-ENV-A1 shows no incoming on the tab while CIN7's UI shows a 24,000 PO against it. We read incoming from <code>openPurchaseOrders</code> on <code>/Stock</code>, which is what CIN7's documented field list gives &mdash; but the UI column is &ldquo;Incoming Stock&rdquo; and a CSV export of the same data calls it <code>IncomingStock</code>, and those may not be the same number. New <code>GET /api/au/stock/debug?code=P-ENV-A1</code> fetches <code>/Stock</code> with <strong>no field restriction</strong> and dumps the raw rows, so the true field names and values are visible rather than inferred. It reports what the dashboard currently computes alongside every non-zero numeric field on the row &mdash; if the real incoming figure lives under another name, it'll be in that list.</li>
+      <li><strong>Deliberately diagnostic-only, no speculative fix.</strong> Adding a guessed field name to the main <code>fields</code> request risks CIN7 rejecting the whole call and taking the inventory endpoint down with it. This bug came from an assumption about a field; the fix shouldn't be another one. <em>Incoming is understated on every packaging row until this is resolved, which means cover is understated and order-by dates are earlier than reality.</em></li>
+      <li><strong>PCI added to the watch list.</strong> Postcard inserts (31,072 on hand, 5,000 incoming) now appear alongside generic outers and blank tins, with their own editable floor. No forecast attached &mdash; they're a marketing expense rather than a per-order consumable. Note the bare <code>PCI</code> code was the same trap as <code>ENVELOPES</code>: no prefix, so prefix-based matching missed it.</li>
+      <li>Third reorder floor added for inserts, defaulting to 5,000. Like the other two, a placeholder &mdash; set it to whatever the team works to.</li>
+    </ul>
+
     <h4>v2.2.84 &mdash; 20 July 2026 (✉️ Mailer rules complete &mdash; 7&ndash;12 &times; 35g assigned)</h4>
     <ul>
       <li><strong>The unassigned band is closed.</strong> Orders of 7&ndash;12&nbsp;&times;&nbsp;35g with no 85g use <code>P-ENV-A1</code> (Mel, 20 Jul), so they now fold into that SKU's rate instead of sitting in a reported gap. P-ENV-A1's forecast rises accordingly &mdash; it was previously under-counted by roughly the volume of that band.</li>
@@ -8345,7 +8356,7 @@ function auPkgFloor(id, fallback) {
 }
 
 function getAuPackagingRows() {
-  const pkg = AU_PACKAGING || { srt: [], cartons: [], envelopes: [], blankTins: [] };
+  const pkg = AU_PACKAGING || { srt: [], cartons: [], envelopes: [], blankTins: [], inserts: [] };
   const dem = AU_PKG_DEMAND || { trays: {}, cartons: {}, mailers: {} };
 
   const srt = (pkg.srt || []).map(r =>
@@ -8363,10 +8374,12 @@ function getAuPackagingRows() {
   const envelopes = (pkg.envelopes || []).map(r =>
     auPkgRow(r, auPkgTrailingAvg(dem.mailers?.[r.sku]), auPkgLead('envelopes')));
 
-  const blankFloor = auPkgFloor('au-pkg-blank-floor', 750);
-  const outerFloor = auPkgFloor('au-pkg-outer-floor', AU_PKG_WATCH_FLOOR);
+  const blankFloor  = auPkgFloor('au-pkg-blank-floor',  750);
+  const outerFloor  = auPkgFloor('au-pkg-outer-floor',  AU_PKG_WATCH_FLOOR);
+  const insertFloor = auPkgFloor('au-pkg-insert-floor', 5000);
   const watch = [
     ...(pkg.cartons || []).filter(r => r.blank).map(r => ({ ...r, floor: outerFloor })),
+    ...(pkg.inserts || []).map(r => ({ ...r, floor: insertFloor })),
     ...(pkg.blankTins || []).map(r => ({ ...r, floor: blankFloor })),
     // At the floor counts as low, not OK — the floor IS the reorder point, so
     // landing exactly on it should prompt an order (Mel expected the blank
