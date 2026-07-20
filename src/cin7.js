@@ -2942,12 +2942,25 @@ auRoutes.get('/stock/debug', async (c) => {
       code,
       matchedRows: match.length,
       totalStockRows: rows.length,
-      // What the dashboard currently computes, for side-by-side comparison.
+      // What the dashboard actually computes today. This must mirror
+      // fetchStockBySku exactly — v2.2.85 shipped it hardcoded to the old
+      // `openPurchaseOrders` name, so after the v2.2.86 fix it kept reporting
+      // 0 and read like the bug was still live when it wasn't.
       dashboardReads: {
-        field: 'openPurchaseOrders',
-        incoming: match.reduce((s, r) => s + (Number(r?.openPurchaseOrders) || 0), 0),
+        field: 'incoming (falls back to openPurchaseOrders)',
+        incoming: match.reduce((s, r) =>
+          s + (Number(r?.incoming ?? r?.openPurchaseOrders) || 0), 0),
         soh:      match.reduce((s, r) => s + (Number(r?.stockOnHand) || 0), 0),
       },
+      // Per-branch split, matching the tab's Stock tooltip. Included so a
+      // "that stock isn't there" question can be answered from one call.
+      byBranch: match.reduce((acc, r) => {
+        const n = String(r?.branchName || 'Unknown').trim();
+        const soh = Number(r?.stockOnHand) || 0;
+        const inc = Number(r?.incoming ?? r?.openPurchaseOrders) || 0;
+        if (soh || inc) acc[n] = { soh, incoming: inc };
+        return acc;
+      }, {}),
       numericFieldTotals: numericFields,
       allFieldNames: match.length ? Object.keys(match[0]).sort() : [],
       rawRows: match,

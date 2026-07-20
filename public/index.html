@@ -2756,9 +2756,17 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.88</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.89</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.89 &mdash; 20 July 2026 (🔧 Stock diagnostic reported the pre-fix field)</h4>
+    <ul>
+      <li><strong>The diagnostic was lying about itself.</strong> <code>/api/au/stock/debug</code> shipped in v2.2.85 with <code>dashboardReads.field</code> hardcoded to <code>openPurchaseOrders</code>. v2.2.86 changed the real code to read <code>incoming</code>, but the diagnostic kept reporting the old name &mdash; so it returned <code>incoming: 0</code> for every SKU and read as though the bug were still live. It now mirrors <code>fetchStockBySku</code> exactly, fallback included.</li>
+      <li><strong>Added a <code>byBranch</code> summary</strong> to the same response, matching the tab's Stock tooltip, so a &ldquo;that stock isn't where you say it is&rdquo; question can be settled from one call rather than by reading raw rows.</li>
+      <li><strong>Correction, again, to the PCI figures.</strong> v2.2.85 and v2.2.87 both quoted PCI stock from a 10 May CSV export as if current: &ldquo;31,072 on hand, 5,000 incoming, 20,000 of it at Health Focus&rdquo;. Live CIN7 says <strong>25,903, all at No Pong Warehouse NSW, nothing incoming, and zero at Health Focus</strong> &mdash; as Mel said. The tab has always read live and was never affected; only the changelog commentary was wrong. Anything sourced from <code>AU Dashboard/raw/</code> is a May snapshot and should be treated as history, not fact.</li>
+      <li><strong>Noted for later:</strong> CIN7 returns an <em>EDI Test</em> branch (id 23899). It holds zero across the catalogue today, so totals are unaffected, but it is not filtered &mdash; if it ever carries stock it will count toward on-hand. Left visible in the branch breakdown rather than silently excluded.</li>
+    </ul>
+
     <h4>v2.2.88 &mdash; 20 July 2026 (✏️ &ldquo;Inserts&rdquo; renamed to PCIs)</h4>
     <ul>
       <li>The reorder-floor control, its tooltip and the watch-list hint now say <strong>PCIs</strong> rather than &ldquo;Inserts&rdquo; &mdash; matching what the team actually calls them. The NA tab already used &ldquo;Postcard Inserts (PCIs)&rdquo;; AU now agrees.</li>
