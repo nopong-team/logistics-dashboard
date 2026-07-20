@@ -2285,7 +2285,7 @@
         <thead><tr>
           <th class="sticky-col">Tray SKU</th>
           <th>Scent</th>
-          <th class="num right" title="On hand across every branch (our warehouse + Health Focus).">Stock</th>
+          <th class="num right" title="On hand across EVERY location — No Pong Warehouse, Health Focus, Brisbane Logistics, Amazon FBA. Hover a figure for the split; packaging and empty tins are often mostly at Health Focus or Brisbane rather than in our warehouse.">Stock</th>
           <th class="num right" title="Open purchase orders in CIN7.">Incoming</th>
           <th class="num right" title="Trays per month — 3-month trailing average across all channels.">Demand/mo</th>
           <th class="num right" title="(Stock + Incoming) &divide; monthly demand.">Cover</th>
@@ -2756,9 +2756,17 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.86</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.87</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.87 &mdash; 20 July 2026 (📍 Stock now shows which location it's in)</h4>
+    <ul>
+      <li><strong>The totals were already right; the label wasn't.</strong> Mel asked whether stock at Brisbane Logistics and Health Focus was being counted. It always has been &mdash; <code>fetchStockBySku</code> sums <code>stockOnHand</code> across every branch row CIN7 returns, filtering nothing, and only <em>also</em> tracks Amazon FBA separately so a warehouse-only figure can be derived where that's useful. Verified with a multi-branch test: Main Branch + No Pong Warehouse + Health Focus + Brisbane + FBA all land in the total. But the Stock column tooltip read &ldquo;our warehouse + Health Focus&rdquo;, which named two locations and silently omitted Brisbane &mdash; a fair reason to doubt the number.</li>
+      <li><strong>Stock cells now carry a per-location breakdown.</strong> Hover any Stock figure for the split by branch, with a sub-label showing either the single location or &ldquo;N locations&rdquo;. This matters more than it sounds: across the catalogue Health Focus holds <strong>416,359</strong> units and Brisbane <strong>120,000</strong>, against <strong>359,676</strong> in our own warehouse &mdash; so for empty tins and packaging the majority is routinely <em>not</em> with us. A bare total reads as &ldquo;on hand&rdquo; when much of it is sitting at the filler.</li>
+      <li>Concrete examples now visible on the tab: <code>PCI</code>'s 31,072 is 20,000 at Health Focus and 11,072 in our warehouse. <code>T-AU-BLANK-BASE-35</code>'s 182 blank bases are entirely at My Skincare Manufacturer &mdash; none in our warehouse at all.</li>
+      <li>Backend carries a <code>branches</code> map per SKU (branch name &rarr; soh / incoming). Empty branch rows are skipped, since CIN7 returns a row per product &times; branch whether or not it holds anything.</li>
+    </ul>
+
     <h4>v2.2.86 &mdash; 20 July 2026 (🐛 Incoming stock was 0 on every AU SKU &mdash; wrong CIN7 field name)</h4>
     <ul>
       <li><strong>The bug.</strong> <code>fetchStockBySku</code> requested a field list naming <code>openPurchaseOrders</code> and <code>openSalesOrders</code>. CIN7's <code>/Stock</code> response doesn't use those names &mdash; it returns <code>incoming</code> and <code>openSales</code>. So every row read back <code>undefined</code>, and incoming computed as <strong>0 for every AU SKU</strong>. Nothing errored; the numbers were just quietly wrong. Confirmed from the raw response: P-ENV-A1 at the NSW warehouse carries <code>"incoming": 24000</code> while the dashboard was reading <code>openPurchaseOrders</code> and getting nothing.</li>
@@ -8339,6 +8347,25 @@ function auPkgDateFromMonths(months) {
   return d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
+// Stock cell with a per-branch breakdown on hover. The total counts every
+// location — our warehouse, Health Focus, Brisbane Logistics, Amazon FBA —
+// and for packaging and empty tins the majority often sits at Health Focus or
+// Brisbane rather than with us, so showing only a total misleads about what's
+// actually to hand (Mel, 2026-07-20).
+function auPkgStockCell(r) {
+  const b = r.branches || {};
+  const names = Object.keys(b).filter(k => (b[k].soh || 0) > 0)
+    .sort((x, y) => b[y].soh - b[x].soh);
+  if (!names.length) return fmtAuNum(r.soh);
+  const lines = names.map(n => `${n}: ${fmtAuNum(b[n].soh)}`).join('\n');
+  const title = `On hand by location — every branch counts toward the total:\n\n${lines}`
+    + (names.length > 1 ? `\n\nTotal: ${fmtAuNum(r.soh)}` : '');
+  const sub = names.length > 1
+    ? `<div style="font-size:10px;color:var(--text-light);">${names.length} locations</div>`
+    : `<div style="font-size:10px;color:var(--text-light);">${escapeHtml(names[0])}</div>`;
+  return `<span title="${escapeHtml(title)}" style="cursor:help;border-bottom:1px dotted var(--text-light);">${fmtAuNum(r.soh)}</span>${sub}`;
+}
+
 function auPkgCoverCell(r) {
   if (r.cover === null) return '<span style="color:var(--text-light);">—</span>';
   const col = r.orderByMonths <= 0 ? 'color:var(--red-text);font-weight:700;'
@@ -8471,7 +8498,7 @@ function renderAuPackagingTab() {
   const forecastRow = (r) => `<tr${r.discontinued ? ' style="opacity:0.55;"' : ''}>
       <td class="sticky-col"><div class="sku-name">${escapeHtml(r.sku)}</div></td>
       <td>${escapeHtml(auPkgScent(r))}</td>
-      <td class="num right">${fmtAuNum(r.soh)}</td>
+      <td class="num right">${auPkgStockCell(r)}</td>
       <td class="num right">${r.incoming > 0 ? fmtAuNum(r.incoming) : '<span style="color:var(--text-light);">—</span>'}</td>
       <td class="num right">${r.demand > 0 ? fmtAuNum(Math.round(r.demand)) : '<span style="color:var(--text-light);">—</span>'}</td>
       <td class="num right">${auPkgCoverCell(r)}</td>
@@ -8487,7 +8514,7 @@ function renderAuPackagingTab() {
     ? action.map(r => `<tr>
         <td class="sticky-col"><div class="sku-name">${escapeHtml(r.sku)}</div>${r.name ? `<div style="font-size:10px;color:var(--text-light);">${escapeHtml(r.name)}</div>` : ''}</td>
         <td style="font-size:12px;color:var(--text-secondary);">${escapeHtml(r.type)}</td>
-        <td class="num right">${fmtAuNum(r.soh)}</td>
+        <td class="num right">${auPkgStockCell(r)}</td>
         <td class="num right">${r.incoming > 0 ? fmtAuNum(r.incoming) : '<span style="color:var(--text-light);">—</span>'}</td>
         <td class="num right">${r.demand > 0 ? fmtAuNum(Math.round(r.demand)) : '<span style="color:var(--text-light);">—</span>'}</td>
         <td class="num right">${r.cover != null ? auPkgCoverCell(r) : `<span style="color:var(--text-light);" title="No forecast — flagged on stock level against its floor of ${fmtAuNum(r.floor)}.">below floor</span>`}</td>
@@ -8506,7 +8533,7 @@ function renderAuPackagingTab() {
     envelopes.length ? envelopes.map(r => `<tr>
       <td class="sticky-col"><div class="sku-name">${escapeHtml(r.sku)}</div></td>
       <td>${escapeHtml(r.name || '')}</td>
-      <td class="num right">${fmtAuNum(r.soh)}</td>
+      <td class="num right">${auPkgStockCell(r)}</td>
       <td class="num right">${r.incoming > 0 ? fmtAuNum(r.incoming) : '<span style="color:var(--text-light);">—</span>'}</td>
       <td class="num right">${r.demand > 0 ? fmtAuNum(Math.round(r.demand)) : '<span style="color:var(--text-light);">—</span>'}</td>
       <td class="num right">${auPkgCoverCell(r)}</td>
@@ -8518,7 +8545,7 @@ function renderAuPackagingTab() {
     watch.length ? watch.map(r => `<tr>
       <td class="sticky-col"><div class="sku-name">${escapeHtml(r.sku)}</div></td>
       <td>${escapeHtml(r.name || '')}</td>
-      <td class="num right">${fmtAuNum(r.soh)}</td>
+      <td class="num right">${auPkgStockCell(r)}</td>
       <td class="num right">${r.incoming > 0 ? fmtAuNum(r.incoming) : '<span style="color:var(--text-light);">—</span>'}</td>
       <td class="num right" style="color:var(--text-secondary);">${fmtAuNum(r.floor)}</td>
       <td>${r.low ? '<span class="badge warn">Low — reorder</span>' : '<span class="badge ok">OK</span>'}</td>
