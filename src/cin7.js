@@ -17,7 +17,10 @@
  *         fba_cin7, fba_amz: null, discontinued }
  *     Built from CIN7 /Products + /Stock with the AU SKU normalisation rules
  *     codified in `AU Dashboard/au-sku-rules.md`. KV-cached at
- *     `au:inventory:v1` (15-min TTL); pass ?refresh=1 to bypass.
+ *     `au:inventory:v2` (15-min TTL); pass ?refresh=1 to bypass.
+ *     Also returns `packaging` for the AU Packaging tab — SRT trays, outer
+ *     cartons, envelopes and blank engraving tins, read straight off the
+ *     unfiltered stock map (buildInventory's category whitelist drops them).
  *
  *   GET /api/au/sales?month=YYYY-MM
  *     One CIN7 /SalesOrders fetch services three views for the named month:
@@ -70,7 +73,10 @@ export const auRoutes = new Hono();
 
 // ─── KV cache ───────────────────────────────────────────────────────────────
 
-const KV_INVENTORY_KEY = 'au:inventory:v1';
+// v2 (2026-07-20): payload gained `packaging` for the AU Packaging tab. Bumped
+// so a warm v1 entry can't serve a packaging-less payload for up to 15 minutes
+// after deploy — the front end would render an empty tab and look broken.
+const KV_INVENTORY_KEY = 'au:inventory:v2';
 // au:pos:v4 (v2.2.16, 2026-05-16) — bumped because `expected_date` now falls
 // back through CIN7's full date field chain (deliveryDate → estimatedDeliveryDate
 // → estimatedArrivalDate → supplierAcceptanceDate). Payload shape gains
@@ -92,8 +98,11 @@ const KV_INVENTORY_KEY = 'au:inventory:v1';
 // au:pos:v6 (v2.2.71, 2026-07-02) — incomingBySku rows gain empty_tins_soh /
 // empty_tins_incoming (unfilled T-AU-… tin stock) so the forecast can flag a
 // suggested finished PO that exceeds the empty tins available to fill it.
+// au:pos:v9 (v2.2.82, 2026-07-20) — payload gains observedLeadTimes, median
+// createdDate→fullyReceivedDate per supplier, for the Packaging tab's
+// entered-vs-observed lead-time nudge.
 // Future bumps: any time the response shape or filter logic changes.
-const KV_POS_KEY       = 'au:pos:v8';
+const KV_POS_KEY       = 'au:pos:v9';
 // Per-month sales: `au:sales:YYYY-MM:v4`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because
@@ -410,6 +419,125 @@ function buildEmptyTinsBySku(stockBySku) {
   return out;
 }
 
+// ── AU packaging stock (Packaging tab) ────────────────────────────────────
+//
+// CIN7 carries every packaging SKU with real SOH/incoming, but buildInventory()
+// filters the payload down to Finished Products / Bicarb Based, so these rows
+// never reach the front end. buildStockBySku() upstream applies no category
+// filter at all, so we read straight off it — same trick buildEmptyTinsBySku
+// uses — and no extra API call is needed.
+//
+// Four buckets, matching how AU actually reorders:
+//   srt        P-AU-SRT-<scent>-<form>       12-tin shelf-ready trays (TC Printing)
+//   cartons    P-OC-AU-CTN-<scent>-<form>-48 printed outers, 4 SRTs each (SPS)
+//              P-AU-{BLANK,PRINTED}-*OUTERS  unbranded/generic outers
+//   envelopes  P-ENV-A1, P-BOX-12x85         D2C mailers (Huizhou ZTJ)
+//   blankTins  T-AU-BLANK-*                  engraving stock — NOT a sticker pool
+//
+// Deliberately excluded:
+//   • T-L-AU-…          lids. Discontinued (Mel, 2026-07-20) — not going forward.
+//                       Note classifyPoLineCode() still counts these as raw_tin
+//                       via its `T-` catch-all; harmless while stock runs out.
+//   • PCI               postcard inserts. Treated as a marketing expense and not
+//                       stock-tracked in CIN7 — it exists only as a PO line, so
+//                       there is no SOH to report. Left out until that changes.
+//   • P-AU-BD-NPS-100   soap wrap. Belongs to the soap line, not this tab.
+//
+// SRT naming does NOT follow the finished-goods convention: trays carry no size
+// suffix (P-AU-SRT-LL-BCF, not -35) because every AU tray is 12 × 35g. Black
+// variants keep their B- infix (P-AU-SRT-B-MJ-BCF → AU-B-MJ-BCF-35). We rebuild
+// the finished SKU by re-appending -35 so the tray can inherit that SKU's demand.
+const SRT_TIN_CAPACITY   = 12;  // tins per shelf-ready tray
+const CARTON_SRT_CAPACITY = 4;  // SRTs per printed outer carton (= 48 tins)
+
+function buildAuPackagingBySku(stockBySku) {
+  const srt = [], cartons = [], envelopes = [], blankTins = [];
+
+  // A derived link is only real if that finished SKU still exists in CIN7.
+  // Retired lines keep their packaging on the shelf long after the finished
+  // good is delisted — Spicy Chai (SC) is the live example: P-OC-AU-CTN-SC-BCF-48
+  // and its SRT trays still hold stock, but AU-CTN-SC-*-48 is gone from the
+  // catalogue. Marking those rows discontinued keeps them visible as dead stock
+  // to use up or write off, instead of showing a demand-less row that reads
+  // like a supply problem.
+  const linkOrNull = (sku) => (sku && stockBySku.has(sku)) ? sku : null;
+
+  for (const [code, s] of stockBySku.entries()) {
+    // Common shape — every bucket returns the same keys so the front end can
+    // render any of them through one row renderer. Branches override as needed.
+    const row = {
+      sku:      code,
+      name:     s.name || '',
+      soh:      s.soh      || 0,
+      avail:    s.avail    || 0,
+      incoming: s.incoming || 0,
+      linkedSku:    null,   // finished SKU whose sales drive this row's demand
+      capacity:     null,   // tins per tray / SRTs per carton
+      manualDemand: false,  // no derivable link — demand entered by hand
+      discontinued: false,  // linked finished SKU no longer in the catalogue
+    };
+
+    if (code.startsWith('P-AU-SRT-')) {
+      // Secret Scenta (P-AU-SRT-SS) has no scent/form pair, so it can't inherit
+      // demand from a finished SKU. Mirrors the NA treatment — surfaced with
+      // stock only and flagged for manual demand.
+      const tail = code.slice('P-AU-SRT-'.length);
+      const derived = /^[A-Z0-9]+-[A-Z0-9]+(-[A-Z0-9]+)?$/.test(tail) && tail !== 'SS'
+        ? `AU-${tail}-35`
+        : null;
+      const linked = linkOrNull(derived);
+      srt.push({ ...row, linkedSku: linked, capacity: SRT_TIN_CAPACITY,
+                 // No scent/form pair at all (Secret Scenta) → demand typed by hand.
+                 manualDemand: derived === null,
+                 // Had a valid-looking link, but that finished SKU is gone.
+                 discontinued: derived !== null && linked === null });
+      continue;
+    }
+
+    if (code.startsWith('P-OC-AU-CTN-')) {
+      // Printed outer — strip the P-OC- prefix to get the finished carton SKU
+      // (P-OC-AU-CTN-EF-BCF-48 → AU-CTN-EF-BCF-48), whose sales drive demand.
+      const derived = code.slice('P-OC-'.length);
+      const linked = linkOrNull(derived);
+      cartons.push({ ...row, linkedSku: linked, capacity: CARTON_SRT_CAPACITY,
+                     blank: false, discontinued: linked === null });
+      continue;
+    }
+
+    if (/^P-AU-(BLANK|PRINTED)-.*OUTERS$/.test(code)) {
+      // Generic outers aren't tied to a scent, so there's no sales series to
+      // forecast from. Stock-only with a low-stock flag (Mel: "hard to
+      // forecast, so probably more flag if stock is getting low").
+      cartons.push({ ...row, blank: true, manualDemand: true });
+      continue;
+    }
+
+    if (code === 'P-ENV-A1' || code === 'P-BOX-12x85') {
+      // Demand comes from D2C order counts, not a linked SKU — see the
+      // envelope rule in the front end (orders minus SRT/carton orders).
+      envelopes.push({ ...row });
+      continue;
+    }
+
+    if (code.startsWith('T-AU-BLANK-')) {
+      // Engraving stock. AU does not sticker blanks onto branded runs, so this
+      // is a standalone line with its own reorder point — none of the NA blank
+      // -pool allocation applies. Bases and lids are stocked separately
+      // (T-AU-BLANK-BASE-35 / -LID-35) alongside complete blanks.
+      blankTins.push({ ...row, manualDemand: true });
+      continue;
+    }
+  }
+
+  const bySku = (a, b) => String(a.sku).localeCompare(String(b.sku));
+  return {
+    srt:       srt.sort(bySku),
+    cartons:   cartons.sort(bySku),
+    envelopes: envelopes.sort(bySku),
+    blankTins: blankTins.sort(bySku),
+  };
+}
+
 // Products gives us category / status. We need this to filter the inventory
 // rows down to Finished Products + Bicarb Based + uncategorised (which is how
 // build_data.py does it). Returns Map<sku, { category, status }>.
@@ -562,9 +690,14 @@ async function buildAuInventoryPayload(env) {
   // Empty-tin stock per finished base SKU (T-AU-… rows) — a fillability check
   // for the forecast's suggested PO. Plain object so it survives KV JSON.
   const emptyTins = Object.fromEntries(buildEmptyTinsBySku(stockBySku));
+  // Packaging stock (SRTs / outer cartons / envelopes / blank engraving tins).
+  // Same stockBySku source as emptyTins — buildInventory's category whitelist
+  // would otherwise drop every one of these rows before the front end sees them.
+  const packaging = buildAuPackagingBySku(stockBySku);
   return {
     inventory,
     emptyTins,
+    packaging,
     lastSync: new Date().toISOString(),
     source:   'cin7-live',
     counts: {
@@ -572,6 +705,8 @@ async function buildAuInventoryPayload(env) {
       productSkus:  productMeta.size,
       inventoryRows: inventory.length,
       emptyTinSkus:  Object.keys(emptyTins).length,
+      packagingSkus: packaging.srt.length + packaging.cartons.length
+                   + packaging.envelopes.length + packaging.blankTins.length,
     },
   };
 }
@@ -1661,6 +1796,87 @@ function isOpenPo(po) {
   return true;
 }
 
+// ── Observed lead times (AU Packaging tab) ────────────────────────────────
+//
+// The entered lead time always drives the maths. This is the reality check
+// beside it: what CIN7's own PO history says each supplier actually took,
+// createdDate → fullyReceivedDate. Mel's call (2026-07-20) — "keep the entered
+// value as a driver and show observed alongside as a nudge when they diverge"
+// — so nothing here feeds a calculation; it only ever surfaces a discrepancy.
+//
+// Worked example that motivated this, TC Printing (SRT trays):
+//   PO-5186   07 Nov 25 → 17 Dec 25   40d   ← Christmas run
+//   PO-39463  22 Jan 26 → 19 Feb 26   28d
+//   PO-53421  03 Mar 26 → 27 Mar 26   24d
+//   PO-65474  01 Apr 26 → 28 Apr 26   27d
+//   PO-80076  13 May 26 → 09 Jun 26   27d
+// Median 27 days ≈ 4 weeks, against the 5 weeks in the lead-time doc. MEDIAN
+// not mean, precisely so one Christmas run can't drag the figure out.
+//
+// Only POs carrying an explicit `fullyReceivedDate` count. isOpenPo() also
+// treats a PO as closed when its line items all show qtyShipped >= qty, but
+// that path gives no receipt DATE, so it can't be measured — those are skipped
+// rather than guessed at. `samples` is returned so a figure resting on two POs
+// is visibly weaker than one resting on ten.
+const PACKAGING_SUPPLIER_FAMILIES = [
+  { family: 'srt',       match: /tc\s*printing/i },
+  { family: 'cartons',   match: /sps\s*packaging/i },
+  { family: 'envelopes', match: /huizhou|ztj/i },
+  { family: 'tins',      match: /guanqiao/i },
+];
+
+function median(nums) {
+  if (!nums.length) return null;
+  const s = [...nums].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+}
+
+function buildObservedLeadTimes(rawPos, { monthsBack = 18, maxSamples = 10 } = {}) {
+  const cutoff = Date.now() - monthsBack * 30.44 * 86400000;
+  const bySupplier = new Map();
+
+  for (const po of rawPos) {
+    const created  = po?.createdDate ? Date.parse(po.createdDate) : NaN;
+    const received = po?.fullyReceivedDate ? Date.parse(po.fullyReceivedDate) : NaN;
+    if (!Number.isFinite(created) || !Number.isFinite(received)) continue;
+    if (received < cutoff) continue;
+
+    const days = Math.round((received - created) / 86400000);
+    // Guard against clock/data errors — a negative or year-plus lead is a
+    // back-dated or mis-keyed PO, not a supplier signal.
+    if (days < 0 || days > 365) continue;
+
+    const company = String(po?.company || '').trim();
+    if (!company) continue;
+    const acc = bySupplier.get(company) || { company, samples: [] };
+    acc.samples.push({ ref: String(po?.reference || po?.id || ''), days, received });
+    bySupplier.set(company, acc);
+  }
+
+  const out = {};
+  for (const acc of bySupplier.values()) {
+    // Most recent first, then cap — old POs shouldn't outvote current performance.
+    acc.samples.sort((a, b) => b.received - a.received);
+    const used = acc.samples.slice(0, maxSamples);
+    const days = used.map((s) => s.days);
+    const fam = PACKAGING_SUPPLIER_FAMILIES.find((f) => f.match.test(acc.company));
+    const entry = {
+      supplier:   acc.company,
+      medianDays: median(days),
+      samples:    used.length,
+      minDays:    Math.min(...days),
+      maxDays:    Math.max(...days),
+      latest:     used[0] ? { ref: used[0].ref, days: used[0].days } : null,
+    };
+    out[acc.company] = entry;
+    // Also key by packaging family so the tab can look up "what does CIN7 say
+    // SRTs actually take" without hardcoding a supplier name in the front end.
+    if (fam) out[`family:${fam.family}`] = { ...entry, family: fam.family };
+  }
+  return out;
+}
+
 // Build the same `pos[]` shape the static au-data.js has, plus the new
 // date/status fields. Each PO gets a derived `type` based on dominant bucket
 // (matches build_data.py logic).
@@ -2030,6 +2246,9 @@ async function buildAuPosPayload(env) {
   const rawPos = await fetchAllPurchaseOrders(env);
   const openPos = rawPos.filter(isOpenPo);
   const pos = shapePoRows(openPos);
+  // Lead-time reality check for the Packaging tab. Derived from the CLOSED POs
+  // that isOpenPo just filtered out, so it has to read rawPos, not openPos.
+  const observedLeadTimes = buildObservedLeadTimes(rawPos);
 
   // 4. Derive incoming-by-SKU
   const incomingBySku = buildIncomingBySku(inventory, pos, monthPayloads, emptyTins);
@@ -2037,6 +2256,7 @@ async function buildAuPosPayload(env) {
   return {
     pos,
     incomingBySku,
+    observedLeadTimes,
     runRateBasis: {
       // Documents which months fed the run-rate average so the frontend
       // tooltip can show "trailing 3 months: Feb / Mar / Apr 2026".
@@ -2399,6 +2619,159 @@ auRoutes.get('/pos/debug', async (c) => {
     sampleClosedByNewFilter: oldestApproved.slice(0, sampleSize),
     note: 'Diagnostic — to inspect one PO with full fields + filter eval: ?ref=PO-AU-T88',
   });
+});
+
+// ── Packaging demand (AU Packaging tab) ───────────────────────────────────
+//
+// Packaging demand does NOT follow finished-goods demand, because different
+// channels consume different packaging. Mel's rules (2026-07-20):
+//
+//   Envelopes  1 per D2C Woo order — but NOT orders containing an SRT or
+//              wholesale carton, since those ship in their own packaging.
+//              (NA counts 1 per Woo order flat, which would over-order here.)
+//   SRT trays  supermarket + distributor volume, PLUS Woo tray sales — D2C
+//              tray sales consume tray stock exactly like a Coles order does.
+//              A carton also consumes 4 trays, so cartons contribute here too.
+//   Cartons    printed outers, from carton sales across all channels.
+//   Blank outers / blank tins  no forecast at all — flag when low.
+//
+// Pack-format UNIT counts, not tin-equivalents. skuSales can't serve this: it
+// rolls every line up to base SKU with the multiplier already applied, so a
+// 48-tin carton and 48 single tins are indistinguishable by the time it lands.
+// Both raw sources below still carry the original code + qty:
+//   Woo         order_items.sku    (AU-SRT-…x12 / AU-CTN-…-48 / WC-AU-…)
+//   Supermarket cin7_sales_order_items.code + .qty, channel_attr-filtered
+//
+// WC-AU-… (×54) wholesale cartons are EXCLUDED outright, not unmapped: they
+// ship direct from the manufacturer with no SRTs and no specialised carton
+// (Mel, 2026-07-20), so they consume none of the packaging on this tab. They
+// still suppress an envelope on the Woo side — a wholesale order isn't going
+// out in an A1 mailer — which is why the envelope query still excludes them.
+//
+// AU-CTN-SRT-MIX-… (×72) genuinely IS unmapped: 72 = 6 trays, and the 6SRT
+// outers in stock (P-AU-{BLANK,PRINTED}-6SRT-OUTERS) look like its packaging,
+// but the trays inside are mixed scents so the demand can't be attributed to
+// any single tray SKU. Surfaced under `unmapped` rather than guessed at; the
+// 6SRT outers are flag-when-low anyway, which covers the practical need.
+const CTN_TRAYS_PER_CARTON = 4;
+
+async function buildAuPackagingDemand(env, monthsBack = 6) {
+  const since = new Date(Date.now() - monthsBack * 30.44 * 86400000)
+    .toISOString().slice(0, 10);
+
+  const [envRes, wooRes, cin7Res] = await Promise.all([
+    // A) Envelope-eligible Woo orders — D2C only, no tray/carton line present.
+    env.DB.prepare(
+      `SELECT substr(o.local_date, 1, 7) AS ym, COUNT(*) AS n
+         FROM orders o
+        WHERE o.market = 'AU'
+          AND o.status IN ('completed','processing')
+          AND o.local_date >= ?
+          AND NOT EXISTS (
+                SELECT 1 FROM order_items oi
+                 WHERE oi.order_id = o.id
+                   AND (oi.sku LIKE 'AU-SRT-%'
+                     OR oi.sku LIKE 'AU-CTN-%'
+                     OR oi.sku LIKE 'WC-AU-%')
+              )
+        GROUP BY ym`,
+    ).bind(since).all(),
+
+    // B) Woo pack-format units (trays / cartons sold direct).
+    env.DB.prepare(
+      `SELECT substr(oi.local_date, 1, 7) AS ym,
+              oi.sku                      AS code,
+              SUM(oi.quantity)            AS units
+         FROM order_items oi
+         JOIN orders o ON o.id = oi.order_id
+        WHERE oi.market = 'AU'
+          AND o.status IN ('completed','processing')
+          AND oi.local_date >= ?
+          AND (oi.sku LIKE 'AU-SRT-%' OR oi.sku LIKE 'AU-CTN-%' OR oi.sku LIKE 'WC-AU-%')
+        GROUP BY ym, oi.sku`,
+    ).bind(since).all(),
+
+    // C) Supermarket + distributor pack-format units, straight off CIN7 lines.
+    env.DB.prepare(
+      `SELECT substr(i.created_date, 1, 7) AS ym,
+              i.code                       AS code,
+              SUM(i.qty)                   AS units
+         FROM cin7_sales_order_items i
+         JOIN cin7_sales_orders o ON o.id = i.order_id
+        WHERE i.market = 'AU'
+          AND o.status = 'APPROVED'
+          AND o.channel_attr IN ('col','woo2','dist')
+          AND i.is_au_sku = 1
+          AND i.created_date >= ?
+          AND (i.code LIKE 'AU-SRT-%' OR i.code LIKE 'AU-CTN-%' OR i.code LIKE 'WC-AU-%')
+        GROUP BY ym, i.code`,
+    ).bind(since).all(),
+  ]);
+
+  // trays[pkgSku][ym] / cartons[pkgSku][ym] — packaging SKU → month → units.
+  const trays = {}, cartons = {}, unmapped = {};
+  const bump = (target, sku, ym, n) => {
+    if (!sku || !n) return;
+    (target[sku] = target[sku] || {});
+    target[sku][ym] = (target[sku][ym] || 0) + n;
+  };
+
+  const foldPackRows = (rows, channel) => {
+    for (const r of rows) {
+      const code = String(r.code || '').trim();
+      const ym = r.ym, units = Number(r.units) || 0;
+      if (!code || !ym || units <= 0) continue;
+
+      // Shelf-ready tray: AU-SRT-<scent>-<form>x12 → one tray each.
+      let m = code.match(/^AU-SRT-(.+?)-*x12$/);
+      if (m) { bump(trays, `P-AU-SRT-${m[1]}`, ym, units); continue; }
+
+      // Retailer carton: AU-CTN-<scent>-<form>-48 → one printed outer, and
+      // the 4 trays packed inside it.
+      m = code.match(/^AU-CTN-(?!SRT-MIX)(.+)-48$/);
+      if (m) {
+        bump(cartons, `P-OC-AU-CTN-${m[1]}-48`, ym, units);
+        bump(trays,   `P-AU-SRT-${m[1]}`,       ym, units * CTN_TRAYS_PER_CARTON);
+        continue;
+      }
+
+      // Wholesale cartons: manufacturer-direct, no packaging consumed here.
+      if (code.startsWith('WC-AU-')) continue;
+
+      // Mixed mega-trays — real demand we can't attribute to a tray SKU.
+      bump(unmapped, `${code} (${channel})`, ym, units);
+    }
+  };
+
+  foldPackRows(wooRes.results  || [], 'woo');
+  foldPackRows(cin7Res.results || [], 'supermarket');
+
+  const envelopeOrders = {};
+  for (const r of (envRes.results || [])) {
+    if (r.ym) envelopeOrders[r.ym] = Number(r.n) || 0;
+  }
+
+  return {
+    since,
+    monthsBack,
+    envelopeOrders,   // ym → count of envelope-consuming D2C orders
+    trays,            // P-AU-SRT-…      → { ym: units }
+    cartons,          // P-OC-AU-CTN-…-48 → { ym: units }
+    unmapped,         // pack formats with no packaging mapping (WC-AU, SRT-MIX)
+    note: 'Trays include 4 per retailer carton. WC-AU (×54) and AU-CTN-SRT-MIX '
+        + 'are listed under unmapped — their packaging is not derivable from the SKU.',
+  };
+}
+
+auRoutes.get('/packaging-demand', async (c) => {
+  const monthsBack = Math.min(24, Math.max(1, Number(c.req.query('months')) || 6));
+  try {
+    const payload = await buildAuPackagingDemand(c.env, monthsBack);
+    return c.json({ ...payload, lastSync: new Date().toISOString(), source: 'd1' });
+  } catch (e) {
+    console.error('AU packaging-demand error:', e?.message || e);
+    return c.json({ error: 'Failed to build packaging demand', detail: String(e?.message || e) }, 500);
+  }
 });
 
 // Live inventory. KV-cached for 15 min; pass ?refresh=1 to bypass and force
