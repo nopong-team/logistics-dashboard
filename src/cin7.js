@@ -2642,13 +2642,15 @@ auRoutes.get('/pos/debug', async (c) => {
 //              The three mailer SKUs are NOT interchangeable; which one an
 //              order consumes depends on its composition (Mel, 2026-07-20):
 //                P-BOX-12x85  >6 × 85g, OR >12 × 35g, OR mixed and >10 tins
-//                P-ENV-A1     any order containing 85g tins
+//                P-ENV-A1     any order containing 85g, OR 7–12 × 35g
 //                ENVELOPES    6 or fewer 35g tins, no 85g
 //              Evaluated in that order — the box rule is the "too big for a
-//              mailer" case and wins. Orders of 7–12 × 35g with no 85g fall
-//              between the stated rules; they're counted into their own
-//              `gap_7to12_35g` bucket rather than guessed into a SKU, so the
-//              volume is visible and can be assigned once confirmed.
+//              mailer" case and wins. The 7–12 × 35g band belongs to P-ENV-A1
+//              (Mel, 2026-07-20): ENVELOPES stops at 6 and the box starts above
+//              12, so the large envelope covers the middle. Every D2C order
+//              therefore lands somewhere; `unassigned` below is a sanity
+//              counter that should always read 0, kept so a future rule change
+//              that leaves a hole shows up rather than silently under-counting.
 //   SRT trays  supermarket + distributor volume, PLUS Woo tray sales — D2C
 //              tray sales consume tray stock exactly like a Coles order does.
 //              A carton also consumes 4 trays, so cartons contribute here too.
@@ -2717,11 +2719,17 @@ async function buildAuPackagingDemand(env, monthsBack = 6) {
        )
        SELECT ym,
               SUM(is_box)                                                    AS box,
-              SUM(CASE WHEN is_box = 0 AND n85 > 0  THEN 1 ELSE 0 END)       AS env_a1,
+              -- Large envelope: anything with 85g in it, plus the 7–12 × 35g
+              -- band (is_box already excluded >12, so n35 > 6 means 7–12).
+              SUM(CASE WHEN is_box = 0 AND (n85 > 0 OR n35 > 6)
+                       THEN 1 ELSE 0 END)                                    AS env_a1,
               SUM(CASE WHEN is_box = 0 AND n85 = 0 AND n35 <= 6
                        THEN 1 ELSE 0 END)                                    AS envelopes,
-              SUM(CASE WHEN is_box = 0 AND n85 = 0 AND n35 > 6
-                       THEN 1 ELSE 0 END)                                    AS gap_7to12,
+              -- Sanity counter: should always be 0 under the current rules.
+              SUM(CASE WHEN is_box = 0
+                        AND NOT (n85 > 0 OR n35 > 6)
+                        AND NOT (n85 = 0 AND n35 <= 6)
+                       THEN 1 ELSE 0 END)                                    AS unassigned,
               COUNT(*)                                                       AS total
          FROM tagged
         GROUP BY ym`,
@@ -2799,23 +2807,23 @@ async function buildAuPackagingDemand(env, monthsBack = 6) {
   // Mailer demand keyed by the actual packaging SKU, so the front end can treat
   // each as its own line rather than one pooled envelope figure.
   const mailers = { 'P-BOX-12x85': {}, 'P-ENV-A1': {}, 'ENVELOPES': {} };
-  const mailerGap = {};       // ym → orders of 7–12 × 35g that match no rule
-  const mailerOrders = {};    // ym → total D2C orders considered
+  const mailerUnassigned = {};  // ym → orders matching no rule (expect empty)
+  const mailerOrders = {};      // ym → total D2C orders considered
   for (const r of (envRes.results || [])) {
     if (!r.ym) continue;
     mailers['P-BOX-12x85'][r.ym] = Number(r.box)       || 0;
     mailers['P-ENV-A1'][r.ym]    = Number(r.env_a1)    || 0;
     mailers['ENVELOPES'][r.ym]   = Number(r.envelopes) || 0;
-    if (Number(r.gap_7to12)) mailerGap[r.ym] = Number(r.gap_7to12);
+    if (Number(r.unassigned)) mailerUnassigned[r.ym] = Number(r.unassigned);
     mailerOrders[r.ym] = Number(r.total) || 0;
   }
 
   return {
     since,
     monthsBack,
-    mailers,          // packaging SKU → { ym: orders needing that mailer }
-    mailerGap,        // ym → 7–12 × 35g orders matching no stated rule
-    mailerOrders,     // ym → total D2C orders considered
+    mailers,            // packaging SKU → { ym: orders needing that mailer }
+    mailerUnassigned,   // ym → orders matching no rule; expected to stay empty
+    mailerOrders,       // ym → total D2C orders considered
     trays,            // P-AU-SRT-…      → { ym: units }
     cartons,          // P-OC-AU-CTN-…-48 → { ym: units }
     unmapped,         // pack formats with no packaging mapping (SRT-MIX)
