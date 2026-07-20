@@ -569,7 +569,7 @@ function buildAuPackagingBySku(stockBySku) {
       continue;
     }
 
-    // Postcard inserts. Bare code, no prefix — same shape of trap as ENVELOPES.
+    // PCIs (Print Customer Inserts). Bare code, no prefix — same trap as ENVELOPES.
     // v2.2.82 claimed these weren't stock-tracked in CIN7; they are (31,072 on
     // hand, 5,000 incoming), and that wrong claim is why they were left out.
     // Watch-list only for now (Mel, 2026-07-20) — they're a marketing expense
