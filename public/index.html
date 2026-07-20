@@ -2324,7 +2324,7 @@
           <div class="table-card-title">Envelopes &amp; mailers</div>
           <button class="btn-csv" onclick="downloadAuPackagingCSV('envelopes')">Export CSV</button>
         </div>
-        <div class="table-hint">One mailer per D2C Woo order (orders containing a tray or wholesale carton are excluded &mdash; they ship in their own packaging). The three are <strong>not interchangeable</strong>, so each is forecast on the orders it actually serves: <strong>P-BOX-12x85</strong> for &gt;6&nbsp;&times;&nbsp;85g, &gt;12&nbsp;&times;&nbsp;35g, or a mix over 10 tins &middot; <strong>P-ENV-A1</strong> for any remaining order with 85g &middot; <strong>ENVELOPES</strong> for 6 or fewer 35g.</div>
+        <div class="table-hint">One mailer per D2C Woo order (orders containing a tray or wholesale carton are excluded &mdash; they ship in their own packaging). The three are <strong>not interchangeable</strong>, so each is forecast on the orders it actually serves: <strong>P-BOX-12x85</strong> for &gt;6&nbsp;&times;&nbsp;85g, &gt;12&nbsp;&times;&nbsp;35g, or a mix over 10 tins &middot; <strong>P-ENV-A1</strong> for any remaining order with 85g, or 7&ndash;12&nbsp;&times;&nbsp;35g &middot; <strong>ENVELOPES</strong> for 6 or fewer 35g.</div>
       </div>
       <div class="table-scroll-sticky"><table>
         <thead><tr>
@@ -2753,9 +2753,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.83</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.84</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.84 &mdash; 20 July 2026 (✉️ Mailer rules complete &mdash; 7&ndash;12 &times; 35g assigned)</h4>
+    <ul>
+      <li><strong>The unassigned band is closed.</strong> Orders of 7&ndash;12&nbsp;&times;&nbsp;35g with no 85g use <code>P-ENV-A1</code> (Mel, 20 Jul), so they now fold into that SKU's rate instead of sitting in a reported gap. P-ENV-A1's forecast rises accordingly &mdash; it was previously under-counted by roughly the volume of that band.</li>
+      <li><strong>Every D2C order now maps to exactly one mailer.</strong> Verified exhaustively across 960 order shapes (0&ndash;30 tins of each size): no shape falls in two buckets, none falls in none. All of Mel's stated boundaries check out &mdash; 6&nbsp;&times;&nbsp;35g &rarr; ENVELOPES, 7&nbsp;&times;&nbsp;35g &rarr; P-ENV-A1, 13&nbsp;&times;&nbsp;35g &rarr; P-BOX, 6&nbsp;&times;&nbsp;85g &rarr; P-ENV-A1, 7&nbsp;&times;&nbsp;85g &rarr; P-BOX, and a 6+5 mix &rarr; P-BOX on the over-10 rule.</li>
+      <li><strong>The gap note becomes a tripwire.</strong> The query keeps counting orders that match no rule, but that count should now always be zero. It only surfaces on the tab if it isn't &mdash; so a future rule change that leaves a hole is loud, rather than quietly under-forecasting whichever mailer those orders really use.</li>
+    </ul>
+
     <h4>v2.2.83 &mdash; 20 July 2026 (📦 Packaging &mdash; action table, per-mailer demand, editable floors)</h4>
     <ul>
       <li><strong>New &ldquo;Order in the next 30 days&rdquo; table at the top.</strong> Pulls from every table below &mdash; forecast lines whose order-by date falls inside 30 days or has passed, plus watch-list items at or under their floor &mdash; sorted most urgent first. This is the tab&rsquo;s answer to &ldquo;what do I actually need to do this month&rdquo;. The <em>Dead packaging stock</em> card is gone; discontinued lines still render greyed in their own tables, they just don&rsquo;t warrant a headline number.</li>
@@ -8497,14 +8504,15 @@ function renderAuPackagingTab() {
   // ── Unmapped pack formats — surfaced rather than silently dropped. ──
   const un = AU_PKG_DEMAND?.unmapped || {};
   const unKeys = Object.keys(un);
-  const gapAvg = auPkgTrailingAvg(AU_PKG_DEMAND?.mailerGap);
+  // Should never fire — every D2C order maps to a mailer under the current
+  // rules. Kept so a future rule change that leaves a hole is loud rather than
+  // quietly under-counting whichever mailer the orphaned orders really use.
+  const unassignedAvg = auPkgTrailingAvg(AU_PKG_DEMAND?.mailerUnassigned);
   const notes = [];
-  if (gapAvg > 0) {
-    notes.push(`<strong>${fmtAuNum(Math.round(gapAvg))} D2C orders/mo aren't assigned a mailer.</strong>`
-      + ` These are orders of 7–12 × 35g tins with no 85g, which fall between the stated rules —`
-      + ` ENVELOPES covers 6 or fewer 35g, and P-BOX-12x85 starts above 12. They're counted here`
-      + ` rather than guessed into a SKU, so whichever mailer they actually use is currently`
-      + ` under-forecast by this amount.`);
+  if (unassignedAvg > 0) {
+    notes.push(`<strong>${fmtAuNum(Math.round(unassignedAvg))} D2C orders/mo match no mailer rule.</strong>`
+      + ` That shouldn't happen — the three rules are meant to cover every order shape. Whichever`
+      + ` mailer these actually use is under-forecast by this amount until the rules are corrected.`);
   }
   if (unKeys.length) {
     const total = unKeys.reduce((s, k) => s + auPkgTrailingAvg(un[k]), 0);
