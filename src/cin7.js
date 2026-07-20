@@ -512,9 +512,19 @@ function buildAuPackagingBySku(stockBySku) {
       continue;
     }
 
-    if (code === 'P-ENV-A1' || code === 'P-BOX-12x85') {
-      // Demand comes from D2C order counts, not a linked SKU — see the
-      // envelope rule in the front end (orders minus SRT/carton orders).
+    // Envelope stock. NOTE the bare `ENVELOPES` code — it carries no P- prefix,
+    // so an earlier prefix-only rule dropped it silently and understated the
+    // envelope position by 22,680 units (Mel spotted the missing SKU,
+    // 2026-07-20). Match on an explicit list rather than a prefix so a
+    // similarly odd code can't slip through unnoticed again.
+    //
+    // ENVELOPES ("Perforated Envelopes") and P-ENV-A1 ("Large Perforated
+    // Envelope") are both D2C mailers drawing on the same order stream, so the
+    // front end pools their supply against one demand figure rather than giving
+    // each the full rate (which would double-count demand). P-BOX-12x85 is a
+    // 12 × 85g shipping box, not a mailer — it has no derivable driver and
+    // stays on the watch list.
+    if (code === 'ENVELOPES' || code === 'P-ENV-A1' || code === 'P-BOX-12x85') {
       envelopes.push({ ...row });
       continue;
     }
@@ -2626,9 +2636,19 @@ auRoutes.get('/pos/debug', async (c) => {
 // Packaging demand does NOT follow finished-goods demand, because different
 // channels consume different packaging. Mel's rules (2026-07-20):
 //
-//   Envelopes  1 per D2C Woo order — but NOT orders containing an SRT or
-//              wholesale carton, since those ship in their own packaging.
+//   Envelopes  one mailer per D2C Woo order — but NOT orders containing an SRT
+//              or wholesale carton, since those ship in their own packaging.
 //              (NA counts 1 per Woo order flat, which would over-order here.)
+//              The three mailer SKUs are NOT interchangeable; which one an
+//              order consumes depends on its composition (Mel, 2026-07-20):
+//                P-BOX-12x85  >6 × 85g, OR >12 × 35g, OR mixed and >10 tins
+//                P-ENV-A1     any order containing 85g tins
+//                ENVELOPES    6 or fewer 35g tins, no 85g
+//              Evaluated in that order — the box rule is the "too big for a
+//              mailer" case and wins. Orders of 7–12 × 35g with no 85g fall
+//              between the stated rules; they're counted into their own
+//              `gap_7to12_35g` bucket rather than guessed into a SKU, so the
+//              volume is visible and can be assigned once confirmed.
 //   SRT trays  supermarket + distributor volume, PLUS Woo tray sales — D2C
 //              tray sales consume tray stock exactly like a Coles order does.
 //              A carton also consumes 4 trays, so cartons contribute here too.
@@ -2660,20 +2680,50 @@ async function buildAuPackagingDemand(env, monthsBack = 6) {
     .toISOString().slice(0, 10);
 
   const [envRes, wooRes, cin7Res] = await Promise.all([
-    // A) Envelope-eligible Woo orders — D2C only, no tray/carton line present.
+    // A) Mailer demand. Per D2C order, count 35g and 85g tins, then bucket the
+    //    order to the mailer its composition calls for. Tray/carton orders are
+    //    excluded outright — they ship in their own packaging.
+    //    `-M` suffixed SKUs are subscription variants of the same tin, so the
+    //    size match allows an optional trailing M.
     env.DB.prepare(
-      `SELECT substr(o.local_date, 1, 7) AS ym, COUNT(*) AS n
-         FROM orders o
-        WHERE o.market = 'AU'
-          AND o.status IN ('completed','processing')
-          AND o.local_date >= ?
-          AND NOT EXISTS (
-                SELECT 1 FROM order_items oi
-                 WHERE oi.order_id = o.id
-                   AND (oi.sku LIKE 'AU-SRT-%'
-                     OR oi.sku LIKE 'AU-CTN-%'
-                     OR oi.sku LIKE 'WC-AU-%')
-              )
+      `WITH d2c AS (
+         SELECT o.id                        AS oid,
+                substr(o.local_date, 1, 7)  AS ym,
+                SUM(CASE WHEN oi.sku LIKE '%-35' OR oi.sku LIKE '%-35M'
+                         THEN oi.quantity ELSE 0 END) AS n35,
+                SUM(CASE WHEN oi.sku LIKE '%-85' OR oi.sku LIKE '%-85M'
+                         THEN oi.quantity ELSE 0 END) AS n85
+           FROM orders o
+           JOIN order_items oi ON oi.order_id = o.id
+          WHERE o.market = 'AU'
+            AND o.status IN ('completed','processing')
+            AND o.local_date >= ?
+            AND NOT EXISTS (
+                  SELECT 1 FROM order_items x
+                   WHERE x.order_id = o.id
+                     AND (x.sku LIKE 'AU-SRT-%'
+                       OR x.sku LIKE 'AU-CTN-%'
+                       OR x.sku LIKE 'WC-AU-%')
+                )
+          GROUP BY o.id
+       ),
+       tagged AS (
+         SELECT ym, n35, n85,
+                CASE WHEN n85 > 6 OR n35 > 12
+                       OR (n85 > 0 AND n35 > 0 AND n85 + n35 > 10)
+                     THEN 1 ELSE 0 END AS is_box
+           FROM d2c
+          WHERE n35 + n85 > 0
+       )
+       SELECT ym,
+              SUM(is_box)                                                    AS box,
+              SUM(CASE WHEN is_box = 0 AND n85 > 0  THEN 1 ELSE 0 END)       AS env_a1,
+              SUM(CASE WHEN is_box = 0 AND n85 = 0 AND n35 <= 6
+                       THEN 1 ELSE 0 END)                                    AS envelopes,
+              SUM(CASE WHEN is_box = 0 AND n85 = 0 AND n35 > 6
+                       THEN 1 ELSE 0 END)                                    AS gap_7to12,
+              COUNT(*)                                                       AS total
+         FROM tagged
         GROUP BY ym`,
     ).bind(since).all(),
 
@@ -2746,20 +2796,31 @@ async function buildAuPackagingDemand(env, monthsBack = 6) {
   foldPackRows(wooRes.results  || [], 'woo');
   foldPackRows(cin7Res.results || [], 'supermarket');
 
-  const envelopeOrders = {};
+  // Mailer demand keyed by the actual packaging SKU, so the front end can treat
+  // each as its own line rather than one pooled envelope figure.
+  const mailers = { 'P-BOX-12x85': {}, 'P-ENV-A1': {}, 'ENVELOPES': {} };
+  const mailerGap = {};       // ym → orders of 7–12 × 35g that match no rule
+  const mailerOrders = {};    // ym → total D2C orders considered
   for (const r of (envRes.results || [])) {
-    if (r.ym) envelopeOrders[r.ym] = Number(r.n) || 0;
+    if (!r.ym) continue;
+    mailers['P-BOX-12x85'][r.ym] = Number(r.box)       || 0;
+    mailers['P-ENV-A1'][r.ym]    = Number(r.env_a1)    || 0;
+    mailers['ENVELOPES'][r.ym]   = Number(r.envelopes) || 0;
+    if (Number(r.gap_7to12)) mailerGap[r.ym] = Number(r.gap_7to12);
+    mailerOrders[r.ym] = Number(r.total) || 0;
   }
 
   return {
     since,
     monthsBack,
-    envelopeOrders,   // ym → count of envelope-consuming D2C orders
+    mailers,          // packaging SKU → { ym: orders needing that mailer }
+    mailerGap,        // ym → 7–12 × 35g orders matching no stated rule
+    mailerOrders,     // ym → total D2C orders considered
     trays,            // P-AU-SRT-…      → { ym: units }
     cartons,          // P-OC-AU-CTN-…-48 → { ym: units }
-    unmapped,         // pack formats with no packaging mapping (WC-AU, SRT-MIX)
-    note: 'Trays include 4 per retailer carton. WC-AU (×54) and AU-CTN-SRT-MIX '
-        + 'are listed under unmapped — their packaging is not derivable from the SKU.',
+    unmapped,         // pack formats with no packaging mapping (SRT-MIX)
+    note: 'Trays include 4 per retailer carton. Mailers are bucketed per order '
+        + 'by composition, not pooled — the three SKUs are not interchangeable.',
   };
 }
 
