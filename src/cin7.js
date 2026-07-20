@@ -76,7 +76,10 @@ export const auRoutes = new Hono();
 // v2 (2026-07-20): payload gained `packaging` for the AU Packaging tab. Bumped
 // so a warm v1 entry can't serve a packaging-less payload for up to 15 minutes
 // after deploy — the front end would render an empty tab and look broken.
-const KV_INVENTORY_KEY = 'au:inventory:v2';
+// v3 (2026-07-20): incoming stock was reading 0 on every SKU (wrong CIN7 field
+// name — see fetchStockBySku). Every v2 entry has those zeros baked in, so the
+// key is bumped to force a rebuild rather than serve known-wrong numbers.
+const KV_INVENTORY_KEY = 'au:inventory:v3';
 // au:pos:v4 (v2.2.16, 2026-05-16) — bumped because `expected_date` now falls
 // back through CIN7's full date field chain (deliveryDate → estimatedDeliveryDate
 // → estimatedArrivalDate → supplierAcceptanceDate). Payload shape gains
@@ -101,8 +104,11 @@ const KV_INVENTORY_KEY = 'au:inventory:v2';
 // au:pos:v9 (v2.2.82, 2026-07-20) — payload gains observedLeadTimes, median
 // createdDate→fullyReceivedDate per supplier, for the Packaging tab's
 // entered-vs-observed lead-time nudge.
+// au:pos:v10 (v2.2.86, 2026-07-20) — empty_tins_incoming was always 0 because
+// fetchStockBySku read a CIN7 field name that doesn't exist. Cached entries
+// carry those zeros, so bump rather than serve them.
 // Future bumps: any time the response shape or filter logic changes.
-const KV_POS_KEY       = 'au:pos:v9';
+const KV_POS_KEY       = 'au:pos:v10';
 // Per-month sales: `au:sales:YYYY-MM:v4`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because
@@ -343,14 +349,23 @@ function isFbaBranchName(branchName) {
 // separately matters because conflating them (v2.34 just summed total) hides
 // the actionable bucket.
 export async function fetchStockBySku(env) {
-  const fields = [
-    'productId', 'productOptionId', 'modifiedDate', 'styleCode', 'code', 'barcode',
-    'branchId', 'branchName', 'productName',
-    'option1', 'option2', 'option3',
-    'available', 'stockOnHand', 'openSalesOrders', 'openPurchaseOrders',
-    'virtual', 'holding',
-  ].join(',');
-  const stockRows = await cin7FetchAll(env, 'Stock', { fields });
+  // No `fields` restriction — deliberate, and load-bearing.
+  //
+  // We used to request an explicit field list that included `openPurchaseOrders`
+  // and `openSalesOrders`. CIN7's /Stock response does not use those names: it
+  // returns `incoming` and `openSales`. So every row read back `undefined`, and
+  // incoming silently computed as 0 for EVERY AU SKU — surfacing as a Packaging
+  // row showing no incoming against a real 24,000 PO (Mel, 2026-07-20), and
+  // before that as a permanently-zero "on order" figure for empty tins on the
+  // Forecasting tab and a zero Incoming column on Inventory. Nothing errored;
+  // the numbers were just quietly wrong.
+  //
+  // Fetching without `fields` is what /api/au/stock/debug does, and it returns
+  // every field CIN7 has (verified across 619 rows). Restricting the list again
+  // would mean guessing which names CIN7 accepts as *inputs* versus what it
+  // emits as *outputs* — the exact assumption that caused this. The extra
+  // payload is trivial next to being wrong.
+  const stockRows = await cin7FetchAll(env, 'Stock', {});
 
   const bySku = new Map();
   for (const row of stockRows) {
@@ -368,18 +383,22 @@ export async function fetchStockBySku(env) {
       fba_avail: 0,
       fba_incoming: 0,
     };
-    const stockOnHand        = Number(row.stockOnHand)        || 0;
-    const available          = Number(row.available)          || 0;
-    const openPurchaseOrders = Number(row.openPurchaseOrders) || 0;
+    const stockOnHand = Number(row.stockOnHand) || 0;
+    const available   = Number(row.available)   || 0;
+    // `incoming` is CIN7's actual field name for stock on open POs. The
+    // `openPurchaseOrders` fallback is kept only so a future CIN7 rename can't
+    // silently zero this out again — whichever is present wins, and if both
+    // ever disappear the diagnostic at /api/au/stock/debug lists every field.
+    const incoming = Number(row.incoming ?? row.openPurchaseOrders) || 0;
     // Total accumulates across every branch
     acc.soh      += stockOnHand;
     acc.avail    += available;
-    acc.incoming += openPurchaseOrders;
+    acc.incoming += incoming;
     // FBA branch is captured separately for drift detection + warehouse split
     if (isFbaBranchName(row.branchName)) {
       acc.fba_soh      += stockOnHand;
       acc.fba_avail    += available;
-      acc.fba_incoming += openPurchaseOrders;
+      acc.fba_incoming += incoming;
     }
     if (!acc.name && row.productName) {
       const opt = [row.option1, row.option2, row.option3].filter(Boolean).join(' / ');
