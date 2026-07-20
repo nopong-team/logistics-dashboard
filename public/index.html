@@ -2208,16 +2208,28 @@
         <input id="au-pkg-lead-tins" class="pkg-lead" type="number" value="4" min="0.25" max="12" step="0.25"
                onchange="renderAuPackagingTab()"> mo
         <span class="pkg-obs" id="au-pkg-obs-tins"></span></span>
-      <span class="pkg-ctl" title="Blank engraving tins have no forecastable demand — flag when stock drops below this.">Blank-tin reorder point
-        <input id="au-pkg-blank-floor" class="pkg-lead" style="width:70px;" type="number" value="750" min="0" step="50"
-               onchange="renderAuPackagingTab()"></span>
     </div>
 
-    <div class="cards-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:12px;">
+    <!-- Reorder floors. Both are guesses until the team confirms what they
+         actually work to — the 300 for outers was a placeholder I picked, not
+         a figure from anywhere (Mel queried it, 2026-07-20), so it's editable
+         here rather than buried in the code. -->
+    <div style="display:flex;align-items:center;gap:18px;margin-bottom:14px;flex-wrap:wrap;">
+      <span style="font-size:14px;font-weight:600;">Reorder floors:</span>
+      <span class="pkg-ctl" title="Blank engraving tins have no forecastable demand — flag when stock drops below this.">Blank tins
+        <input id="au-pkg-blank-floor" class="pkg-lead" style="width:74px;" type="number" value="750" min="0" step="50"
+               onchange="renderAuPackagingTab()"></span>
+      <span class="pkg-ctl" title="Generic/blank outer cartons and non-mailer boxes. Placeholder value — set this to whatever the team actually reorders at.">Generic outers
+        <input id="au-pkg-outer-floor" class="pkg-lead" style="width:74px;" type="number" value="300" min="0" step="50"
+               onchange="renderAuPackagingTab()"></span>
+      <span style="font-size:12px;color:var(--text-light);">both are placeholders &mdash; set them to what the team actually uses</span>
+    </div>
+
+    <div class="cards-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:12px;">
       <div class="card">
-        <div class="card-label">Lines to order now</div>
+        <div class="card-label">To order in 30 days</div>
         <div class="card-value" id="au-pkg-crit" style="color:var(--red-text);">0</div>
-        <div class="card-sub">cover below lead time</div>
+        <div class="card-sub">listed in the action table below</div>
       </div>
       <div class="card">
         <div class="card-label">Tightest tray cover</div>
@@ -2229,11 +2241,32 @@
         <div class="card-value" id="au-pkg-env-cover">—</div>
         <div class="card-sub" id="au-pkg-env-sub">D2C orders/mo</div>
       </div>
-      <div class="card">
-        <div class="card-label">Dead packaging stock</div>
-        <div class="card-value" id="au-pkg-dead">0</div>
-        <div class="card-sub">units on discontinued lines</div>
+    </div>
+
+    <!-- Action table. Everything from the four tables below that needs
+         ordering inside 30 days, most urgent first. -->
+    <div class="table-card" style="border:2px solid var(--amber-text);">
+      <div class="table-card-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="table-card-title">Order in the next 30 days</div>
+          <button class="btn-csv" onclick="downloadAuPackagingCSV('action')">Export CSV</button>
+          <span id="au-pkg-source-chip" class="source-chip" style="display:none;" title="Source of the rows in these tables"></span>
+        </div>
+        <div class="table-hint">Pulled from every table below &mdash; forecast lines whose order-by date falls within 30 days (or has passed), plus watch-list items already under their floor. Empty means nothing needs ordering this month.</div>
       </div>
+      <div class="table-scroll-sticky"><table>
+        <thead><tr>
+          <th class="sticky-col">SKU</th>
+          <th>Type</th>
+          <th class="num right">Stock</th>
+          <th class="num right">Incoming</th>
+          <th class="num right">Demand/mo</th>
+          <th class="num right">Cover</th>
+          <th class="num right">Order by</th>
+          <th>Status</th>
+        </tr></thead>
+        <tbody id="au-pkg-action-tbody"></tbody>
+      </table></div>
     </div>
 
     <!-- SRT trays -->
@@ -2242,7 +2275,6 @@
         <div style="display:flex;align-items:center;gap:10px;">
           <div class="table-card-title">SRT trays</div>
           <button class="btn-csv" onclick="downloadAuPackagingCSV('srt')">Export CSV</button>
-          <span id="au-pkg-source-chip" class="source-chip" style="display:none;" title="Source of the rows in these tables"></span>
         </div>
         <div class="table-hint">Demand = trays shipped to Coles / Woolworths / distributors <em>plus</em> trays sold direct on Woo, <em>plus</em> 4 trays for every retailer carton. Counted as actual tray units off the order lines, not tins&nbsp;&divide;&nbsp;12.</div>
       </div>
@@ -2292,7 +2324,7 @@
           <div class="table-card-title">Envelopes &amp; mailers</div>
           <button class="btn-csv" onclick="downloadAuPackagingCSV('envelopes')">Export CSV</button>
         </div>
-        <div class="table-hint">One envelope per D2C Woo order &mdash; <strong>excluding</strong> orders containing a tray or wholesale carton, which ship in their own packaging.</div>
+        <div class="table-hint">One mailer per D2C Woo order (orders containing a tray or wholesale carton are excluded &mdash; they ship in their own packaging). The three are <strong>not interchangeable</strong>, so each is forecast on the orders it actually serves: <strong>P-BOX-12x85</strong> for &gt;6&nbsp;&times;&nbsp;85g, &gt;12&nbsp;&times;&nbsp;35g, or a mix over 10 tins &middot; <strong>P-ENV-A1</strong> for any remaining order with 85g &middot; <strong>ENVELOPES</strong> for 6 or fewer 35g.</div>
       </div>
       <div class="table-scroll-sticky"><table>
         <thead><tr>
@@ -2721,9 +2753,20 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.82</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.83</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.83 &mdash; 20 July 2026 (📦 Packaging &mdash; action table, per-mailer demand, editable floors)</h4>
+    <ul>
+      <li><strong>New &ldquo;Order in the next 30 days&rdquo; table at the top.</strong> Pulls from every table below &mdash; forecast lines whose order-by date falls inside 30 days or has passed, plus watch-list items at or under their floor &mdash; sorted most urgent first. This is the tab&rsquo;s answer to &ldquo;what do I actually need to do this month&rdquo;. The <em>Dead packaging stock</em> card is gone; discontinued lines still render greyed in their own tables, they just don&rsquo;t warrant a headline number.</li>
+      <li><strong>The three mailer SKUs are forecast separately, because they are not interchangeable.</strong> Which one an order consumes depends on its composition (Mel, 20 Jul): <code>P-BOX-12x85</code> for more than 6&nbsp;&times;&nbsp;85g, more than 12&nbsp;&times;&nbsp;35g, or a mix over 10 tins; <code>P-ENV-A1</code> for any remaining order containing 85g; <code>ENVELOPES</code> for 6 or fewer 35g. The demand query now counts 35g and 85g tins per order and buckets each order to the mailer it actually uses, rather than treating envelopes as one pooled line. The KPI card reports the <em>tightest</em> mailer, since an average would hide a shortage in one size.</li>
+      <li><strong><code>ENVELOPES</code> was missing entirely.</strong> The bare code carries no <code>P-</code> prefix, so the prefix-based classifier dropped it silently &mdash; understating the envelope position by 22,680 units. Mailer SKUs now match an explicit list rather than a prefix, so a similarly odd code can&rsquo;t slip through unnoticed again. Found by Mel, who knew there were two envelope SKUs.</li>
+      <li><strong>Reorder floors are editable.</strong> The 300 used for generic outers was a placeholder I picked with no basis; it now sits in the controls next to the blank-tin floor, both labelled as placeholders. Set them to whatever the team actually works to.</li>
+      <li><strong>At the floor now counts as low.</strong> Was strictly-below, so a line sitting exactly on its reorder point read as OK &mdash; <code>P-AU-BLANK-3CTN-OUTERS</code> at 300/300 didn&rsquo;t appear in the action table when it should have.</li>
+      <li><strong>Unassigned-mailer volume is surfaced.</strong> Orders of 7&ndash;12&nbsp;&times;&nbsp;35g with no 85g fall between the stated rules &mdash; ENVELOPES covers 6 or fewer, P-BOX starts above 12. Those orders are counted into their own bucket and reported under the tables rather than guessed into a SKU, so whichever mailer they use is visibly under-forecast until the rule is confirmed.</li>
+      <li><strong>Correction to v2.2.82:</strong> that entry said PCIs aren&rsquo;t stock-tracked in CIN7. They are &mdash; <code>PCI</code> (&ldquo;Post Card Insert&rdquo;) holds 31,072 on hand with 5,000 incoming. Still excluded from the tab pending a decision on whether to forecast them, but the stated reason was wrong.</li>
+    </ul>
+
     <h4>v2.2.82 &mdash; 20 July 2026 (📦 Packaging tab &mdash; built)</h4>
     <ul>
       <li><strong>The Packaging tab is live</strong> &mdash; SRT trays, printed outer cartons, envelopes, and a watch list for generic outers and blank engraving tins. It replaces the &ldquo;to design&rdquo; placeholder, which had assumed we might need a separate spreadsheet upload like Logiwa on the CA side. We don&rsquo;t: <strong>CIN7 already carries every packaging SKU with real stock and incoming figures.</strong> The rows were being fetched on every sync and then discarded &mdash; <code>buildStockBySku()</code> applies no category filter, but <code>buildInventory()</code> narrows the payload to Finished Products / Bicarb Based before the front end sees it. New <code>buildAuPackagingBySku()</code> reads the unfiltered map, so the whole tab costs zero extra API calls.</li>
@@ -8286,9 +8329,17 @@ function auPkgOrderByCell(r) {
 
 // Build every table's rows in one pass so the KPI cards and the CSV export
 // read from exactly what's on screen.
+// How far ahead the action table looks. 30 days in months.
+const AU_PKG_ACTION_HORIZON = 30 / 30.44;
+
+function auPkgFloor(id, fallback) {
+  const v = parseFloat(document.getElementById(id)?.value);
+  return Number.isFinite(v) && v >= 0 ? v : fallback;
+}
+
 function getAuPackagingRows() {
   const pkg = AU_PACKAGING || { srt: [], cartons: [], envelopes: [], blankTins: [] };
-  const dem = AU_PKG_DEMAND || { trays: {}, cartons: {}, envelopeOrders: {} };
+  const dem = AU_PKG_DEMAND || { trays: {}, cartons: {}, mailers: {} };
 
   const srt = (pkg.srt || []).map(r =>
     auPkgRow(r, auPkgTrailingAvg(dem.trays?.[r.sku]), auPkgLead('srt')));
@@ -8297,27 +8348,50 @@ function getAuPackagingRows() {
   const cartons = (pkg.cartons || []).filter(r => !r.blank).map(r =>
     auPkgRow(r, auPkgTrailingAvg(dem.cartons?.[r.sku]), auPkgLead('cartons')));
 
-  // P-ENV-A1 is the D2C mailer, so it carries the whole envelope-order rate.
-  // P-BOX-12x85 is a different pack with no derivable driver — watch list.
-  const envDemand = auPkgTrailingAvg(dem.envelopeOrders);
-  const envelopes = (pkg.envelopes || [])
-    .filter(r => r.sku === 'P-ENV-A1')
-    .map(r => auPkgRow(r, envDemand, auPkgLead('envelopes')));
+  // The three mailer SKUs are NOT interchangeable — which one an order uses
+  // depends on its composition, so each carries its own rate rather than a
+  // pooled envelope figure. Bucketing happens server-side; here we just look
+  // up this SKU's share. Any mailer SKU with no bucket falls back to zero
+  // demand rather than inheriting someone else's.
+  const envelopes = (pkg.envelopes || []).map(r =>
+    auPkgRow(r, auPkgTrailingAvg(dem.mailers?.[r.sku]), auPkgLead('envelopes')));
 
-  const blankFloorEl = document.getElementById('au-pkg-blank-floor');
-  const blankFloor = parseFloat(blankFloorEl?.value) || 750;
+  const blankFloor = auPkgFloor('au-pkg-blank-floor', 750);
+  const outerFloor = auPkgFloor('au-pkg-outer-floor', AU_PKG_WATCH_FLOOR);
   const watch = [
-    ...(pkg.cartons || []).filter(r => r.blank).map(r => ({ ...r, floor: AU_PKG_WATCH_FLOOR })),
-    ...(pkg.envelopes || []).filter(r => r.sku !== 'P-ENV-A1').map(r => ({ ...r, floor: AU_PKG_WATCH_FLOOR })),
+    ...(pkg.cartons || []).filter(r => r.blank).map(r => ({ ...r, floor: outerFloor })),
     ...(pkg.blankTins || []).map(r => ({ ...r, floor: blankFloor })),
-  ].map(r => ({ ...r, low: (r.soh || 0) + (r.incoming || 0) < r.floor }));
+    // At the floor counts as low, not OK — the floor IS the reorder point, so
+    // landing exactly on it should prompt an order (Mel expected the blank
+    // 3-carton outers at 300/300 to appear in the action table, 2026-07-20).
+  ].map(r => ({ ...r, low: (r.soh || 0) + (r.incoming || 0) <= r.floor }));
 
-  return { srt, cartons, envelopes, watch, envDemand };
+  // ── Action list: everything needing an order inside 30 days ──
+  // Forecast lines by order-by date (overdue included); watch lines by floor.
+  // Discontinued lines never appear — there's nothing to reorder.
+  const due = (r) => !r.discontinued && r.cover !== null
+                  && r.orderByMonths <= AU_PKG_ACTION_HORIZON;
+  const action = [
+    ...srt.filter(due).map(r       => ({ ...r, type: 'SRT tray' })),
+    ...cartons.filter(due).map(r   => ({ ...r, type: 'Outer carton' })),
+    ...envelopes.filter(due).map(r => ({ ...r, type: 'Mailer' })),
+    ...watch.filter(r => r.low).map(r => ({ ...r, type: 'Watch list' })),
+  ].sort((a, b) => {
+    // Most urgent first. Watch-list rows have no order-by date, so they sort
+    // by how far under floor they are, after the dated rows.
+    const av = a.orderByMonths, bv = b.orderByMonths;
+    if (av == null && bv == null) return (a.soh - a.floor) - (b.soh - b.floor);
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return av - bv;
+  });
+
+  return { srt, cartons, envelopes, watch, action };
 }
 
 function renderAuPackagingTab() {
   if (!document.getElementById('au-pkg-srt-tbody')) return;
-  const { srt, cartons, envelopes, watch, envDemand } = getAuPackagingRows();
+  const { srt, cartons, envelopes, watch, action } = getAuPackagingRows();
 
   // ── Lead-time nudges. Observed is informational only. ──
   const famDays = (fam) => AU_OBSERVED_LEADS?.[`family:${fam}`] || null;
@@ -8344,10 +8418,7 @@ function renderAuPackagingTab() {
   }
 
   // ── KPI cards ──
-  const forecastable = [...srt, ...cartons, ...envelopes];
-  const critical = forecastable.filter(r => r.cover !== null && r.orderByMonths <= 0).length
-                 + watch.filter(r => r.low).length;
-  document.getElementById('au-pkg-crit').textContent = fmtAuNum(critical);
+  document.getElementById('au-pkg-crit').textContent = fmtAuNum(action.length);
 
   const trayCovers = srt.filter(r => r.cover !== null && !r.discontinued);
   const tightest = trayCovers.length
@@ -8355,14 +8426,16 @@ function renderAuPackagingTab() {
   document.getElementById('au-pkg-tightest').textContent = tightest ? `${tightest.cover.toFixed(1)} mo` : '—';
   document.getElementById('au-pkg-tightest-sub').textContent = tightest ? tightest.sku : 'months of tray stock';
 
-  const env = envelopes[0];
-  document.getElementById('au-pkg-env-cover').textContent = env && env.cover !== null ? `${env.cover.toFixed(1)} mo` : '—';
-  document.getElementById('au-pkg-env-sub').textContent = envDemand > 0
-    ? `${fmtAuNum(Math.round(envDemand))} D2C orders/mo` : 'D2C orders/mo';
-
-  const dead = [...srt, ...cartons].filter(r => r.discontinued)
-    .reduce((s, r) => s + (r.soh || 0), 0);
-  document.getElementById('au-pkg-dead').textContent = fmtAuNum(dead);
+  // Envelope card reports the TIGHTEST mailer, not a pooled figure — the three
+  // SKUs serve different order shapes, so an average would hide a shortage.
+  const mailerCovers = envelopes.filter(r => r.cover !== null);
+  const tightMailer = mailerCovers.length
+    ? mailerCovers.reduce((a, b) => (a.cover <= b.cover ? a : b)) : null;
+  document.getElementById('au-pkg-env-cover').textContent =
+    tightMailer ? `${tightMailer.cover.toFixed(1)} mo` : '—';
+  document.getElementById('au-pkg-env-sub').textContent = tightMailer
+    ? `${tightMailer.sku} · ${fmtAuNum(Math.round(tightMailer.demand))}/mo`
+    : 'D2C orders/mo';
 
   // ── Tables ──
   const forecastRow = (r) => `<tr${r.discontinued ? ' style="opacity:0.55;"' : ''}>
@@ -8378,6 +8451,22 @@ function renderAuPackagingTab() {
 
   const empty = (n, msg) => `<tr><td colspan="${n}" style="text-align:center;padding:24px;color:var(--text-secondary);">${msg}</td></tr>`;
   const noData = AU_PACKAGING ? 'No rows.' : 'Waiting for CIN7 inventory…';
+
+  // ── Action table ──
+  document.getElementById('au-pkg-action-tbody').innerHTML = action.length
+    ? action.map(r => `<tr>
+        <td class="sticky-col"><div class="sku-name">${escapeHtml(r.sku)}</div>${r.name ? `<div style="font-size:10px;color:var(--text-light);">${escapeHtml(r.name)}</div>` : ''}</td>
+        <td style="font-size:12px;color:var(--text-secondary);">${escapeHtml(r.type)}</td>
+        <td class="num right">${fmtAuNum(r.soh)}</td>
+        <td class="num right">${r.incoming > 0 ? fmtAuNum(r.incoming) : '<span style="color:var(--text-light);">—</span>'}</td>
+        <td class="num right">${r.demand > 0 ? fmtAuNum(Math.round(r.demand)) : '<span style="color:var(--text-light);">—</span>'}</td>
+        <td class="num right">${r.cover != null ? auPkgCoverCell(r) : `<span style="color:var(--text-light);" title="No forecast — flagged on stock level against its floor of ${fmtAuNum(r.floor)}.">below floor</span>`}</td>
+        <td class="num right" style="font-size:12px;">${r.cover != null ? auPkgOrderByCell(r) : '<span style="color:var(--text-light);">—</span>'}</td>
+        <td>${r.cover != null ? auPkgStatusBadge(r) : '<span class="badge warn">Low — reorder</span>'}</td>
+      </tr>`).join('')
+    : empty(8, AU_PKG_DEMAND
+        ? 'Nothing needs ordering in the next 30 days.'
+        : 'Waiting for demand data…');
 
   document.getElementById('au-pkg-srt-tbody').innerHTML =
     srt.length ? srt.map(forecastRow).join('') : empty(8, noData);
@@ -8408,40 +8497,60 @@ function renderAuPackagingTab() {
   // ── Unmapped pack formats — surfaced rather than silently dropped. ──
   const un = AU_PKG_DEMAND?.unmapped || {};
   const unKeys = Object.keys(un);
+  const gapAvg = auPkgTrailingAvg(AU_PKG_DEMAND?.mailerGap);
+  const notes = [];
+  if (gapAvg > 0) {
+    notes.push(`<strong>${fmtAuNum(Math.round(gapAvg))} D2C orders/mo aren't assigned a mailer.</strong>`
+      + ` These are orders of 7–12 × 35g tins with no 85g, which fall between the stated rules —`
+      + ` ENVELOPES covers 6 or fewer 35g, and P-BOX-12x85 starts above 12. They're counted here`
+      + ` rather than guessed into a SKU, so whichever mailer they actually use is currently`
+      + ` under-forecast by this amount.`);
+  }
+  if (unKeys.length) {
+    const total = unKeys.reduce((s, k) => s + auPkgTrailingAvg(un[k]), 0);
+    notes.push(`<strong>Not counted above:</strong> ${escapeHtml(unKeys.join(', '))}`
+      + ` — about ${fmtAuNum(Math.round(total))} units/mo. Mixed mega-trays hold 6 trays of assorted`
+      + ` scents, so their tray demand can't be attributed to any single tray SKU. The 6SRT outers`
+      + ` they ship in are on the watch list above.`);
+  }
   const unBox = document.getElementById('au-pkg-unmapped');
   if (unBox) {
-    if (unKeys.length) {
-      const total = unKeys.reduce((s, k) => s + auPkgTrailingAvg(un[k]), 0);
-      unBox.style.display = '';
-      unBox.innerHTML = `<strong>Not counted above:</strong> ${escapeHtml(unKeys.join(', '))}`
-        + ` — about ${fmtAuNum(Math.round(total))} units/mo. Mixed mega-trays hold 6 trays of assorted`
-        + ` scents, so their tray demand can't be attributed to any single tray SKU. The 6SRT outers`
-        + ` they ship in are on the watch list above.`;
-    } else {
-      unBox.style.display = 'none';
-    }
+    unBox.style.display = notes.length ? '' : 'none';
+    unBox.innerHTML = notes.join('<hr style="border:none;border-top:1px solid #B8D0F0;margin:10px 0;">');
   }
 }
 
 function downloadAuPackagingCSV(which) {
-  const { srt, cartons, envelopes, watch } = getAuPackagingRows();
-  const fc = (rows, label) => [
+  const { srt, cartons, envelopes, watch, action } = getAuPackagingRows();
+  const statusOf = (r) => r.discontinued ? 'Discontinued'
+    : r.cover == null ? (r.low ? 'Low — reorder' : 'No demand')
+    : r.orderByMonths <= 0 ? 'Order now' : r.orderByMonths <= 1 ? 'Order soon' : 'OK';
+  const fc = (rows) => [
     ['SKU', 'Scent/Item', 'Stock', 'Incoming', 'Demand/mo', 'Cover (mo)', 'Order by', 'Status'],
     ...rows.map(r => [
       r.sku,
       which === 'envelopes' ? (r.name || '') : auPkgScent(r),
       r.soh, r.incoming,
       r.demand > 0 ? Math.round(r.demand) : '',
-      r.cover === null ? '' : r.cover.toFixed(1),
-      r.cover === null ? '' : auPkgDateFromMonths(r.orderByMonths),
-      r.discontinued ? 'Discontinued' : r.cover === null ? 'No demand'
-        : r.orderByMonths <= 0 ? 'Order now' : r.orderByMonths <= 1 ? 'Order soon' : 'OK',
+      r.cover == null ? '' : r.cover.toFixed(1),
+      r.cover == null ? '' : auPkgDateFromMonths(r.orderByMonths),
+      statusOf(r),
     ]),
   ];
   const sets = {
     srt:       () => fc(srt),
     cartons:   () => fc(cartons),
     envelopes: () => fc(envelopes),
+    action:    () => [
+      ['SKU', 'Item', 'Type', 'Stock', 'Incoming', 'Demand/mo', 'Cover (mo)', 'Order by', 'Status'],
+      ...action.map(r => [
+        r.sku, r.name || '', r.type, r.soh, r.incoming,
+        r.demand > 0 ? Math.round(r.demand) : '',
+        r.cover == null ? '' : r.cover.toFixed(1),
+        r.cover == null ? '' : auPkgDateFromMonths(r.orderByMonths),
+        statusOf(r),
+      ]),
+    ],
     watch:     () => [
       ['SKU', 'Item', 'Stock', 'Incoming', 'Floor', 'Status'],
       ...watch.map(r => [r.sku, r.name || '', r.soh, r.incoming, r.floor, r.low ? 'Low — reorder' : 'OK']),
