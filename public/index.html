@@ -2177,11 +2177,161 @@
 
   <!-- ═══════ TAB: PACKAGING ═══════ -->
   <div class="tab-panel" id="tab-au-packaging">
-    <div class="placeholder-tab">
-      <h3>Packaging — to design</h3>
-      <p>For AU the packaging model is the same shape as CA: tins, labels, cartons tracked separately from finished goods.
-         If CIN7 holds packaging SKUs alongside finished goods we can reuse the AU Inventory pattern; if not, we'll need a separate spreadsheet upload like Logiwa on the CA side.</p>
+    <style>
+      #tab-au-packaging table { font-size: 14px; }
+      #tab-au-packaging .sticky-col { min-width: 150px; width: 190px; }
+      #tab-au-packaging .pkg-lead { width: 56px; padding: 4px 6px; border: 1px solid var(--border);
+                                    border-radius: 6px; font-size: 13px; text-align: center; }
+      #tab-au-packaging .pkg-obs  { font-size: 11px; color: var(--text-light); }
+      #tab-au-packaging .pkg-obs.diverged { color: var(--amber-text); font-weight: 600; }
+      #tab-au-packaging .pkg-ctl  { display: flex; align-items: center; gap: 6px; }
+    </style>
+
+    <!-- Lead times. Entered value DRIVES every calc; observed is a nudge only
+         (Mel, 2026-07-20). Defaults from Packaging_Lead_Times.docx, except SRT
+         which starts at the 27-day median CIN7's own PO history shows. -->
+    <div style="display:flex;align-items:center;gap:18px;margin-bottom:12px;flex-wrap:wrap;">
+      <span style="font-size:14px;font-weight:600;">Lead times:</span>
+      <span class="pkg-ctl" title="TC Printing — shelf-ready trays.">SRT trays
+        <input id="au-pkg-lead-srt" class="pkg-lead" type="number" value="1" min="0.25" max="12" step="0.25"
+               onchange="renderAuPackagingTab()"> mo
+        <span class="pkg-obs" id="au-pkg-obs-srt"></span></span>
+      <span class="pkg-ctl" title="SPS Packaging — printed outer cartons.">Cartons
+        <input id="au-pkg-lead-cartons" class="pkg-lead" type="number" value="1" min="0.25" max="12" step="0.25"
+               onchange="renderAuPackagingTab()"> mo
+        <span class="pkg-obs" id="au-pkg-obs-cartons"></span></span>
+      <span class="pkg-ctl" title="Huizhou ZTJ — mailers and boxes.">Envelopes
+        <input id="au-pkg-lead-envelopes" class="pkg-lead" type="number" value="3" min="0.25" max="12" step="0.25"
+               onchange="renderAuPackagingTab()"> mo
+        <span class="pkg-obs" id="au-pkg-obs-envelopes"></span></span>
+      <span class="pkg-ctl" title="Guanqiao Tinbox — blank engraving tins.">Blank tins
+        <input id="au-pkg-lead-tins" class="pkg-lead" type="number" value="4" min="0.25" max="12" step="0.25"
+               onchange="renderAuPackagingTab()"> mo
+        <span class="pkg-obs" id="au-pkg-obs-tins"></span></span>
+      <span class="pkg-ctl" title="Blank engraving tins have no forecastable demand — flag when stock drops below this.">Blank-tin reorder point
+        <input id="au-pkg-blank-floor" class="pkg-lead" style="width:70px;" type="number" value="750" min="0" step="50"
+               onchange="renderAuPackagingTab()"></span>
     </div>
+
+    <div class="cards-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:12px;">
+      <div class="card">
+        <div class="card-label">Lines to order now</div>
+        <div class="card-value" id="au-pkg-crit" style="color:var(--red-text);">0</div>
+        <div class="card-sub">cover below lead time</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Tightest tray cover</div>
+        <div class="card-value" id="au-pkg-tightest">—</div>
+        <div class="card-sub" id="au-pkg-tightest-sub">months of tray stock</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Envelope cover</div>
+        <div class="card-value" id="au-pkg-env-cover">—</div>
+        <div class="card-sub" id="au-pkg-env-sub">D2C orders/mo</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Dead packaging stock</div>
+        <div class="card-value" id="au-pkg-dead">0</div>
+        <div class="card-sub">units on discontinued lines</div>
+      </div>
+    </div>
+
+    <!-- SRT trays -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="table-card-title">SRT trays</div>
+          <button class="btn-csv" onclick="downloadAuPackagingCSV('srt')">Export CSV</button>
+          <span id="au-pkg-source-chip" class="source-chip" style="display:none;" title="Source of the rows in these tables"></span>
+        </div>
+        <div class="table-hint">Demand = trays shipped to Coles / Woolworths / distributors <em>plus</em> trays sold direct on Woo, <em>plus</em> 4 trays for every retailer carton. Counted as actual tray units off the order lines, not tins&nbsp;&divide;&nbsp;12.</div>
+      </div>
+      <div class="table-scroll-sticky"><table>
+        <thead><tr>
+          <th class="sticky-col">Tray SKU</th>
+          <th>Scent</th>
+          <th class="num right" title="On hand across every branch (our warehouse + Health Focus).">Stock</th>
+          <th class="num right" title="Open purchase orders in CIN7.">Incoming</th>
+          <th class="num right" title="Trays per month — 3-month trailing average across all channels.">Demand/mo</th>
+          <th class="num right" title="(Stock + Incoming) &divide; monthly demand.">Cover</th>
+          <th class="num right" title="Latest date to place the PO = today + (cover &minus; lead time).">Order by</th>
+          <th>Status</th>
+        </tr></thead>
+        <tbody id="au-pkg-srt-tbody"></tbody>
+      </table></div>
+    </div>
+
+    <!-- Printed outer cartons -->
+    <div class="table-card" style="margin-top:16px;">
+      <div class="table-card-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="table-card-title">Printed outer cartons</div>
+          <button class="btn-csv" onclick="downloadAuPackagingCSV('cartons')">Export CSV</button>
+        </div>
+        <div class="table-hint">One outer per 48-tin retailer carton sold. Wholesale cartons (WC-AU, &times;54) are excluded &mdash; they ship direct from the manufacturer with no tray or outer.</div>
+      </div>
+      <div class="table-scroll-sticky"><table>
+        <thead><tr>
+          <th class="sticky-col">Carton SKU</th>
+          <th>Scent</th>
+          <th class="num right">Stock</th>
+          <th class="num right">Incoming</th>
+          <th class="num right">Demand/mo</th>
+          <th class="num right">Cover</th>
+          <th class="num right">Order by</th>
+          <th>Status</th>
+        </tr></thead>
+        <tbody id="au-pkg-cartons-tbody"></tbody>
+      </table></div>
+    </div>
+
+    <!-- Envelopes -->
+    <div class="table-card" style="margin-top:16px;">
+      <div class="table-card-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="table-card-title">Envelopes &amp; mailers</div>
+          <button class="btn-csv" onclick="downloadAuPackagingCSV('envelopes')">Export CSV</button>
+        </div>
+        <div class="table-hint">One envelope per D2C Woo order &mdash; <strong>excluding</strong> orders containing a tray or wholesale carton, which ship in their own packaging.</div>
+      </div>
+      <div class="table-scroll-sticky"><table>
+        <thead><tr>
+          <th class="sticky-col">SKU</th>
+          <th>Item</th>
+          <th class="num right">Stock</th>
+          <th class="num right">Incoming</th>
+          <th class="num right">Demand/mo</th>
+          <th class="num right">Cover</th>
+          <th class="num right">Order by</th>
+          <th>Status</th>
+        </tr></thead>
+        <tbody id="au-pkg-envelopes-tbody"></tbody>
+      </table></div>
+    </div>
+
+    <!-- Flag-when-low: generic outers + blank engraving tins -->
+    <div class="table-card" style="margin-top:16px;">
+      <div class="table-card-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div class="table-card-title">Watch list &mdash; no forecast</div>
+          <button class="btn-csv" onclick="downloadAuPackagingCSV('watch')">Export CSV</button>
+        </div>
+        <div class="table-hint">Generic outers and blank engraving tins have no forecastable demand, so these are flagged on stock level alone rather than runway. Blank tins are engraving stock &mdash; AU doesn't sticker blanks onto branded runs.</div>
+      </div>
+      <div class="table-scroll-sticky"><table>
+        <thead><tr>
+          <th class="sticky-col">SKU</th>
+          <th>Item</th>
+          <th class="num right">Stock</th>
+          <th class="num right">Incoming</th>
+          <th class="num right" title="Flag when stock falls below this.">Floor</th>
+          <th>Status</th>
+        </tr></thead>
+        <tbody id="au-pkg-watch-tbody"></tbody>
+      </table></div>
+    </div>
+
+    <div id="au-pkg-unmapped" style="display:none;margin-top:14px;padding:12px 14px;border-radius:10px;background:#EAF1FD;border:1px solid #B8D0F0;color:#1D4ED8;font-size:13px;line-height:1.5;"></div>
   </div>
 
   <!-- ═══════ TAB: LOGISTICS (warehouse TV) ═══════ -->
@@ -2571,9 +2721,21 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.81</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.82</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.82 &mdash; 20 July 2026 (📦 Packaging tab &mdash; built)</h4>
+    <ul>
+      <li><strong>The Packaging tab is live</strong> &mdash; SRT trays, printed outer cartons, envelopes, and a watch list for generic outers and blank engraving tins. It replaces the &ldquo;to design&rdquo; placeholder, which had assumed we might need a separate spreadsheet upload like Logiwa on the CA side. We don&rsquo;t: <strong>CIN7 already carries every packaging SKU with real stock and incoming figures.</strong> The rows were being fetched on every sync and then discarded &mdash; <code>buildStockBySku()</code> applies no category filter, but <code>buildInventory()</code> narrows the payload to Finished Products / Bicarb Based before the front end sees it. New <code>buildAuPackagingBySku()</code> reads the unfiltered map, so the whole tab costs zero extra API calls.</li>
+      <li><strong>Not a port of the NA tab.</strong> Two of NA&rsquo;s defining assumptions don&rsquo;t hold here. NA pools blank 85g tins and stickers them at Petra run time &mdash; all of <code>buildPackagingRows</code>&rsquo; PASS 2 / PASS 4 allocation machinery exists to model that. AU doesn&rsquo;t sticker at all: blanks are engraving stock, so they&rsquo;re a standalone watch-list line with a reorder floor and none of that logic ports. NA also derives paper demand from a single driver (&ldquo;1 per Woo order&rdquo;); AU needs two, below.</li>
+      <li><strong>Channel-split demand.</strong> Envelopes count D2C Woo orders <em>excluding</em> any order containing a tray or wholesale carton &mdash; those ship in their own packaging, so NA&rsquo;s flat per-order rule would over-order AU envelopes. Trays come from supermarket + distributor volume <em>plus</em> direct Woo tray sales, <em>plus</em> 4 trays per retailer carton. All counted as real pack-format units off the order lines (<code>order_items.sku</code> for Woo, <code>cin7_sales_order_items.code</code> for CIN7), not tins&nbsp;&divide;&nbsp;12 &mdash; <code>skuSales</code> can&rsquo;t serve this because it rolls every line up to base SKU with the multiplier already applied.</li>
+      <li><strong>Lead times: entered drives, observed nudges.</strong> Each family has an editable lead-time field seeded from the lead-time doc. Beside it sits the median <code>createdDate</code>&nbsp;&rarr;&nbsp;<code>fullyReceivedDate</code> from CIN7&rsquo;s own PO history, which turns amber when the two diverge by more than about a week. It never feeds a calculation &mdash; a supplier changing pace shows up as a prompt, not as silently moved order dates. First finding: TC Printing&rsquo;s observed median is <strong>27 days</strong> across 5 received POs (range 24&ndash;40, the 40 being a Christmas run), against the 5 weeks in the doc. Median, not mean, precisely so one Christmas run can&rsquo;t drag it.</li>
+      <li><strong>Dead-stock detection.</strong> A derived link only counts if that finished SKU still exists in CIN7. Retired lines keep their packaging on the shelf long after delisting &mdash; Spicy Chai is the live case: <code>P-OC-AU-CTN-SC-BCF-48</code> and <code>-SC-NPO-48</code> point at carton SKUs that are gone. Those rows render greyed as Discontinued rather than as demand-less rows that read like a supply problem.</li>
+      <li><strong>Deliberate exclusions.</strong> Wholesale cartons (<code>WC-AU-</code>, &times;54) ship direct from the manufacturer with no tray or outer, so they consume nothing on this tab &mdash; though they still suppress an envelope on the Woo side. Lids (<code>T-L-AU-</code>) are discontinued. PCIs are a marketing expense and aren&rsquo;t stock-tracked in CIN7, so there&rsquo;s no SOH to report. Mixed mega-trays hold 6 trays of assorted scents, so their tray demand can&rsquo;t be attributed to any single SKU &mdash; surfaced in a note under the tables rather than silently dropped.</li>
+      <li><strong>Cache keys bumped</strong> &mdash; <code>au:inventory:v2</code> and <code>au:pos:v9</code>, so a warm entry can&rsquo;t serve a payload missing <code>packaging</code> or <code>observedLeadTimes</code> for up to 15 minutes after deploy.</li>
+      <li><strong>Known gap:</strong> <code>classifyPoLineCode()</code>&rsquo;s <code>T-</code> catch-all still counts lid SKUs as raw tins on the PO tab. Harmless while that stock runs out, but it does inflate raw-tin figures today.</li>
+    </ul>
+
     <h4>v2.2.81 &mdash; 18 July 2026 (🚚 Logistics &mdash; Amazon orders no longer show as distributors)</h4>
     <ul>
       <li><strong>The Logistics &ldquo;Other distributors&rdquo; panel was listing individual Amazon retail orders</strong> (e.g. &ldquo;Amazon Seller No Pong Natural Products&rdquo;, order refs like <code>249-8715696-3264625</code>, 1 unit each). Root cause: the distributor classifier reuses <code>attributeCin7Order()</code>, which since v2.2.47/v2.2.52 returns <code>'amz'</code> for Amazon orders (added to power the Monthly SKU Sales tab). The Logistics classifier only special-cased Coles and Woolies, then treated <em>everything else</em> as a distributor &mdash; so <code>'amz'</code> orders fell straight through into the &ldquo;Other distributors&rdquo; column. The classifier docstring always said Amazon mirrors should be excluded; the code just no longer matched it. <strong>Fix:</strong> drop <code>'amz'</code> orders explicitly, and only bucket genuine <code>'dist'</code> orders (fail-closed on any future channel). Amazon fulfilment still flows through the ShipStation open-queue KPIs above, where it belongs.</li>
@@ -7424,6 +7586,12 @@ function switchAuTab(t) {
   if (t !== 'au-logistics' && typeof logisticsOnTabDeactivate === 'function') logisticsOnTabDeactivate();
   // Forecasting tab (v2.2.55) — render + make sure trailing months are loaded.
   if (t === 'au-forecast' && typeof renderAuForecastTab === 'function') { auEnsureForecastMonths(); renderAuForecastTab(); }
+  // Packaging tab (v2.2.82) — stock rides along with /api/au/inventory, but
+  // demand is its own D1-backed endpoint, fetched lazily on first activation.
+  if (t === 'au-packaging' && typeof renderAuPackagingTab === 'function') {
+    if (!AU_PKG_DEMAND && typeof loadAuPackagingDemand === 'function') loadAuPackagingDemand();
+    renderAuPackagingTab();
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -8004,6 +8172,286 @@ function downloadAuForecastCSV() {
 
 
 /* ════════════════════════════════════════════════════════════════════════
+   AU Packaging tab (v2.2.82)
+   ────────────────────────────────────────────────────────────────────────
+   Structurally NOT a port of the NA Packaging tab, because two of NA's
+   defining assumptions don't hold here:
+
+   1. NA pools blank 85g tins and stickers them at Petra run time, which is
+      what all of buildPackagingRows' PASS 2 / PASS 4 allocation machinery
+      exists to model. AU doesn't sticker at all — blanks are engraving
+      stock (Mel, 2026-07-20) — so none of that ports. Blank tins are a
+      standalone watch-list line with a reorder floor.
+
+   2. NA derives paper demand from one driver, "1 per Woo order". AU has
+      two, because the channel mix differs: D2C Woo orders consume an
+      envelope UNLESS they contain a tray or wholesale carton, while trays
+      and outers are driven by supermarket/distributor volume plus direct
+      tray sales. That split is computed server-side in
+      buildAuPackagingDemand() off raw pack-format order lines.
+
+   Lead times: the entered value drives every calculation. Observed medians
+   from CIN7's own PO history sit alongside as a nudge when they diverge —
+   deliberately never feeding the maths (Mel's call, so a supplier changing
+   pace shows up as a prompt rather than silently moving her order dates).
+   ════════════════════════════════════════════════════════════════════════ */
+
+const AU_PKG_DEMAND_WINDOW = 3;    // trailing complete months for the average
+const AU_PKG_WATCH_FLOOR   = 300;  // default floor for generic outers
+
+async function loadAuPackagingDemand() {
+  _auSetChip('au-pkg-source-chip', 'Loading…', 'gray', 'Fetching packaging demand from /api/au/packaging-demand');
+  try {
+    const resp = await fetch('/api/au/packaging-demand?months=6', { credentials: 'include' });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      throw new Error(`HTTP ${resp.status}: ${body.slice(0, 200) || resp.statusText}`);
+    }
+    AU_PKG_DEMAND = await resp.json();
+    _auChipFromResp('au-pkg-source-chip', AU_PKG_DEMAND, 'CIN7 + Woo live');
+    renderAuPackagingTab();
+  } catch (e) {
+    console.warn('AU packaging demand fetch failed:', e?.message || e);
+    _auSetChip('au-pkg-source-chip', 'Demand unavailable', 'gray',
+      `Live fetch failed (${e?.message || e}). Stock still shown; demand, cover and order-by will be blank.`);
+    renderAuPackagingTab();
+  }
+}
+
+// Trailing N-month average over a { 'YYYY-MM': units } map. The CURRENT month
+// is excluded — it's partial, and including it drags every average down.
+function auPkgTrailingAvg(byMonth) {
+  if (!byMonth) return 0;
+  const now = new Date();
+  const cur = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const keys = Object.keys(byMonth).filter(k => k < cur).sort().slice(-AU_PKG_DEMAND_WINDOW);
+  if (!keys.length) return 0;
+  return keys.reduce((s, k) => s + (byMonth[k] || 0), 0) / keys.length;
+}
+
+function auPkgLead(family) {
+  const el = document.getElementById(`au-pkg-lead-${family}`);
+  const v = parseFloat(el?.value);
+  return Number.isFinite(v) && v > 0 ? v : 1;
+}
+
+// Scent label from a packaging SKU, for the second column.
+function auPkgScent(row) {
+  const src = row.linkedSku || row.sku;
+  const m = String(src).match(/^(?:P-)?(?:OC-)?AU-(?:CTN-|SRT-)?(.+?)(?:-(?:35|85|48))?$/);
+  return m ? m[1] : '';
+}
+
+// One row's derived numbers. Cover counts incoming at face value — an open PO
+// is supply that will land — matching how the AU Forecasting tab treats it.
+function auPkgRow(row, demandPerMonth, leadMonths) {
+  const supply = (row.soh || 0) + (row.incoming || 0);
+  const demand = demandPerMonth > 0 ? demandPerMonth : 0;
+  const cover  = demand > 0 ? supply / demand : null;
+  const orderByMonths = cover === null ? null : cover - leadMonths;
+  return { ...row, demand, supply, cover, orderByMonths, leadMonths };
+}
+
+function auPkgStatusBadge(r) {
+  if (r.discontinued)        return '<span class="badge">Discontinued</span>';
+  if (r.manualDemand)        return '<span class="badge">Manual demand</span>';
+  if (r.cover === null)      return '<span class="badge">No demand</span>';
+  if (r.orderByMonths <= 0)  return '<span class="badge err">Order now</span>';
+  if (r.orderByMonths <= 1)  return '<span class="badge warn">Order soon</span>';
+  return '<span class="badge ok">OK</span>';
+}
+
+function auPkgDateFromMonths(months) {
+  if (months === null || months === undefined) return '—';
+  const d = new Date();
+  d.setDate(d.getDate() + Math.round(months * 30.44));
+  return d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function auPkgCoverCell(r) {
+  if (r.cover === null) return '<span style="color:var(--text-light);">—</span>';
+  const col = r.orderByMonths <= 0 ? 'color:var(--red-text);font-weight:700;'
+            : r.orderByMonths <= 1 ? 'color:var(--amber-text);font-weight:600;'
+            : 'color:var(--green-text);';
+  return `<span style="${col}">${r.cover.toFixed(1)} mo</span>`;
+}
+
+function auPkgOrderByCell(r) {
+  if (r.cover === null) return '<span style="color:var(--text-light);">—</span>';
+  const overdue = r.orderByMonths <= 0;
+  const col = overdue ? 'color:var(--red-text);font-weight:700;' : '';
+  return `<span style="${col}" title="Cover ${r.cover.toFixed(1)} mo minus ${r.leadMonths} mo lead.">`
+       + `${auPkgDateFromMonths(r.orderByMonths)}${overdue ? ' (overdue)' : ''}</span>`;
+}
+
+// Build every table's rows in one pass so the KPI cards and the CSV export
+// read from exactly what's on screen.
+function getAuPackagingRows() {
+  const pkg = AU_PACKAGING || { srt: [], cartons: [], envelopes: [], blankTins: [] };
+  const dem = AU_PKG_DEMAND || { trays: {}, cartons: {}, envelopeOrders: {} };
+
+  const srt = (pkg.srt || []).map(r =>
+    auPkgRow(r, auPkgTrailingAvg(dem.trays?.[r.sku]), auPkgLead('srt')));
+
+  // Printed outers forecast off carton sales; generic outers never do.
+  const cartons = (pkg.cartons || []).filter(r => !r.blank).map(r =>
+    auPkgRow(r, auPkgTrailingAvg(dem.cartons?.[r.sku]), auPkgLead('cartons')));
+
+  // P-ENV-A1 is the D2C mailer, so it carries the whole envelope-order rate.
+  // P-BOX-12x85 is a different pack with no derivable driver — watch list.
+  const envDemand = auPkgTrailingAvg(dem.envelopeOrders);
+  const envelopes = (pkg.envelopes || [])
+    .filter(r => r.sku === 'P-ENV-A1')
+    .map(r => auPkgRow(r, envDemand, auPkgLead('envelopes')));
+
+  const blankFloorEl = document.getElementById('au-pkg-blank-floor');
+  const blankFloor = parseFloat(blankFloorEl?.value) || 750;
+  const watch = [
+    ...(pkg.cartons || []).filter(r => r.blank).map(r => ({ ...r, floor: AU_PKG_WATCH_FLOOR })),
+    ...(pkg.envelopes || []).filter(r => r.sku !== 'P-ENV-A1').map(r => ({ ...r, floor: AU_PKG_WATCH_FLOOR })),
+    ...(pkg.blankTins || []).map(r => ({ ...r, floor: blankFloor })),
+  ].map(r => ({ ...r, low: (r.soh || 0) + (r.incoming || 0) < r.floor }));
+
+  return { srt, cartons, envelopes, watch, envDemand };
+}
+
+function renderAuPackagingTab() {
+  if (!document.getElementById('au-pkg-srt-tbody')) return;
+  const { srt, cartons, envelopes, watch, envDemand } = getAuPackagingRows();
+
+  // ── Lead-time nudges. Observed is informational only. ──
+  const famDays = (fam) => AU_OBSERVED_LEADS?.[`family:${fam}`] || null;
+  for (const fam of ['srt', 'cartons', 'envelopes', 'tins']) {
+    const el = document.getElementById(`au-pkg-obs-${fam}`);
+    if (!el) continue;
+    const obs = famDays(fam);
+    if (!obs || obs.medianDays == null) {
+      el.textContent = '';
+      el.title = 'No received POs with a recorded receipt date for this supplier yet.';
+      continue;
+    }
+    const obsMonths = obs.medianDays / 30.44;
+    const entered = auPkgLead(fam);
+    const diverged = Math.abs(obsMonths - entered) >= 0.25;   // ~a week apart
+    el.className = 'pkg-obs' + (diverged ? ' diverged' : '');
+    el.textContent = `observed ${obs.medianDays}d`;
+    el.title = `${obs.supplier}: median ${obs.medianDays} days across ${obs.samples} received PO`
+             + `${obs.samples === 1 ? '' : 's'} (range ${obs.minDays}–${obs.maxDays}). `
+             + (diverged
+                 ? `That's ~${obsMonths.toFixed(1)} mo against the ${entered} mo entered — worth a look.`
+                 : 'Close to the entered value.')
+             + ' Observed never changes the maths; the entered value drives everything.';
+  }
+
+  // ── KPI cards ──
+  const forecastable = [...srt, ...cartons, ...envelopes];
+  const critical = forecastable.filter(r => r.cover !== null && r.orderByMonths <= 0).length
+                 + watch.filter(r => r.low).length;
+  document.getElementById('au-pkg-crit').textContent = fmtAuNum(critical);
+
+  const trayCovers = srt.filter(r => r.cover !== null && !r.discontinued);
+  const tightest = trayCovers.length
+    ? trayCovers.reduce((a, b) => (a.cover <= b.cover ? a : b)) : null;
+  document.getElementById('au-pkg-tightest').textContent = tightest ? `${tightest.cover.toFixed(1)} mo` : '—';
+  document.getElementById('au-pkg-tightest-sub').textContent = tightest ? tightest.sku : 'months of tray stock';
+
+  const env = envelopes[0];
+  document.getElementById('au-pkg-env-cover').textContent = env && env.cover !== null ? `${env.cover.toFixed(1)} mo` : '—';
+  document.getElementById('au-pkg-env-sub').textContent = envDemand > 0
+    ? `${fmtAuNum(Math.round(envDemand))} D2C orders/mo` : 'D2C orders/mo';
+
+  const dead = [...srt, ...cartons].filter(r => r.discontinued)
+    .reduce((s, r) => s + (r.soh || 0), 0);
+  document.getElementById('au-pkg-dead').textContent = fmtAuNum(dead);
+
+  // ── Tables ──
+  const forecastRow = (r) => `<tr${r.discontinued ? ' style="opacity:0.55;"' : ''}>
+      <td class="sticky-col"><div class="sku-name">${escapeHtml(r.sku)}</div></td>
+      <td>${escapeHtml(auPkgScent(r))}</td>
+      <td class="num right">${fmtAuNum(r.soh)}</td>
+      <td class="num right">${r.incoming > 0 ? fmtAuNum(r.incoming) : '<span style="color:var(--text-light);">—</span>'}</td>
+      <td class="num right">${r.demand > 0 ? fmtAuNum(Math.round(r.demand)) : '<span style="color:var(--text-light);">—</span>'}</td>
+      <td class="num right">${auPkgCoverCell(r)}</td>
+      <td class="num right" style="font-size:12px;">${auPkgOrderByCell(r)}</td>
+      <td>${auPkgStatusBadge(r)}</td>
+    </tr>`;
+
+  const empty = (n, msg) => `<tr><td colspan="${n}" style="text-align:center;padding:24px;color:var(--text-secondary);">${msg}</td></tr>`;
+  const noData = AU_PACKAGING ? 'No rows.' : 'Waiting for CIN7 inventory…';
+
+  document.getElementById('au-pkg-srt-tbody').innerHTML =
+    srt.length ? srt.map(forecastRow).join('') : empty(8, noData);
+  document.getElementById('au-pkg-cartons-tbody').innerHTML =
+    cartons.length ? cartons.map(forecastRow).join('') : empty(8, noData);
+  document.getElementById('au-pkg-envelopes-tbody').innerHTML =
+    envelopes.length ? envelopes.map(r => `<tr>
+      <td class="sticky-col"><div class="sku-name">${escapeHtml(r.sku)}</div></td>
+      <td>${escapeHtml(r.name || '')}</td>
+      <td class="num right">${fmtAuNum(r.soh)}</td>
+      <td class="num right">${r.incoming > 0 ? fmtAuNum(r.incoming) : '<span style="color:var(--text-light);">—</span>'}</td>
+      <td class="num right">${r.demand > 0 ? fmtAuNum(Math.round(r.demand)) : '<span style="color:var(--text-light);">—</span>'}</td>
+      <td class="num right">${auPkgCoverCell(r)}</td>
+      <td class="num right" style="font-size:12px;">${auPkgOrderByCell(r)}</td>
+      <td>${auPkgStatusBadge(r)}</td>
+    </tr>`).join('') : empty(8, noData);
+
+  document.getElementById('au-pkg-watch-tbody').innerHTML =
+    watch.length ? watch.map(r => `<tr>
+      <td class="sticky-col"><div class="sku-name">${escapeHtml(r.sku)}</div></td>
+      <td>${escapeHtml(r.name || '')}</td>
+      <td class="num right">${fmtAuNum(r.soh)}</td>
+      <td class="num right">${r.incoming > 0 ? fmtAuNum(r.incoming) : '<span style="color:var(--text-light);">—</span>'}</td>
+      <td class="num right" style="color:var(--text-secondary);">${fmtAuNum(r.floor)}</td>
+      <td>${r.low ? '<span class="badge warn">Low — reorder</span>' : '<span class="badge ok">OK</span>'}</td>
+    </tr>`).join('') : empty(6, noData);
+
+  // ── Unmapped pack formats — surfaced rather than silently dropped. ──
+  const un = AU_PKG_DEMAND?.unmapped || {};
+  const unKeys = Object.keys(un);
+  const unBox = document.getElementById('au-pkg-unmapped');
+  if (unBox) {
+    if (unKeys.length) {
+      const total = unKeys.reduce((s, k) => s + auPkgTrailingAvg(un[k]), 0);
+      unBox.style.display = '';
+      unBox.innerHTML = `<strong>Not counted above:</strong> ${escapeHtml(unKeys.join(', '))}`
+        + ` — about ${fmtAuNum(Math.round(total))} units/mo. Mixed mega-trays hold 6 trays of assorted`
+        + ` scents, so their tray demand can't be attributed to any single tray SKU. The 6SRT outers`
+        + ` they ship in are on the watch list above.`;
+    } else {
+      unBox.style.display = 'none';
+    }
+  }
+}
+
+function downloadAuPackagingCSV(which) {
+  const { srt, cartons, envelopes, watch } = getAuPackagingRows();
+  const fc = (rows, label) => [
+    ['SKU', 'Scent/Item', 'Stock', 'Incoming', 'Demand/mo', 'Cover (mo)', 'Order by', 'Status'],
+    ...rows.map(r => [
+      r.sku,
+      which === 'envelopes' ? (r.name || '') : auPkgScent(r),
+      r.soh, r.incoming,
+      r.demand > 0 ? Math.round(r.demand) : '',
+      r.cover === null ? '' : r.cover.toFixed(1),
+      r.cover === null ? '' : auPkgDateFromMonths(r.orderByMonths),
+      r.discontinued ? 'Discontinued' : r.cover === null ? 'No demand'
+        : r.orderByMonths <= 0 ? 'Order now' : r.orderByMonths <= 1 ? 'Order soon' : 'OK',
+    ]),
+  ];
+  const sets = {
+    srt:       () => fc(srt),
+    cartons:   () => fc(cartons),
+    envelopes: () => fc(envelopes),
+    watch:     () => [
+      ['SKU', 'Item', 'Stock', 'Incoming', 'Floor', 'Status'],
+      ...watch.map(r => [r.sku, r.name || '', r.soh, r.incoming, r.floor, r.low ? 'Low — reorder' : 'OK']),
+    ],
+  };
+  const lines = (sets[which] || sets.srt)();
+  downloadCSV(`au-packaging-${which}.csv`, lines.map(r => r.map(toCsvField).join(',')).join('\r\n'));
+}
+
+/* ════════════════════════════════════════════════════════════════════════
    Logistics tab (v2.2.28) — warehouse-TV view of open distributor orders.
    Fetches /api/au/logistics, renders ShipStation KPIs + alert cards + two
    distributor sections (Coles+Woolies, Other). 60-second auto-refresh
@@ -8206,6 +8654,10 @@ let AU_MONTHS = [], AU_MONTH_LABELS = {};
 let AU_SALES_BY_MONTH = {}, AU_ORDERS_BY_MONTH = {}, AU_TINS_BY_MONTH = {};
 let AU_SKU_SALES_BY_MONTH = {}, AU_INVENTORY_DATA = [], AU_REFUNDS_BY_MONTH = {};
 let AU_POS = [], AU_INCOMING_BY_SKU = [];
+// Packaging tab (v2.2.82). Stock arrives on the /api/au/inventory payload;
+// demand comes from /api/au/packaging-demand (D1). Observed lead times ride
+// in on /api/au/pos. All three null until their fetch lands.
+let AU_PACKAGING = null, AU_PKG_DEMAND = null, AU_OBSERVED_LEADS = null;
 let AU_SELECTED_MONTH = null;
 let AU_CHART_MODE = 'revenue';
 let auChannelChart = null;
@@ -8379,6 +8831,14 @@ async function loadLiveAuInventory() {
     }
 
     AU_INVENTORY_DATA = data.inventory;
+    // v2.2.82: packaging stock rides on the same payload (SRT trays, outer
+    // cartons, envelopes, blank engraving tins) — buildInventory's category
+    // whitelist drops these rows, so they come through their own key.
+    if (data.packaging) {
+      AU_PACKAGING = data.packaging;
+      if (typeof auTab !== 'undefined' && auTab === 'au-packaging'
+          && typeof renderAuPackagingTab === 'function') renderAuPackagingTab();
+    }
     renderAuInventoryKpis();
     renderAuInventoryTable();
     // v2.2.19: Monthly SKU Sales table looks up canonical names from
@@ -8568,6 +9028,9 @@ async function loadLiveAuPos() {
     AU_POS = data.pos;
     AU_INCOMING_BY_SKU = Array.isArray(data.incomingBySku) ? data.incomingBySku : [];
     AU_LIVE_POS_LOADED = true;
+    // v2.2.82: median createdDate→fullyReceivedDate per supplier, for the
+    // Packaging tab's entered-vs-observed lead-time nudge. Never drives a calc.
+    if (data.observedLeadTimes) AU_OBSERVED_LEADS = data.observedLeadTimes;
 
     populateAuPoFilters();
     renderAuPoKpis();
