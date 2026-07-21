@@ -14,7 +14,7 @@ import { Hono } from 'hono';
 import { wooRoutes, invalidateWooSalesCache } from './woo.js';
 import { adminRoutes, runBackfillChunk, runWooSafetyNetBackfill } from './admin.js';
 import { salesBinderRoutes, runSalesBinderCronSync } from './salesbinder.js';
-import { amazonRoutes, runAmazonOrdersChunk, runAmazonReportsTick, runAmazonInventoryCronSync, invalidateAmazonSalesCache } from './amazon.js';
+import { amazonRoutes, runAmazonOrdersChunk, runAmazonReportsTick, runAmazonInventoryCronSync, runAmazonSafetyNetBackfill, invalidateAmazonSalesCache } from './amazon.js';
 import { diagnosticsRoutes } from './diagnostics.js';
 import { xeroRoutes, xeroAuthRoutes, readXeroStatus } from './xero.js';
 import { logiwaRoutes, readLogiwaStatus } from './logiwa.js';
@@ -233,8 +233,63 @@ async function runAmazonCronSync(env) {
     } catch (e) {
       console.error(`Amazon cron Reports ${market} failed:`, redactSecrets(e?.message || String(e)));
     }
+    // Staleness-gated short safety-net (v2.44). The incremental Orders sync
+    // structurally drops orders that were 'Pending' when the watermark swept
+    // past them (see runAmazonSafetyNetBackfill). A small no-status-filter
+    // re-sweep of the last 2 days, run at most every ~4h, keeps the CURRENT
+    // month accurate between the Sunday deep (45-day) sweeps — without adding
+    // getOrders load to every 15-min tick or risking the 30s scheduled cap.
+    try {
+      await maybeRunAmazonShortSafetyNet(env, market);
+    } catch (e) {
+      console.error(`Amazon short safety-net ${market} failed:`, redactSecrets(e?.message || String(e)));
+    }
   }
   await Promise.allSettled([syncOne('CA'), syncOne('US')]);
+}
+
+// Run a small Amazon Orders safety-net sweep only if the last one for this
+// market was more than SHORT_GATE_MS ago. Cheap on most ticks — just one SELECT
+// — so it can live inside the 15-min cron without adding real cost per tick.
+const AMZ_SHORT_GATE_MS = 4 * 60 * 60 * 1000; // 4 hours
+async function maybeRunAmazonShortSafetyNet(env, market) {
+  const last = await env.DB.prepare(
+    `SELECT MAX(run_at) AS last FROM sync_logs
+     WHERE source = 'amazon' AND action = 'amazon-safetynet' AND market = ?`,
+  ).bind(market).first();
+  const lastMs = last?.last ? Date.parse(last.last) : 0;
+  if (lastMs && Date.now() - lastMs < AMZ_SHORT_GATE_MS) return; // still fresh — skip
+  const r = await runAmazonSafetyNetBackfill(env, market, { sinceDays: 2, maxPages: 6, wallClockBudgetMs: 18000 });
+  if (r.ordersUpserted > 0) await invalidateAmazonSalesCache(env, market);
+  console.log(
+    `Amazon short safety-net ${market}: swept ${r.pagesFetched} page(s) since ${r.sinceISO}, ` +
+    `${r.ordersUpserted} orders re-synced${r.more ? ' [partial]' : ''} (${r.durationMs}ms)`,
+  );
+}
+
+// Weekly deep Amazon Orders safety-net (v2.44) — re-sweep the last 45 days with
+// no status filter so any order the incremental dropped (Pending-at-sweep) is
+// recovered. Runs on the Sunday 02:00 UTC trigger alongside CIN7 + Woo.
+async function runAmazonSafetyNetCron(env) {
+  if (!env.DB) { console.log('Amazon safety-net skipped: DB binding not configured'); return; }
+  if (!(env.AMAZON_REFRESH_TOKEN && env.AMAZON_LWA_CLIENT_ID && env.AMAZON_LWA_CLIENT_SECRET)) {
+    console.log('Amazon safety-net skipped: secrets not configured');
+    return;
+  }
+  for (const market of ['CA', 'US']) {
+    try {
+      const r = await runAmazonSafetyNetBackfill(env, market, { sinceDays: 45, maxPages: 40, wallClockBudgetMs: 150000 });
+      if (r.ordersUpserted > 0) await invalidateAmazonSalesCache(env, market);
+      console.log(
+        `Amazon safety-net ${market}: swept ${r.pagesFetched} page(s) since ${r.sinceISO}, ` +
+        `${r.ordersUpserted} orders re-synced` +
+        (r.more ? ' [hit budget — window not fully covered; next run resumes]' : '') +
+        ` (${r.durationMs}ms)`,
+      );
+    } catch (e) {
+      console.error(`Amazon safety-net ${market} failed:`, redactSecrets(e?.message || String(e)));
+    }
+  }
 }
 
 // CIN7 cron (v2.36 Phase A): one SalesOrders chunk + one CreditNotes chunk per
@@ -374,9 +429,13 @@ export default {
     if (event.cron === FIFTEEN_MIN_CRON) {
       ctx.waitUntil(runCronSync(env));
     } else {
-      // Any non-15-min trigger is the weekly safety-net (CIN7 + Woo), each in
-      // its own error boundary so one failing can't skip the other.
-      ctx.waitUntil(Promise.allSettled([runCin7SafetyNetCron(env), runWooSafetyNetCron(env)]));
+      // Any non-15-min trigger is the weekly safety-net (CIN7 + Woo + Amazon),
+      // each in its own error boundary so one failing can't skip the others.
+      ctx.waitUntil(Promise.allSettled([
+        runCin7SafetyNetCron(env),
+        runWooSafetyNetCron(env),
+        runAmazonSafetyNetCron(env),
+      ]));
     }
   },
 };

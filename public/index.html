@@ -1359,8 +1359,13 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.43</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.44</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.44 &mdash; 21 July 2026 (Amazon sales undercount fixed &mdash; Orders safety-net)</h4>
+    <ul>
+      <li><strong>Recent-month Amazon sales were being under-counted by roughly two-thirds.</strong> The 15-minute incremental Orders sync asks Amazon for orders created after its watermark, filtered to <code>Unshipped,Shipped</code>, then advances the watermark to the newest order's purchase time &mdash; with no look-back overlap. Any order still in <code>Pending</code> (payment authorising / not yet shipped) at the instant the watermark swept past it was filtered out and then orphaned, never re-examined. Older months looked fine only because they were seeded by a one-time no-filter backfill on 29 April; every month after that (May onward) captured only ~35% of real orders. Verified against Amazon's SP-API on 21 July: e.g. US May showed $1,259 vs a real $4,163.</li>
+      <li><strong>Fix &mdash; an Amazon Orders safety-net, mirroring the Woo and CIN7 ones.</strong> A no-status-filter re-sweep with <code>INSERT OR REPLACE</code> now recovers any order that has since reached a countable state: a deep 45-day sweep on the Sunday cron, plus a small 2-day sweep gated to run at most every ~4h on the 15-minute cron so the current month stays accurate day-to-day. Neither touches the incremental watermark; both are idempotent. Manual trigger at <code>POST /api/admin/amazon/safetynet?market=CA&amp;days=45</code>. Historical May&ndash;July gap corrected by a one-time backfill.</li>
+    </ul>
     <h4>v2.43 &mdash; 18 July 2026 (Woo order-item writes made atomic per order)</h4>
     <ul>
       <li><strong>An order's line items can no longer be left half-written.</strong> The Woo sync writes each order as a delete-then-insert of its items; the old 500-statement chunking could split that across two transactions, so a failure at a chunk boundary could delete an order's items without re-inserting them (wrong per-SKU units until the next re-fetch). Batching now respects order boundaries, keeping each order's rewrite in one transaction. Applies to both the incremental sync and the new modified-date safety-net.</li>

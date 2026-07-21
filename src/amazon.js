@@ -473,6 +473,111 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
   };
 }
 
+// ─── Orders safety-net backfill (v2.44) ─────────────────────────────────────
+//
+// The incremental Orders sync (runAmazonOrdersChunk) walks CreatedAfter=watermark
+// with an Unshipped,Shipped status filter and NO look-back overlap, advancing the
+// watermark to the newest usable order's PurchaseDate. Any order still in 'Pending'
+// (payment authorising / not yet shipped) at the instant the watermark swept past
+// its purchase time is filtered out server-side, and the watermark then moves on
+// and never re-examines it — the order is orphaned. Over time this silently drops
+// a large fraction of recent orders (verified 2026-07-21 against the SP-API:
+// US/CA May–Jul were capturing only ~35% of real orders; March, seeded by the
+// one-time Apr-29 no-filter backfill, was complete).
+//
+// This is the Amazon analogue of runWooSafetyNetBackfill / runCin7SafetyNetBackfill:
+// re-sweep the last `sinceDays` with NO status filter and INSERT OR REPLACE, so
+// every order that has since reached a countable ('Shipped'/'Unshipped'/...) state
+// is (re)persisted. It deliberately does NOT touch the incremental watermark — the
+// two cursors are independent. Fully idempotent. Oldest-first pagination means a
+// budget-truncated run just covers the older part of the window; the next run
+// (short 15-min gate or Sunday weekly) finishes the rest.
+export async function runAmazonSafetyNetBackfill(env, market, {
+  sinceDays = 45, maxPages = 20, wallClockBudgetMs = 90000, nextToken: startToken = null,
+} = {}) {
+  const startMs = Date.now();
+  const mp = AMAZON_MARKETPLACES[market];
+  if (!mp) throw new Error(`Unknown Amazon market: ${market}`);
+  if (!env.DB) return { market, skipped: true, reason: 'DB not configured' };
+
+  const sinceISO = new Date(Date.now() - sinceDays * 86400000).toISOString();
+  let nextToken     = startToken;
+  let pagesFetched  = 0;
+  let ordersUpserted = 0;
+  let more          = false;
+  let rateLimited   = false;
+
+  for (let page = 0; page < maxPages; page++) {
+    if (Date.now() - startMs > wallClockBudgetMs) { more = !!nextToken; break; }
+    const params = nextToken
+      ? { NextToken: nextToken, MarketplaceIds: mp.id }
+      // First page: no status filter — this is the whole point (catch orders that
+      // were Pending when the incremental swept past and are now Shipped).
+      : { MarketplaceIds: mp.id, CreatedAfter: sinceISO };
+
+    let data;
+    try {
+      data = await spApiRequest(env, market, '/orders/v0/orders', params);
+    } catch (e) {
+      if (e?.rateLimited) {
+        // Grind through the throttle within the wall-clock budget rather than
+        // bail on the first 429: sleep, then retry the SAME request (nextToken
+        // unchanged) on the next loop iteration.
+        if (Date.now() - startMs < wallClockBudgetMs) {
+          await new Promise((r) => setTimeout(r, Math.min((e.retryAfter || 30), 30) * 1000));
+          page--;               // don't consume a page slot on a throttled attempt
+          continue;
+        }
+        rateLimited = true; more = true; break;
+      }
+      throw e;
+    }
+
+    const orders = data?.payload?.Orders || [];
+    const usable = orders.filter((o) => {
+      if (o.MarketplaceId && o.MarketplaceId !== mp.id) return false;
+      const st = o.OrderStatus || '';
+      if (st === 'Canceled' || st === 'Pending' || st === 'PendingAvailability') return false;
+      return !!o.AmazonOrderId;
+    });
+
+    if (usable.length > 0) {
+      const stmts = usable.map((o) => {
+        const purchase  = o.PurchaseDate || o.LastUpdateDate || '';
+        const localDate = toBusinessLocalDate(purchase);
+        const total     = parseFloat(o.OrderTotal?.Amount || 0);
+        const currency  = o.OrderTotal?.CurrencyCode || mp.currency;
+        return env.DB.prepare(
+          `INSERT OR REPLACE INTO amazon_orders
+             (id, market, status, purchase_date, local_date, total, currency, marketplace_id, raw_json, synced_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, strftime('%Y-%m-%dT%H:%M:%SZ','now'))`,
+        ).bind(o.AmazonOrderId, market, o.OrderStatus || 'unknown', purchase, localDate, total, currency, mp.id);
+      });
+      const CHUNK = 500;
+      for (let i = 0; i < stmts.length; i += CHUNK) await env.DB.batch(stmts.slice(i, i + CHUNK));
+      ordersUpserted += usable.length;
+    }
+
+    pagesFetched++;
+    nextToken = data?.payload?.NextToken || null;
+    if (!nextToken) { more = false; break; }
+    more = true;
+    await new Promise((r) => setTimeout(r, 2000));   // gentle inter-page spacing
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO sync_logs
+       (run_at, source, market, action, pages_fetched, orders_added, items_added,
+        watermark_before, watermark_after, status, duration_ms)
+     VALUES (strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'amazon', ?, 'amazon-safetynet', ?, ?, 0, ?, ?, ?, ?)`,
+  ).bind(
+    market, pagesFetched, ordersUpserted, sinceISO, sinceISO,
+    rateLimited ? 'partial' : 'ok', Date.now() - startMs,
+  ).run();
+
+  return { market, sinceISO, pagesFetched, ordersUpserted, nextToken, more, rateLimited, durationMs: Date.now() - startMs };
+}
+
 // ─── Reports state machine ─────────────────────────────────────────────────
 //
 // Each tick: Phase A (seed if needed) → Phase B (poll up to N pending) →

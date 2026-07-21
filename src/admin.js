@@ -38,7 +38,7 @@
 
 import { Hono } from 'hono';
 import { redactSecrets } from './redact.js';
-import { runAmazonOrdersChunk, runAmazonReportsTick, spApiRequest, invalidateAmazonSalesCache } from './amazon.js';
+import { runAmazonOrdersChunk, runAmazonReportsTick, runAmazonSafetyNetBackfill, spApiRequest, invalidateAmazonSalesCache } from './amazon.js';
 import { runCin7SalesOrdersChunk, runCin7CreditNotesChunk, runCin7BackfillLoop, runCin7SafetyNetBackfill } from './cin7-sync.js';
 
 export const adminRoutes = new Hono();
@@ -378,6 +378,30 @@ adminRoutes.post('/woo/safetynet', async (c) => {
     if (!['CA', 'US'].includes(m)) { results.push({ market: m, error: 'market must be CA or US' }); continue; }
     try { results.push(await runWooSafetyNetBackfill(c.env, m, { sinceDays: days })); }
     catch (e) { results.push({ market: m, error: redactSecrets(e?.message || String(e)) }); }
+  }
+  return c.json({ ok: true, results });
+});
+
+// Manual trigger for the Amazon Orders safety-net (verification + on-demand
+// catch-up). POST /api/admin/amazon/safetynet?market=CA[&days=45][&nextToken=…]
+// Returns the sweep result including nextToken/more so a caller can drive a full
+// window to completion by looping while `more` is true. Idempotent; never touches
+// the incremental watermark.
+adminRoutes.post('/amazon/safetynet', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'D1 binding DB not configured' }, 500);
+  if (!c.env.AMAZON_REFRESH_TOKEN) return c.json({ error: 'Amazon not configured' }, 401);
+  const one       = (c.req.query('market') || '').toUpperCase();
+  const days      = Math.min(Math.max(parseInt(c.req.query('days') || '45', 10) || 45, 1), 180);
+  const nextToken = c.req.query('nextToken') || null;
+  const markets   = one ? [one] : ['CA', 'US'];
+  const results = [];
+  for (const m of markets) {
+    if (!['CA', 'US'].includes(m)) { results.push({ market: m, error: 'market must be CA or US' }); continue; }
+    try {
+      const r = await runAmazonSafetyNetBackfill(c.env, m, { sinceDays: days, nextToken });
+      if (r.ordersUpserted > 0) await invalidateAmazonSalesCache(c.env, m);
+      results.push(r);
+    } catch (e) { results.push({ market: m, error: redactSecrets(e?.message || String(e)) }); }
   }
   return c.json({ ok: true, results });
 });
