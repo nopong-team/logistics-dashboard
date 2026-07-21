@@ -1359,8 +1359,14 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.44</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.45</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.45 &mdash; 21 July 2026 (Data Health now checks completeness, not just cleanliness)</h4>
+    <ul>
+      <li><strong>Why the v2.44 undercount stayed green on Data Health for three months.</strong> Every Amazon check was an <em>internal-consistency</em> check &mdash; duplicates, market separation, SKU mapping, spikes &mdash; and every one guarded the <em>over</em>-counting direction (because every past Amazon bug over-counted). A missing order is none of those: not a duplicate, not stale (the sync ran clean), not an unmapped SKU (Amazon never sent the row), not a spike (it's a drop, and the detector only fired on increases). The data we had was pristine; there was just less of it, and nothing measured "how much should there be?".</li>
+      <li><strong>New check &mdash; "Amazon completeness".</strong> The weekly deep safety-net now re-counts recent months against Amazon's own totals (no status filter) and records how many orders it had to recover. Data Health reads that: green = "verified against Amazon's own counts, they match"; red if the last verification is stale (&gt;8 days) or the sync is dropping a material share of orders. This is the check that would have caught v2.44 on day one.</li>
+      <li><strong>New check &mdash; "Amazon revenue anomaly" (bidirectional).</strong> A fast, no-API tripwire: if a finished month's Amazon revenue collapses versus the trailing three, it flags &mdash; the drop direction the old spike detector was blind to.</li>
+    </ul>
     <h4>v2.44 &mdash; 21 July 2026 (Amazon sales undercount fixed &mdash; Orders safety-net)</h4>
     <ul>
       <li><strong>Recent-month Amazon sales were being under-counted by roughly two-thirds.</strong> The 15-minute incremental Orders sync asks Amazon for orders created after its watermark, filtered to <code>Unshipped,Shipped</code>, then advances the watermark to the newest order's purchase time &mdash; with no look-back overlap. Any order still in <code>Pending</code> (payment authorising / not yet shipped) at the instant the watermark swept past it was filtered out and then orphaned, never re-examined. Older months looked fine only because they were seeded by a one-time no-filter backfill on 29 April; every month after that (May onward) captured only ~35% of real orders. Verified against Amazon's SP-API on 21 July: e.g. US May showed $1,259 vs a real $4,163.</li>
@@ -10322,6 +10328,71 @@ async function runDataHealthChecks() {
       const pct = Math.round((lineIdActive / (lineIdActive + miss)) * 100);
       checks.push({ status: 'pass', name: 'Amazon line-id coverage',
         detail: `${pct}% of active-range rows now carry a line id; ${miss.toLocaleString()} pre-update rows still clearing as the remaining ranges re-fetch.` });
+    }
+  }
+
+  // ── Check 3f: Amazon completeness — verified against Amazon's OWN counts ──
+  // THIS is the check that would have caught the mid-2026 undercount. Every other
+  // Amazon check above only inspects the data we have for internal consistency
+  // (duplicates, mapping, market separation) — none of them can see an order that
+  // was never stored. This one reads the reconciliation the weekly deep safety-net
+  // records: it re-counts recent months against Amazon with no status filter, so
+  // "how many orders did the live sync miss that we just recovered" becomes a real,
+  // visible number. Silent undercount → visible red.
+  if (audit?.amazon?.reconcile) {
+    for (const mkt of ['CA', 'US']) {
+      const rec = audit.amazon.reconcile[mkt];
+      if (!rec || !rec.ranAt) {
+        checks.push({ status: 'warn', name: `Amazon ${mkt}: completeness`,
+          detail: `Not yet reconciled against Amazon — the weekly deep sweep hasn't recorded a result. Verifies on the next Sunday 02:00 UTC run, or trigger POST /api/admin/amazon/safetynet?market=${mkt}&days=45.` });
+        continue;
+      }
+      const ageDays = (Date.now() - Date.parse(rec.ranAt)) / 86400000;
+      const worst = rec.worstRecoveredPct || 0;
+      const worstMonth = (rec.months || []).slice().sort((a, b) => (b.recoveredPct || 0) - (a.recoveredPct || 0))[0];
+      const ageTxt = ageDays < 1 ? 'today' : `${ageDays.toFixed(0)}d ago`;
+      if (ageDays > 8) {
+        checks.push({ status: 'fail', name: `Amazon ${mkt}: completeness`,
+          detail: `Last verified against Amazon ${ageDays.toFixed(0)} days ago — the safety-net that re-counts against Amazon hasn't run in over a week, so we can't vouch for completeness. Check the Sunday cron or trigger a manual sweep.` });
+      } else if (worst >= 0.10) {
+        checks.push({ status: 'fail', name: `Amazon ${mkt}: completeness`,
+          detail: `The last sweep had to recover ${(worst * 100).toFixed(0)}% of ${worstMonth?.ym} orders the live sync had missed (${worstMonth?.storedBefore}→${worstMonth?.storedAfter}). The incremental Orders sync is dropping orders — don't trust recent Amazon ${mkt} numbers until this is investigated.` });
+      } else if (worst >= 0.03) {
+        checks.push({ status: 'warn', name: `Amazon ${mkt}: completeness`,
+          detail: `Verified ${ageTxt}; the last sweep topped up ${(worst * 100).toFixed(1)}% (${worstMonth?.ym}). Small drift — normal for late-settling orders, but worth watching.` });
+      } else {
+        checks.push({ status: 'pass', name: `Amazon ${mkt}: completeness`,
+          detail: `Verified against Amazon's own counts ${ageTxt} — stored orders match (drift ${(worst * 100).toFixed(1)}%).` });
+      }
+    }
+  }
+
+  // ── Check 3g: Amazon monthly-revenue anomaly (bidirectional tripwire) ──
+  // A fast, always-on guard that needs no API call: if a recent finished month's
+  // Amazon revenue collapses versus the trailing months, flag it. The original
+  // undercount had exactly this shape (May–Jul ran ~35% of Mar–Apr), but the old
+  // spike detector only fired on INCREASES — a two-thirds DROP stayed invisible.
+  for (const mkt of ['CA', 'US']) {
+    const arr = (mkt === 'CA' ? S.amazonCA : S.amazonUS) || [];
+    const cmIdx = (typeof CM === 'number') ? CM : arr.length - 1;
+    const lastComplete = cmIdx - 1;                 // most recent finished month
+    if (lastComplete < 3) continue;
+    const trail = [arr[lastComplete - 3], arr[lastComplete - 2], arr[lastComplete - 1]].filter(v => v > 0);
+    if (trail.length < 3) continue;
+    const avg = trail.reduce((a, b) => a + b, 0) / trail.length;
+    if (avg < 2000) continue;                       // too small to judge reliably
+    const val = arr[lastComplete] || 0;
+    const ratio = val / avg;
+    const label = (typeof MONTHS !== 'undefined' && MONTHS?.[lastComplete]) ? MONTHS[lastComplete] : 'Last month';
+    if (ratio < 0.45) {
+      checks.push({ status: 'fail', name: `Amazon ${mkt}: revenue anomaly`,
+        detail: `${label} Amazon ${mkt} revenue ($${Math.round(val).toLocaleString()}) is ${Math.round((1 - ratio) * 100)}% below the prior 3-month average ($${Math.round(avg).toLocaleString()}). A drop this sharp usually means a sync gap — verify against Seller Central.` });
+    } else if (ratio < 0.65) {
+      checks.push({ status: 'warn', name: `Amazon ${mkt}: revenue anomaly`,
+        detail: `${label} Amazon ${mkt} revenue is ${Math.round((1 - ratio) * 100)}% below the prior 3-month average — worth a glance in case it's a partial sync.` });
+    } else {
+      checks.push({ status: 'pass', name: `Amazon ${mkt}: revenue trend`,
+        detail: `${label} Amazon ${mkt} in line with recent months (${Math.round(ratio * 100)}% of 3-mo average).` });
     }
   }
 

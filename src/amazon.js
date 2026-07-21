@@ -494,6 +494,7 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
 // (short 15-min gate or Sunday weekly) finishes the rest.
 export async function runAmazonSafetyNetBackfill(env, market, {
   sinceDays = 45, maxPages = 20, wallClockBudgetMs = 90000, nextToken: startToken = null,
+  recordReconcile = false,
 } = {}) {
   const startMs = Date.now();
   const mp = AMAZON_MARKETPLACES[market];
@@ -501,6 +502,16 @@ export async function runAmazonSafetyNetBackfill(env, market, {
   if (!env.DB) return { market, skipped: true, reason: 'DB not configured' };
 
   const sinceISO = new Date(Date.now() - sinceDays * 86400000).toISOString();
+
+  // Reconciliation (v2.44): on a deep sweep, snapshot the current D1 order
+  // counts for the last two calendar months BEFORE we upsert anything, so that
+  // comparing against the AFTER counts tells us exactly how many orders the
+  // incremental sync had missed and this authoritative no-filter sweep just
+  // recovered. That "recovered %" is the completeness signal the Data Health
+  // tab reads — a silent undercount finally becomes visible from inside the
+  // system, because the safety-net re-counts against Amazon's own truth.
+  const reconcileFloor = recordReconcile ? amazonReconcileFloor() : null;
+  const reconcileBefore = recordReconcile ? await snapshotAmazonMonths(env, market, reconcileFloor) : null;
   let nextToken     = startToken;
   let pagesFetched  = 0;
   let ordersUpserted = 0;
@@ -575,7 +586,62 @@ export async function runAmazonSafetyNetBackfill(env, market, {
     rateLimited ? 'partial' : 'ok', Date.now() - startMs,
   ).run();
 
-  return { market, sinceISO, pagesFetched, ordersUpserted, nextToken, more, rateLimited, durationMs: Date.now() - startMs };
+  // Write the reconciliation result to KV so /api/audit → Data Health can prove
+  // "our Amazon data matched Amazon's own within the last sweep". Only meaningful
+  // on a fully-covered deep sweep; the short 2-day gated sweep passes
+  // recordReconcile=false. A partial (budget-truncated) sweep is NOT authoritative
+  // — it hasn't re-counted the whole window — so skip the write and let the
+  // freshness guard trip instead of recording a misleadingly-small gap.
+  let reconcile = null;
+  if (recordReconcile && !more && !rateLimited && env.CACHE) {
+    const after = await snapshotAmazonMonths(env, market, reconcileFloor);
+    const months = Object.keys(after).sort().map((ym) => {
+      const b = reconcileBefore?.[ym] || { n: 0, rev: 0 };
+      const a = after[ym];
+      const recovered = a.n - b.n;
+      return {
+        ym,
+        storedBefore: b.n, storedAfter: a.n,
+        recovered,
+        recoveredPct: a.n > 0 ? recovered / a.n : 0,
+        revBefore: b.rev, revAfter: a.rev,
+      };
+    });
+    // Worst recovered fraction across the reconciled months = how far off the
+    // incremental had drifted. Small in a healthy pipeline (the 4h short sweep
+    // keeps it tight); large only if something upstream is dropping orders.
+    const worstPct = months.reduce((mx, m) => Math.max(mx, m.recoveredPct), 0);
+    reconcile = { ranAt: new Date().toISOString(), sinceISO, sinceDays, worstRecoveredPct: worstPct, months };
+    try {
+      await env.CACHE.put(`amazon-reconcile-${market.toLowerCase()}`, JSON.stringify(reconcile));
+    } catch (e) { /* KV write best-effort — never fail the sweep on telemetry */ }
+  }
+
+  return { market, sinceISO, pagesFetched, ordersUpserted, nextToken, more, rateLimited, reconcile, durationMs: Date.now() - startMs };
+}
+
+// First day (YYYY-MM-01) of the previous business-calendar month — the floor for
+// the reconciliation snapshot (previous + current month, both inside a 45-day
+// deep sweep so their counts are authoritative after the sweep).
+function amazonReconcileFloor() {
+  const yms = Object.keys(buildMonthWindow().monthMap); // 6 months, oldest → newest
+  return `${yms[yms.length - 2]}-01`;
+}
+
+// Per-calendar-month order count + revenue for a market at or after `floor`.
+// Returns { 'YYYY-MM': { n, rev } }.
+async function snapshotAmazonMonths(env, market, floor) {
+  const res = await env.DB.prepare(
+    `SELECT substr(local_date, 1, 7) AS ym,
+            COUNT(*)                 AS n,
+            COALESCE(SUM(total), 0)  AS rev
+     FROM amazon_orders
+     WHERE market = ? AND local_date >= ?
+     GROUP BY ym`,
+  ).bind(market, floor).all();
+  const out = {};
+  for (const r of (res.results || [])) out[r.ym] = { n: r.n || 0, rev: Math.round(r.rev || 0) };
+  return out;
 }
 
 // ─── Reports state machine ─────────────────────────────────────────────────

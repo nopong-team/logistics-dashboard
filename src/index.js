@@ -278,11 +278,12 @@ async function runAmazonSafetyNetCron(env) {
   }
   for (const market of ['CA', 'US']) {
     try {
-      const r = await runAmazonSafetyNetBackfill(env, market, { sinceDays: 45, maxPages: 40, wallClockBudgetMs: 150000 });
+      const r = await runAmazonSafetyNetBackfill(env, market, { sinceDays: 45, maxPages: 40, wallClockBudgetMs: 150000, recordReconcile: true });
       if (r.ordersUpserted > 0) await invalidateAmazonSalesCache(env, market);
       console.log(
         `Amazon safety-net ${market}: swept ${r.pagesFetched} page(s) since ${r.sinceISO}, ` +
         `${r.ordersUpserted} orders re-synced` +
+        (r.reconcile ? ` [reconcile worst-recovered ${(r.reconcile.worstRecoveredPct*100).toFixed(1)}%]` : '') +
         (r.more ? ' [hit budget — window not fully covered; next run resumes]' : '') +
         ` (${r.durationMs}ms)`,
       );

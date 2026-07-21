@@ -398,7 +398,7 @@ adminRoutes.post('/amazon/safetynet', async (c) => {
   for (const m of markets) {
     if (!['CA', 'US'].includes(m)) { results.push({ market: m, error: 'market must be CA or US' }); continue; }
     try {
-      const r = await runAmazonSafetyNetBackfill(c.env, m, { sinceDays: days, nextToken });
+      const r = await runAmazonSafetyNetBackfill(c.env, m, { sinceDays: days, nextToken, recordReconcile: days >= 30 && !nextToken });
       if (r.ordersUpserted > 0) await invalidateAmazonSalesCache(c.env, m);
       results.push(r);
     } catch (e) { results.push({ market: m, error: redactSecrets(e?.message || String(e)) }); }

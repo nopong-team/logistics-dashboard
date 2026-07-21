@@ -445,7 +445,8 @@ async function buildAmazonAudit(env) {
   const { startDate } = buildMonthWindow();
   const activeStart = activeRangeStart();
   const [caSku, usSku, caState, usState, caJobs, usJobs, caSuperseded, usSuperseded,
-         caDupIdentity, usDupIdentity, caCoverage, usCoverage] = await Promise.all([
+         caDupIdentity, usDupIdentity, caCoverage, usCoverage,
+         caReconcile, usReconcile] = await Promise.all([
     env.DB.prepare(
       `SELECT COUNT(DISTINCT dashboard_sku) AS n
        FROM amazon_items
@@ -482,6 +483,11 @@ async function buildAmazonAudit(env) {
     countAmazonDuplicateIdentities(env, 'US'),
     amazonLineIdCoverage(env, 'CA', activeStart),
     amazonLineIdCoverage(env, 'US', activeStart),
+    // Completeness reconciliation blobs written by the deep safety-net sweep
+    // (src/amazon.js). Null until the first deep sweep runs. Powers the Data
+    // Health "Amazon completeness" check.
+    env.CACHE ? env.CACHE.get('amazon-reconcile-ca', 'json') : Promise.resolve(null),
+    env.CACHE ? env.CACHE.get('amazon-reconcile-us', 'json') : Promise.resolve(null),
   ]);
 
   const splitSignals = (s) => (s ? String(s).split(',').filter(Boolean) : []);
@@ -526,6 +532,10 @@ async function buildAmazonAudit(env) {
     usMissingLineIdCount:  usCoverage.missing,
     caLineIdActiveCount:   caCoverage.withId,
     usLineIdActiveCount:   usCoverage.withId,
+    // Completeness reconciliation — the authoritative "did our stored Amazon
+    // data match Amazon's own count at the last deep sweep" signal. Each is
+    // { ranAt, sinceISO, worstRecoveredPct, months:[…] } or null (never swept).
+    reconcile: { CA: caReconcile || null, US: usReconcile || null },
   };
 }
 
