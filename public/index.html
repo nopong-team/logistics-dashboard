@@ -980,7 +980,15 @@
       <div class="table-card-header">
         <div class="table-card-title">Incoming stock by SKU</div>
         <div class="table-hint">Stock = current Logiwa + FBA · Days left = stock ÷ run rate · Showing upcoming POs only</div>
-        <button class="btn-csv" onclick="downloadPoSkuCSV()" style="margin-left:auto;">Export CSV</button>
+        <div style="display:flex;align-items:center;gap:10px;margin-left:auto;flex-wrap:wrap;">
+          <label style="font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;">Size:</label>
+          <div style="display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+            <button id="po-sku-size-btn-all" class="period-btn active" onclick="setPoSkuSizeFilter('all')" style="padding:6px 12px;font-size:12px;font-weight:600;border:none;cursor:pointer;background:var(--accent);color:#fff;transition:all .2s;">All</button>
+            <button id="po-sku-size-btn-35"  class="period-btn"        onclick="setPoSkuSizeFilter('35')"  style="padding:6px 12px;font-size:12px;font-weight:600;border:none;cursor:pointer;background:var(--bg-card);color:var(--text-secondary);transition:all .2s;">35 g</button>
+            <button id="po-sku-size-btn-85"  class="period-btn"        onclick="setPoSkuSizeFilter('85')"  style="padding:6px 12px;font-size:12px;font-weight:600;border:none;cursor:pointer;background:var(--bg-card);color:var(--text-secondary);transition:all .2s;">85 g</button>
+          </div>
+          <button class="btn-csv" onclick="downloadPoSkuCSV()">Export CSV</button>
+        </div>
       </div>
       <div class="table-scroll"><table>
         <thead>
@@ -1359,8 +1367,12 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.46</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.47</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.47 &mdash; 29 July 2026 (📏 Purchase Orders &mdash; 35 g / 85 g size filter, like AU)</h4>
+    <ul>
+      <li><strong>The "Incoming stock by SKU" table now has a <em>Size</em> filter (All / 35 g / 85 g),</strong> matching the AU tab. Handy for scanning just the 35 g or 85 g lines without the rest crowding the view. The choice persists across reloads, and the CSV export respects the active filter (filename gets a <code>-35g</code> / <code>-85g</code> suffix). 2 kg refill SKUs show under <em>All</em>.</li>
+    </ul>
     <h4>v2.46 &mdash; 29 July 2026 (🧹 Purchase Orders &mdash; dropped the product-name group rows)</h4>
     <ul>
       <li><strong>The "Incoming stock by SKU" table is now a clean flat list, matching the AU tab.</strong> It used to break the SKUs into per-product blocks with a coloured "Original — Original formula" header row between each group. Per Melanie those separators just crowded the table &mdash; the SKU codes already name the product &mdash; so they're gone. Same columns, same sort order (scent → formula → size), just without the in-between name rows and the per-group row tint.</li>
@@ -5135,7 +5147,8 @@ function downloadSkuCSV() {
 }
 
 function downloadPoSkuCSV() {
-  const sorted = invSorted();
+  // Respect the active size filter so the export matches what's on screen.
+  const sorted = _poSkuFilterBySize(invSorted());
   const rows = [['SKU','Size','Current Stock','Run Rate (units/day)','Days Left','Next PO (days)','Incoming Qty','PO Ref','Risk Status']];
   sorted.forEach(t => {
     const total = t.logiwa + (t.fbaCA||0) + (t.fbaUS||0);
@@ -5154,7 +5167,8 @@ function downloadPoSkuCSV() {
       soStatus.label,
     ]);
   });
-  downloadCSV('incoming-stock-by-sku.csv', rows.map(r => r.join(',')).join('\n'));
+  const suffix = PO_SKU_SIZE_FILTER === 'all' ? '' : `-${PO_SKU_SIZE_FILTER}g`;
+  downloadCSV(`incoming-stock-by-sku${suffix}.csv`, rows.map(r => r.join(',')).join('\n'));
 }
 
 function downloadCartonCSV() {
@@ -5741,12 +5755,55 @@ function renderPoTable() {
   }).join('');
 }
 
+// Size filter for the "Incoming stock by SKU" table — mirrors the AU tab.
+//   'all' — every tin in the dataset (default; 2kg refills only show here)
+//   '35'  — only 35g tins · '85' — only 85g tins
+// Choice persists in localStorage so reload-and-resume Just Works.
+let PO_SKU_SIZE_FILTER = (() => {
+  try { return localStorage.getItem('ca_incoming_size_filter') || 'all'; }
+  catch (_e) { return 'all'; }
+})();
+
+function _poSkuFilterBySize(rows) {
+  if (PO_SKU_SIZE_FILTER === 'all') return rows;
+  return rows.filter(t => String(t.size) === PO_SKU_SIZE_FILTER);
+}
+
+function setPoSkuSizeFilter(size) {
+  if (size !== 'all' && size !== '35' && size !== '85') size = 'all';
+  PO_SKU_SIZE_FILTER = size;
+  try { localStorage.setItem('ca_incoming_size_filter', size); } catch (_e) {}
+  _poSkuRestyleSizeButtons();
+  renderPoSkuTable();
+}
+
+// Repaint the segmented-control buttons so the active one matches state.
+function _poSkuRestyleSizeButtons() {
+  const map = { 'all': 'po-sku-size-btn-all', '35': 'po-sku-size-btn-35', '85': 'po-sku-size-btn-85' };
+  for (const [k, id] of Object.entries(map)) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    const on = (PO_SKU_SIZE_FILTER === k);
+    btn.classList.toggle('active', on);
+    btn.style.background = on ? 'var(--accent)' : 'var(--bg-card)';
+    btn.style.color      = on ? '#fff'          : 'var(--text-secondary)';
+  }
+}
+
 function renderPoSkuTable() {
   // Flat list of all tins sorted by scent+formula+size, with their next PO
   // info. Per Melanie 2026-07-29: dropped the per-product group header rows
   // (the "Original — Original formula" separators) to match the cleaner AU
   // "Incoming stock by SKU" table — the SKU codes already name the product.
-  const sorted = invSorted();
+  // v2.47: size filter (All / 35 g / 85 g), mirroring the AU tab.
+  _poSkuRestyleSizeButtons();
+  const sorted = _poSkuFilterBySize(invSorted());
+  if (sorted.length === 0) {
+    const sizeLabel = PO_SKU_SIZE_FILTER === 'all' ? 'any size' : `${PO_SKU_SIZE_FILTER} g`;
+    document.getElementById('po-sku-tbody').innerHTML =
+      `<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-secondary);">No SKUs match the ${sizeLabel} filter.</td></tr>`;
+    return;
+  }
   let rows = '';
 
   sorted.forEach(t => {
