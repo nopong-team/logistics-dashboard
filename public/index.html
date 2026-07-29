@@ -1359,8 +1359,12 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.45</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.46</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.46 &mdash; 29 July 2026 (🧹 Purchase Orders &mdash; dropped the product-name group rows)</h4>
+    <ul>
+      <li><strong>The "Incoming stock by SKU" table is now a clean flat list, matching the AU tab.</strong> It used to break the SKUs into per-product blocks with a coloured "Original — Original formula" header row between each group. Per Melanie those separators just crowded the table &mdash; the SKU codes already name the product &mdash; so they're gone. Same columns, same sort order (scent → formula → size), just without the in-between name rows and the per-group row tint.</li>
+    </ul>
     <h4>v2.45 &mdash; 21 July 2026 (Data Health now checks completeness, not just cleanliness)</h4>
     <ul>
       <li><strong>Why the v2.44 undercount stayed green on Data Health for three months.</strong> Every Amazon check was an <em>internal-consistency</em> check &mdash; duplicates, market separation, SKU mapping, spikes &mdash; and every one guarded the <em>over</em>-counting direction (because every past Amazon bug over-counted). A missing order is none of those: not a duplicate, not stale (the sync ran clean), not an unmapped SKU (Amazon never sent the row), not a spike (it's a drop, and the detector only fired on increases). The data we had was pristine; there was just less of it, and nothing measured "how much should there be?".</li>
@@ -5738,28 +5742,14 @@ function renderPoTable() {
 }
 
 function renderPoSkuTable() {
-  // Show all tins sorted by scent+formula+size, with their next PO info
+  // Flat list of all tins sorted by scent+formula+size, with their next PO
+  // info. Per Melanie 2026-07-29: dropped the per-product group header rows
+  // (the "Original — Original formula" separators) to match the cleaner AU
+  // "Incoming stock by SKU" table — the SKU codes already name the product.
   const sorted = invSorted();
-  let lastGroup = '';
   let rows = '';
 
   sorted.forEach(t => {
-    const group = t.scent + '-' + t.form;
-    const groupLabel = (SCENT_MAP[t.scent] || t.scent) + ' — ' + (FORM_MAP[t.form] || t.form);
-    const scentColor = skuColor(t.scent, t.form);
-
-    const headerBg = `${scentColor}26`;
-    const rowBg = `${scentColor}14`;
-    if (group !== lastGroup) {
-      rows += `<tr class="inv-group-row">
-        <td colspan="8" style="padding:10px 20px 6px;background:${headerBg};border-bottom:1px solid var(--border);border-left:4px solid ${scentColor};">
-          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${scentColor};margin-right:6px;"></span>
-          <strong style="font-size:12px;color:var(--text);">${groupLabel}</strong>
-        </td>
-      </tr>`;
-      lastGroup = group;
-    }
-
     const total = t.logiwa + (t.fbaCA||0) + (t.fbaUS||0);
     const days = t.rate > 0 ? total / t.rate : Infinity;
     const nextPo = nextPoForSku(t.sku);
@@ -5768,7 +5758,7 @@ function renderPoSkuTable() {
     const sizeLabel = SIZE_MAP[t.size] || t.size;
 
     rows += `
-      <tr style="background:${rowBg};">
+      <tr>
         <td>
           <div class="sku-name">${t.sku}</div>
           <div class="sku-sub">${sizeLabel}</div>
