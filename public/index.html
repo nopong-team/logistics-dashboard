@@ -1367,8 +1367,12 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.48</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.49</span> &middot; July 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.49 &mdash; 29 July 2026 (🔄 &ldquo;Re-verify now&rdquo; button on the Amazon completeness check)</h4>
+    <ul>
+      <li><strong>New self-serve button in the Data Health panel.</strong> When the &ldquo;Amazon CA/US: completeness&rdquo; check shows amber or red (or any time you want to force a fresh check), a <strong>Re-verify now</strong> button runs the same 45-day deep safety-net the Sunday cron runs &mdash; for that market &mdash; straight from your logged-in session. It re-counts stored Amazon orders against Amazon&rsquo;s own totals, recovers any the live sync missed, then re-reads the result so the badge updates on its own &mdash; no waiting until Sunday, no terminal or keys. The button shows progress in place (&ldquo;Re-verifying…&rdquo; &rarr; &ldquo;Recovered N — refreshing…&rdquo;). Per-market so each run stays well under the request timeout.</li>
+    </ul>
     <h4>v2.48 &mdash; 29 July 2026 (🧹 Purchase Orders &mdash; Days-left bar replaced with a plain number)</h4>
     <ul>
       <li><strong>Dropped the little progress bar in the "Days left" column</strong> of the Incoming-stock-by-SKU table &mdash; per Melanie it was distracting. It now shows just the number, coloured only when it matters (red under 20 days, amber under 45, plain otherwise). With the fixed-width bar gone, the remaining columns space out evenly across the table.</li>
@@ -10516,9 +10520,13 @@ async function runDataHealthChecks() {
   if (audit?.amazon?.reconcile) {
     for (const mkt of ['CA', 'US']) {
       const rec = audit.amazon.reconcile[mkt];
+      // v2.49: self-serve re-verify button. Runs the same 45-day deep safety-net
+      // the Sunday cron runs, for this market, via the user's SSO session — then
+      // re-reads the reconciliation so the check updates without waiting for Sunday.
+      const reverify = { label: 'Re-verify now', handler: 'runAmazonReverify', market: mkt };
       if (!rec || !rec.ranAt) {
-        checks.push({ status: 'warn', name: `Amazon ${mkt}: completeness`,
-          detail: `Not yet reconciled against Amazon — the weekly deep sweep hasn't recorded a result. Verifies on the next Sunday 02:00 UTC run, or trigger POST /api/admin/amazon/safetynet?market=${mkt}&days=45.` });
+        checks.push({ status: 'warn', name: `Amazon ${mkt}: completeness`, action: reverify,
+          detail: `Not yet reconciled against Amazon — the weekly deep sweep hasn't recorded a result. Verifies on the next Sunday 02:00 UTC run, or hit “Re-verify now”.` });
         continue;
       }
       const ageDays = (Date.now() - Date.parse(rec.ranAt)) / 86400000;
@@ -10526,16 +10534,16 @@ async function runDataHealthChecks() {
       const worstMonth = (rec.months || []).slice().sort((a, b) => (b.recoveredPct || 0) - (a.recoveredPct || 0))[0];
       const ageTxt = ageDays < 1 ? 'today' : `${ageDays.toFixed(0)}d ago`;
       if (ageDays > 8) {
-        checks.push({ status: 'fail', name: `Amazon ${mkt}: completeness`,
-          detail: `Last verified against Amazon ${ageDays.toFixed(0)} days ago — the safety-net that re-counts against Amazon hasn't run in over a week, so we can't vouch for completeness. Check the Sunday cron or trigger a manual sweep.` });
+        checks.push({ status: 'fail', name: `Amazon ${mkt}: completeness`, action: reverify,
+          detail: `Last verified against Amazon ${ageDays.toFixed(0)} days ago — the safety-net that re-counts against Amazon hasn't run in over a week, so we can't vouch for completeness. Hit “Re-verify now” or check the Sunday cron.` });
       } else if (worst >= 0.10) {
-        checks.push({ status: 'fail', name: `Amazon ${mkt}: completeness`,
+        checks.push({ status: 'fail', name: `Amazon ${mkt}: completeness`, action: reverify,
           detail: `The last sweep had to recover ${(worst * 100).toFixed(0)}% of ${worstMonth?.ym} orders the live sync had missed (${worstMonth?.storedBefore}→${worstMonth?.storedAfter}). The incremental Orders sync is dropping orders — don't trust recent Amazon ${mkt} numbers until this is investigated.` });
       } else if (worst >= 0.03) {
-        checks.push({ status: 'warn', name: `Amazon ${mkt}: completeness`,
-          detail: `Verified ${ageTxt}; the last sweep topped up ${(worst * 100).toFixed(1)}% (${worstMonth?.ym}). Small drift — normal for late-settling orders, but worth watching.` });
+        checks.push({ status: 'warn', name: `Amazon ${mkt}: completeness`, action: reverify,
+          detail: `Verified ${ageTxt}; the last sweep topped up ${(worst * 100).toFixed(1)}% (${worstMonth?.ym}). Small drift — normal for late-settling orders, but worth watching. “Re-verify now” to re-check.` });
       } else {
-        checks.push({ status: 'pass', name: `Amazon ${mkt}: completeness`,
+        checks.push({ status: 'pass', name: `Amazon ${mkt}: completeness`, action: reverify,
           detail: `Verified against Amazon's own counts ${ageTxt} — stored orders match (drift ${(worst * 100).toFixed(1)}%).` });
       }
     }
@@ -10708,7 +10716,7 @@ function renderHealthBadge(checks) {
     // Optional self-serve action button for failing checks. Wired by name to a
     // global handler so the markup stays free of inline event handlers.
     const actionMarkup = c.action
-      ? `<button type="button" class="chk-action" data-handler="${c.action.handler}">${c.action.label}</button>`
+      ? `<button type="button" class="chk-action" data-handler="${c.action.handler}"${c.action.market ? ` data-market="${c.action.market}"` : ''}>${c.action.label}</button>`
       : '';
     li.innerHTML = `
       <span class="chk-icon ${iconCls}">${iconCh}</span>
@@ -10763,6 +10771,45 @@ window.runAmazonDedupe = async function(btn) {
     btn.disabled = false;
     btn.textContent = original;
     alert('Cleanup failed: ' + (e?.message || e));
+  }
+};
+
+// v2.49: self-serve "Re-verify now" on the Amazon completeness check. Runs the
+// same 45-day deep safety-net the Sunday cron runs — for one market — via the
+// user's Cloudflare Access session (no key needed, same as runAmazonDedupe).
+// The sweep re-counts stored orders against Amazon's own totals and rewrites the
+// reconciliation KV blob; we then re-run the health checks so the badge updates
+// without waiting for Sunday. Per-market (not both at once) so each request stays
+// well under the ~100s edge timeout — the sweep has a 90s internal budget.
+window.runAmazonReverify = async function(btn) {
+  if (!btn) return;
+  const market = (btn.dataset.market || '').toUpperCase();
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Re-verifying…';
+  try {
+    const qs = market ? `?market=${market}&days=45` : '?days=45';
+    const r = await fetch('/api/admin/amazon/safetynet' + qs, {
+      method: 'POST',
+      credentials: 'include'  // carry the Cloudflare Access JWT cookie
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      throw new Error(`HTTP ${r.status}: ${body.slice(0, 200) || r.statusText}`);
+    }
+    const data = await r.json();
+    const recovered = Array.isArray(data.results)
+      ? data.results.reduce((s, x) => s + (x.ordersUpserted || 0), 0)
+      : 0;
+    btn.textContent = recovered > 0 ? `Recovered ${recovered.toLocaleString()} — refreshing…` : 'Verified — refreshing…';
+    // Any recovered orders should show, so bust the Amazon sales cache, then
+    // re-run the audit so the completeness check reflects the fresh sweep.
+    try { await fetch(`/api/amazon/sales?refresh=1&market=${market || 'CA'}`); } catch (e) {}
+    setTimeout(() => { runDataHealthChecks().catch(() => {}); }, 500);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = original;
+    alert('Re-verify failed: ' + (e?.message || e));
   }
 };
 
