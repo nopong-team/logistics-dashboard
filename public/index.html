@@ -2802,9 +2802,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.92</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.93</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.93 &mdash; 29 July 2026 (📦 Stock check reads on-hand, not available)</h4>
+    <ul>
+      <li><strong>Fixed: packed cartons read as zero once allocated to the order.</strong> CIN7 allocates packed cartons to the very orders shown here, which drops each SKU&rsquo;s <em>available</em> to zero even though the cartons are physically on the floor, packed and ready for that order. The check now uses <strong>stock on hand</strong> instead of available, so those packed cartons count and the line reads correctly (green when enough are packed, amber KIT when the shortfall is still loose tins).</li>
+      <li>Amazon FBA stock is still excluded (it can&rsquo;t fulfil a distributor order), and on-hand is reduced when an order is <em>dispatched</em> — so a despatched order&rsquo;s stock is already out of the figure and never double-counted into another order.</li>
+    </ul>
+
     <h4>v2.2.92 &mdash; 29 July 2026 (📦 Green tick means packed cartons; loose tins now flag KIT)</h4>
     <ul>
       <li><strong>A green tick now means cartons are actually packed and ready — not that they <em>could</em> be made.</strong> v2.2.91 counted loose tins toward availability, so a Woolworths line with 0 packed cartons but plenty of loose tins showed a green &ldquo;ready&rdquo; tick. Loose tins aren't cartons — they have to be kitted first — so counting them hid that work. Availability now reflects <strong>packed cartons only</strong> (CIN7&rsquo;s free/available carton stock).</li>

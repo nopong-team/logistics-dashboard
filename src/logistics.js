@@ -363,17 +363,22 @@ function analyseLineItem(item, stockBySku) {
   // tinsNeeded: total tins this line equates to.
   const tinsNeeded = altUom ? qty : qty * multiplier;
 
-  // ── Warehouse-available stock, in the LINE's own unit ─────────────────────
+  // ── Warehouse ON-HAND stock, in the LINE's own unit ───────────────────────
   //
   // fetchStockBySku returns one row per CIN7 product code, and CIN7 tracks
   // each product's stock in its OWN unit. A tin SKU's stock is in tins, but a
   // carton SKU (e.g. AU-CTN-OG-BCF-48) is a *separate* product whose stock is
   // counted in CARTONS — physically assembled and ready to ship.
   //
-  // Warehouse-available for a row = total available minus the FBA branch
-  // (Amazon FBA stock can't fulfil a distributor order).
-  const whAvail = (row) => row
-    ? Math.max(0, (Number(row?.avail) || 0) - (Number(row?.fba_avail) || 0))
+  // We use STOCK ON HAND, not "available". (Mel, 2026-07-29): CIN7 allocates
+  // packed cartons to these very orders, which drops `available` to zero even
+  // though the cartons are physically on the floor, packed and ready for the
+  // order. On-hand reflects what's actually there. FBA branch stock is still
+  // excluded — Amazon FBA stock can't fulfil a distributor order. On-hand is
+  // reduced when an order is DISPATCHED, so a despatched order's stock is
+  // already out of this figure (never double-counted into another order).
+  const whOnHand = (row) => row
+    ? Math.max(0, (Number(row?.soh) || 0) - (Number(row?.fba_soh) || 0))
     : 0;
 
   // A carton SKU is one whose multiplier came from the CODE itself (e.g. the
@@ -388,21 +393,21 @@ function analyseLineItem(item, stockBySku) {
   let kittableCartons = 0;
   let tinsAvailWarehouse;
   if (isCartonSku) {
-    // The carton SKU's own stock is packed cartons. Loose tins on the base SKU
-    // are NOT ready cartons — they must be kitted first — so they are tracked
-    // separately, not folded into "available". (Mel, 2026-07-29: green must
-    // mean real packed cartons; loose tins should flag the team to kit, not
-    // read as done.)
-    cartonsAvailable = whAvail(stockBySku.get(code));
+    // The carton SKU's own on-hand is packed cartons. Loose tins on the base
+    // SKU are NOT ready cartons — they must be kitted first — so they are
+    // tracked separately, not folded into the packed count. (Mel, 2026-07-29:
+    // green must mean real packed cartons; loose tins should flag the team to
+    // kit, not read as done.)
+    cartonsAvailable = whOnHand(stockBySku.get(code));
     const looseTins = (baseSku && baseSku !== code)
-      ? whAvail(stockBySku.get(baseSku))
+      ? whOnHand(stockBySku.get(baseSku))
       : 0;
     kittableCartons = tinsPerCarton > 0 ? Math.floor(looseTins / tinsPerCarton) : 0;
     tinsAvailWarehouse = cartonsAvailable * tinsPerCarton + looseTins;
   } else {
     // Alt-UOM or tin/unit line: the matched stock row is measured in tins.
     // Try the exact code first, then the baseSku.
-    const tins = whAvail(stockBySku.get(code) || stockBySku.get(baseSku));
+    const tins = whOnHand(stockBySku.get(code) || stockBySku.get(baseSku));
     tinsAvailWarehouse = tins;
     cartonsAvailable = isCartonish ? Math.floor(tins / tinsPerCarton) : tins;
   }
