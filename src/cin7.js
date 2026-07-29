@@ -138,7 +138,9 @@ const KV_POS_KEY       = 'au:pos:v11';
 // historical CSV import is the seed; SP-API cron extension is Phase 3b-b).
 // v6 (v2.2.18, 2026-05-16): skuSales rows gained a `woo` field. v5 → v6
 // notes preserved in git history.
-function kvSalesKey(month) { return `au:sales:${month}:v9`; }
+// v10 (v2.2.97, 2026-07-29) — distributor allowlist: 'dist' now only counts the
+// named backend wholesale accounts, not every company-named Woo mirror.
+function kvSalesKey(month) { return `au:sales:${month}:v10`; }
 
 // AU Amazon source cutover — months at-or-after this read 'amz' from CIN7
 // sales orders (channel_attr='amz'); months before read 'amz' from
@@ -813,6 +815,22 @@ const _COLES_DC_NAMES = new Set([
   'kemps creek',           // Coles DC at Kemps Creek NSW
 ]);
 
+// v2.2.97: the DISTRIBUTOR ALLOWLIST. These are the only accounts that place
+// genuine backend/EDI wholesale orders directly into CIN7 (confirmed by Melanie
+// 2026-07-29 from a CIN7 "Channel = Backend" export). Matched case-insensitively
+// as a substring of the company name so minor CIN7 spelling variants still catch.
+// Anything else with a company name is a Woo/website order mirrored into CIN7 for
+// fulfilment — already counted under the Woo channel — and must NOT be counted as
+// a distributor, or the Distributors column double-counts Woo (was ~$81k of a
+// ~$117k July 2026 total). See attributeCin7Order for the numeric-reference guard
+// that also drops a distributor's occasional Woo-placed order.
+const _DIST_COMPANIES = [
+  'momentum foods',
+  'avo trading',
+  'favaro hair spa',                  // "Favaro Hair Spa & Kafe"
+  'sunshine coast health products',   // the Waiva Clark account
+];
+
 // Exported for src/cin7-sync.js (v2.36 Phase A) — caches channel_attr on
 // `cin7_sales_orders` at write time so read-side aggregates are simple
 // GROUP BY queries without per-row attribution logic.
@@ -865,12 +883,25 @@ export function attributeCin7Order(order) {
   // Personal-name single tokens → individual retail orders
   if (_COLES_PERSONAL_MARKERS.has(cl)) return null;
 
-  // Anything else with a real company name → distributor / wholesale.
-  // This is broader than the static side's "Backend channel only" filter
-  // (the API doesn't expose channel) — it'll over-count distributors vs
-  // static for months that have small wholesale orders, which is more
-  // honest than the static under-reporting them.
-  return 'dist';
+  // v2.2.97: distributors are now an explicit allowlist (see _DIST_COMPANIES).
+  // The old rule counted ANY company name as 'dist', which swept in every
+  // Woo/website order that CIN7 mirrors with a company field — double-counting
+  // Woo (~$81k of a ~$117k July total). Only the named backend/EDI wholesale
+  // accounts count now.
+  if (_DIST_COMPANIES.some((name) => cl.includes(name))) {
+    // Even a real distributor sometimes orders through the Woo store; those
+    // mirror into CIN7 carrying the purely-numeric Woo order number as the
+    // reference (genuine backend refs look like SCOA6240-60 / ATRA23-7 /
+    // MFOO29-5). Those Woo-placed orders are already in the Woo channel, so
+    // drop them here too. Verified 2026-07-29: every numeric-ref distributor
+    // order matched a Woo order row with an identical total.
+    if (/^\d+$/.test(reference)) return null;
+    return 'dist';
+  }
+
+  // Any other company name → Woo/website order mirrored into CIN7, not a
+  // distributor. Counted under the Woo channel, so exclude here.
+  return null;
 }
 
 // Backwards-compat shim — old attributeCin7Channel signature is no longer
