@@ -368,11 +368,7 @@ function analyseLineItem(item, stockBySku) {
   // fetchStockBySku returns one row per CIN7 product code, and CIN7 tracks
   // each product's stock in its OWN unit. A tin SKU's stock is in tins, but a
   // carton SKU (e.g. AU-CTN-OG-BCF-48) is a *separate* product whose stock is
-  // counted in CARTONS — assembled and ready to ship. The old code looked up
-  // the carton SKU, read its "available" as if it were tins, and divided by
-  // the carton size again, so 73 ready cartons rendered as floor(73/48)=1.
-  // (Mel, 2026-07-29: "should be 48/48 — the cartons are all made, they're
-  // there, and they're ready to go.")
+  // counted in CARTONS — physically assembled and ready to ship.
   //
   // Warehouse-available for a row = total available minus the FBA branch
   // (Amazon FBA stock can't fulfil a distributor order).
@@ -385,18 +381,24 @@ function analyseLineItem(item, stockBySku) {
   // carry the pack size in uomSize instead.
   const isCartonSku = multiplier > 1 && !altUom;
 
+  // cartonsAvailable = PACKED cartons ready to ship NOW (drives the green tick).
+  // kittableCartons = extra cartons we could ASSEMBLE from loose tins — these
+  // do NOT count as ready; they only tell the team kitting is possible.
   let cartonsAvailable;
+  let kittableCartons = 0;
   let tinsAvailWarehouse;
   if (isCartonSku) {
-    // Two independent pools can fulfil a carton line, so we sum them:
-    //   • assembled cartons booked against the carton SKU (already in cartons)
-    //   • loose tins against the base SKU (÷ carton size = assemblable cartons)
-    const assembledCartons = whAvail(stockBySku.get(code));
+    // The carton SKU's own stock is packed cartons. Loose tins on the base SKU
+    // are NOT ready cartons — they must be kitted first — so they are tracked
+    // separately, not folded into "available". (Mel, 2026-07-29: green must
+    // mean real packed cartons; loose tins should flag the team to kit, not
+    // read as done.)
+    cartonsAvailable = whAvail(stockBySku.get(code));
     const looseTins = (baseSku && baseSku !== code)
       ? whAvail(stockBySku.get(baseSku))
       : 0;
-    cartonsAvailable = assembledCartons + Math.floor(looseTins / tinsPerCarton);
-    tinsAvailWarehouse = assembledCartons * tinsPerCarton + looseTins;
+    kittableCartons = tinsPerCarton > 0 ? Math.floor(looseTins / tinsPerCarton) : 0;
+    tinsAvailWarehouse = cartonsAvailable * tinsPerCarton + looseTins;
   } else {
     // Alt-UOM or tin/unit line: the matched stock row is measured in tins.
     // Try the exact code first, then the baseSku.
@@ -405,11 +407,21 @@ function analyseLineItem(item, stockBySku) {
     cartonsAvailable = isCartonish ? Math.floor(tins / tinsPerCarton) : tins;
   }
 
-  const isFulfillable = cartonsAvailable >= cartonsNeeded && cartonsNeeded > 0;
-  // Display: "60 / 100 cartons" when short, else just the needed count.
+  // Three fulfilment states:
+  //   ready — enough PACKED cartons to ship now                → green tick
+  //   kit   — short on packed, but packed + kittable covers it → amber KIT flag
+  //   short — not enough even after kitting from loose tins    → red
+  const hasNeed = cartonsNeeded > 0;
+  const isFulfillable = hasNeed && cartonsAvailable >= cartonsNeeded;
+  const canKit = hasNeed && !isFulfillable
+    && (cartonsAvailable + kittableCartons) >= cartonsNeeded;
+  const fulfilState = isFulfillable ? 'ready' : (canKit ? 'kit' : 'short');
+  const cartonsToKit = Math.max(0, cartonsNeeded - cartonsAvailable);
+
   const unitLabel = isCartonish ? 'cartons' : 'units';
-  const gapDisplay = isFulfillable
-    ? `${cartonsNeeded} ${unitLabel}`
+  const gapDisplay =
+    fulfilState === 'ready' ? `${cartonsNeeded} ${unitLabel}`
+    : fulfilState === 'kit' ? `${cartonsAvailable}/${cartonsNeeded} packed · kit ${cartonsToKit}`
     : `${cartonsAvailable} / ${cartonsNeeded} ${unitLabel}`;
 
   return {
@@ -419,11 +431,14 @@ function analyseLineItem(item, stockBySku) {
     qty_raw: qty,
     uom_size: uomSize || 1,
     cartons_needed: cartonsNeeded,
-    cartons_available: cartonsAvailable,
+    cartons_available: cartonsAvailable,   // PACKED cartons ready to ship now
+    kittable_cartons: kittableCartons,     // extra cartons assemblable from loose tins
+    cartons_to_kit: cartonsToKit,          // how many still need kitting for this line
     tins_needed: tinsNeeded,
     tins_available: tinsAvailWarehouse,
     unit_label: unitLabel,
-    is_fulfillable: isFulfillable,
+    is_fulfillable: isFulfillable,         // true only when packed cartons cover the order
+    fulfil_state: fulfilState,             // 'ready' | 'kit' | 'short'
     gap_display: gapDisplay,
   };
 }

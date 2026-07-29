@@ -2603,6 +2603,21 @@
         padding: 0 6px;
         font-weight: 700;
       }
+      /* KIT (v2.2.92): packed cartons short, but loose tins can be assembled.
+         Amber so it reads as "action needed" — distinct from green (ready) and
+         red (genuinely short). */
+      #tab-au-logistics .log-line .log-line-tick.kit {
+        background: #FFF4E5;
+        color: #B26A00;
+        border: 1px solid #F0A500;
+        font-size: 11px;
+        width: auto;
+        height: 17px;
+        padding: 0 6px;
+        font-weight: 800;
+        letter-spacing: 0.03em;
+      }
+      #tab-au-logistics .log-line.kit .log-line-qty { color: #B26A00; font-weight: 700; }
       #tab-au-logistics .log-line-sku {
         font-family: ui-monospace, monospace;
         font-size: 13px;
@@ -2787,9 +2802,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.91</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.92</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.92 &mdash; 29 July 2026 (📦 Green tick means packed cartons; loose tins now flag KIT)</h4>
+    <ul>
+      <li><strong>A green tick now means cartons are actually packed and ready — not that they <em>could</em> be made.</strong> v2.2.91 counted loose tins toward availability, so a Woolworths line with 0 packed cartons but plenty of loose tins showed a green &ldquo;ready&rdquo; tick. Loose tins aren't cartons — they have to be kitted first — so counting them hid that work. Availability now reflects <strong>packed cartons only</strong> (CIN7&rsquo;s free/available carton stock).</li>
+      <li><strong>New amber KIT flag.</strong> When a line is short on packed cartons but there are enough loose tins to assemble the rest, it shows an amber <strong>KIT</strong> pill and <code>packed / needed</code> (e.g. <code>73/192 packed</code>) so the team knows to build the shortfall. A line only goes <em>red</em> when there isn&rsquo;t even enough loose stock to kit it. Green stays reserved for cartons on the floor ready to go.</li>
+      <li>Backend exposes <code>fulfil_state</code> (<code>ready</code>/<code>kit</code>/<code>short</code>), <code>kittable_cartons</code> and <code>cartons_to_kit</code> per line. Free (uncommitted) carton stock is used, so a line only counts cartons spare over everything already reserved — a despatched order&rsquo;s stock is never double-counted into another order.</li>
+    </ul>
+
     <h4>v2.2.91 &mdash; 29 July 2026 (📦 Carton stock check counts assembled cartons instead of dividing them away)</h4>
     <ul>
       <li><strong>Fixed: ready-to-ship cartons showed as almost none.</strong> A Coles order for 48 cartons of <code>AU-CTN-OG-BCF-48</code> read <strong>1 / 48</strong> even though 73 assembled cartons were sitting in the warehouse ready to go. CIN7 stocks a carton SKU as its own product counted <em>in cartons</em>, but the stock check was reading that count as loose <em>tins</em> and dividing by the carton size again (73 → <code>floor(73/48)</code> = 1). It now reads carton-SKU stock as cartons, so the same line correctly shows <strong>48 / 48</strong>, fulfillable.</li>
@@ -8836,16 +8858,27 @@ function _logRenderDistributorList(listId, orders, emptyMsg) {
     const lineRows = (o.line_items || []).map((li) => {
       const shortSku = _logShortSku(li.sku || '') || _logEscape(li.sku || '—');
       const unit = li.unit_label || 'cartons';
-      // Tick: green ✓ when fulfillable, red "X/Y" pill when short. The
-      // right-aligned qty mirrors the same source field so a green row reads
-      // "✓ FF-NPV ... 100 cartons" and a red row reads "60/100 FF-NPV ... cartons".
-      const tick = li.is_fulfillable
-        ? `<span class="log-line-tick ok">✓</span>`
-        : `<span class="log-line-tick gap">${_logEscape(`${li.cartons_available}/${li.cartons_needed}`)}</span>`;
-      const qty = li.is_fulfillable
-        ? `${_logFmt(li.cartons_needed)} ${_logEscape(unit)}`
-        : _logEscape(unit);
-      const rowCls = li.is_fulfillable ? 'log-line' : 'log-line gap';
+      // Three states (v2.2.92). Fall back to the old ready/short split for any
+      // payload that predates fulfil_state.
+      const state = li.fulfil_state || (li.is_fulfillable ? 'ready' : 'short');
+      let tick, qty, rowCls;
+      if (state === 'ready') {
+        // Enough PACKED cartons on the floor — ship as-is.
+        tick = `<span class="log-line-tick ok">✓</span>`;
+        qty = `${_logFmt(li.cartons_needed)} ${_logEscape(unit)}`;
+        rowCls = 'log-line';
+      } else if (state === 'kit') {
+        // Short on packed cartons but loose tins can be assembled — flag KIT so
+        // the team builds the shortfall rather than reading the line as done.
+        tick = `<span class="log-line-tick kit">KIT</span>`;
+        qty = `${_logFmt(li.cartons_available)}/${_logFmt(li.cartons_needed)} packed`;
+        rowCls = 'log-line kit';
+      } else {
+        // Not even enough loose tins to kit the shortfall.
+        tick = `<span class="log-line-tick gap">${_logEscape(`${li.cartons_available}/${li.cartons_needed}`)}</span>`;
+        qty = _logEscape(unit);
+        rowCls = 'log-line gap';
+      }
       return `
         <div class="${rowCls}">
           ${tick}
