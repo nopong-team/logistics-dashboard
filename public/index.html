@@ -2787,9 +2787,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.90</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.91</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.91 &mdash; 29 July 2026 (📦 Carton stock check counts assembled cartons instead of dividing them away)</h4>
+    <ul>
+      <li><strong>Fixed: ready-to-ship cartons showed as almost none.</strong> A Coles order for 48 cartons of <code>AU-CTN-OG-BCF-48</code> read <strong>1 / 48</strong> even though 73 assembled cartons were sitting in the warehouse ready to go. CIN7 stocks a carton SKU as its own product counted <em>in cartons</em>, but the stock check was reading that count as loose <em>tins</em> and dividing by the carton size again (73 → <code>floor(73/48)</code> = 1). It now reads carton-SKU stock as cartons, so the same line correctly shows <strong>48 / 48</strong>, fulfillable.</li>
+      <li><strong>Both stock pools now count toward a carton line.</strong> Fulfillability adds assembled cartons booked against the carton SKU <em>plus</em> loose tins against the base SKU (÷ carton size = how many more could be made up) — so a line is green whether the cartons are pre-built, still loose, or a mix. Alt-UOM and plain tin lines are unchanged. Amazon FBA stock is still excluded from distributor fulfilment.</li>
+    </ul>
+
     <h4>v2.2.90 &mdash; 29 July 2026 (📦 Despatched Coles/Woolies orders stay on the Logistics tab until the day after despatch)</h4>
     <ul>
       <li><strong>Despatched orders no longer vanish the instant they're marked shipped.</strong> The warehouse has to mark Coles/Woolworths EDI orders despatched in CIN7 <em>before</em> the freight is actually collected &mdash; so the stock is still on the dock, but the order used to drop straight off the Logistics tab. It now <strong>stays visible until the day after its despatch date</strong>, so the team still knows a ready order is waiting to be picked up on that day.</li>

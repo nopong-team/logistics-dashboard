@@ -363,17 +363,47 @@ function analyseLineItem(item, stockBySku) {
   // tinsNeeded: total tins this line equates to.
   const tinsNeeded = altUom ? qty : qty * multiplier;
 
-  // Stock lookup: try the exact code first, then the baseSku.
-  let stockRow = stockBySku.get(code) || stockBySku.get(baseSku);
-  const tinsAvailWarehouse = stockRow
-    ? Math.max(0, (Number(stockRow.avail) || 0) - (Number(stockRow.fba_avail) || 0))
+  // ── Warehouse-available stock, in the LINE's own unit ─────────────────────
+  //
+  // fetchStockBySku returns one row per CIN7 product code, and CIN7 tracks
+  // each product's stock in its OWN unit. A tin SKU's stock is in tins, but a
+  // carton SKU (e.g. AU-CTN-OG-BCF-48) is a *separate* product whose stock is
+  // counted in CARTONS — assembled and ready to ship. The old code looked up
+  // the carton SKU, read its "available" as if it were tins, and divided by
+  // the carton size again, so 73 ready cartons rendered as floor(73/48)=1.
+  // (Mel, 2026-07-29: "should be 48/48 — the cartons are all made, they're
+  // there, and they're ready to go.")
+  //
+  // Warehouse-available for a row = total available minus the FBA branch
+  // (Amazon FBA stock can't fulfil a distributor order).
+  const whAvail = (row) => row
+    ? Math.max(0, (Number(row?.avail) || 0) - (Number(row?.fba_avail) || 0))
     : 0;
 
-  // Convert warehouse-available tins → cartons of the line's UoM. For tin
-  // SKUs (tinsPerCarton=1), this is just the tin count.
-  const cartonsAvailable = isCartonish
-    ? Math.floor(tinsAvailWarehouse / tinsPerCarton)
-    : tinsAvailWarehouse;
+  // A carton SKU is one whose multiplier came from the CODE itself (e.g. the
+  // trailing -48), NOT from an Alt-UOM line — those keep multiplier 1 and
+  // carry the pack size in uomSize instead.
+  const isCartonSku = multiplier > 1 && !altUom;
+
+  let cartonsAvailable;
+  let tinsAvailWarehouse;
+  if (isCartonSku) {
+    // Two independent pools can fulfil a carton line, so we sum them:
+    //   • assembled cartons booked against the carton SKU (already in cartons)
+    //   • loose tins against the base SKU (÷ carton size = assemblable cartons)
+    const assembledCartons = whAvail(stockBySku.get(code));
+    const looseTins = (baseSku && baseSku !== code)
+      ? whAvail(stockBySku.get(baseSku))
+      : 0;
+    cartonsAvailable = assembledCartons + Math.floor(looseTins / tinsPerCarton);
+    tinsAvailWarehouse = assembledCartons * tinsPerCarton + looseTins;
+  } else {
+    // Alt-UOM or tin/unit line: the matched stock row is measured in tins.
+    // Try the exact code first, then the baseSku.
+    const tins = whAvail(stockBySku.get(code) || stockBySku.get(baseSku));
+    tinsAvailWarehouse = tins;
+    cartonsAvailable = isCartonish ? Math.floor(tins / tinsPerCarton) : tins;
+  }
 
   const isFulfillable = cartonsAvailable >= cartonsNeeded && cartonsNeeded > 0;
   // Display: "60 / 100 cartons" when short, else just the needed count.
