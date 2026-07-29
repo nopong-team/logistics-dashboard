@@ -176,6 +176,46 @@ function dateBefore(a, b) {
   return a < b;
 }
 
+/**
+ * Step a 'YYYY-MM-DD' date by `delta` calendar days (may be negative).
+ * Weekend-agnostic — unlike previousBusinessDay(), this counts every day.
+ * Used to widen the CIN7 fetch window and to compute "yesterday" for the
+ * despatched-order retention rule. Returns YYYY-MM-DD, or null on bad input.
+ */
+function addCalendarDays(yyyyMmDd, delta) {
+  if (!yyyyMmDd) return null;
+  const [y, m, d] = String(yyyyMmDd).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  const t = new Date(Date.UTC(y, m - 1, d));
+  t.setUTCDate(t.getUTCDate() + (Number(delta) || 0));
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`;
+}
+
+/**
+ * Convert a CIN7 dispatchedDate into a Sydney-local 'YYYY-MM-DD' calendar
+ * date. CIN7 returns dispatchedDate as an ISO instant (often UTC with a
+ * trailing Z, e.g. "2026-07-07T14:00:06Z"); at Sydney's +10/+11 offset that
+ * instant can fall on the NEXT calendar day, so a naive first-10-chars slice
+ * would be off by one near midnight. We resolve the true instant and read it
+ * back in Sydney local time (via sydneyParts) so the despatch date matches
+ * what the warehouse sees in CIN7. Bare 'YYYY-MM-DD' values (no time) parse
+ * as UTC midnight and stay on the same Sydney day. Returns null when unset or
+ * unparseable — the caller treats "no despatch date" as "not yet despatched".
+ */
+function dispatchedLocalDate(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const dt = new Date(s);
+  if (!isNaN(dt.getTime())) {
+    return sydneyParts(dt).localDate;
+  }
+  // Fallback: pull the leading calendar date if Date parsing failed.
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+
 // ─── DC / distributor classification ───────────────────────────────────────
 
 /**
@@ -376,21 +416,25 @@ function analyseLineItem(item, stockBySku) {
  * endpoint, vs CIN7's 60/min limit).
  *
  * Filter:
- *   • Server-side `where`: createdDate >= today − 30 days AND status =
- *     'APPROVED' — narrows the response to the right window. CIN7's
- *     where syntax doesn't reliably support IS NULL on dispatchedDate
- *     across all account configs, so we filter that in JS.
- *   • Client-side: dispatchedDate IS NULL — the canonical "still needs
- *     warehouse action" check. An order moves to dispatchedDate=<timestamp>
- *     the moment it ships.
- *   • Client-side: status NOT IN (VOID/VOIDED/CANCELLED) — defensive,
- *     even though the server-side filter already specifies APPROVED.
+ *   • Server-side `where`: EstimatedDeliveryDate >= today − 2 days AND
+ *     status = 'APPROVED' — narrows the response to the right window. The
+ *     −2-day floor (was: today) is deliberately loose so despatched orders
+ *     we still want to show, whose ETD may sit a day or two back, aren't
+ *     excluded at source; the precise keep/drop is done in JS.
+ *   • Client-side: status NOT IN (VOID/VOIDED/CANCELLED) — defensive, even
+ *     though the server-side filter already specifies APPROVED.
+ *   • Client-side retention (Melanie 2026-07-29): the warehouse has to mark
+ *     an order despatched in CIN7 BEFORE the freight is collected, so a
+ *     despatched order still has stock on the dock. We therefore KEEP a
+ *     despatched order (dispatchedDate set) until the day AFTER its despatch
+ *     date, then drop it. Orders not yet despatched keep the original rule:
+ *     ETD today or in the future.
  *
  * Stage is captured in the returned objects (CIN7 returns it when the
  * `fields` whitelist includes it) but not used to filter; dispatchedDate
- * is the more reliable signal. The 0007 migration columns (stage,
- * dispatched_date, delivery_date) get populated on every cron tick now,
- * so other endpoints can use them; just this one bypasses D1.
+ * now drives retention rather than an outright drop. The 0007 migration
+ * columns (stage, dispatched_date, delivery_date) get populated on every
+ * cron tick now, so other endpoints can use them; just this one bypasses D1.
  */
 async function fetchOpenSalesOrdersLive(env, todayLocalDate) {
   // Per Melanie 2026-05-19: "just look for orders with an estimated due
@@ -413,27 +457,56 @@ async function fetchOpenSalesOrdersLive(env, todayLocalDate) {
     'lineItems',
   ].join(',');
 
+  // Retention rule (Melanie 2026-07-29): the warehouse must mark orders
+  // despatched in CIN7 BEFORE the freight is physically collected, which
+  // used to make them vanish from the TV while the stock was still on the
+  // dock waiting for pickup. We now KEEP a despatched order until the day
+  // AFTER its despatch date, so the team knows it's ready-but-not-yet-gone.
+  const yesterdayLocalDate = addCalendarDays(todayLocalDate, -1);
+
   // CIN7 Omni v1 requires full ISO 8601 timestamps in `where` clauses —
-  // bare YYYY-MM-DD returns a 400 "not a valid date time" error. Sydney
-  // midnight today, expressed as UTC, captures "ETD on or after today".
-  const where = `EstimatedDeliveryDate>='${todayLocalDate}T00:00:00Z' AND Status='APPROVED'`;
+  // bare YYYY-MM-DD returns a 400 "not a valid date time" error.
+  //
+  // We widen the server-side ETD floor to today − 2 days (was: today). A
+  // despatched order we still want to show can have an ETD as early as
+  // "yesterday" (same-day-ship retailers despatched yesterday), and the
+  // wall-clock-vs-Sydney offset on CIN7's stored ETD can nudge that another
+  // day. Fetching the small extra window is cheap (AU volume is tiny) and
+  // the precise keep/drop decision is made client-side below.
+  const etdFloorLocalDate = addCalendarDays(todayLocalDate, -2);
+  const where = `EstimatedDeliveryDate>='${etdFloorLocalDate}T00:00:00Z' AND Status='APPROVED'`;
 
   // cin7FetchAll paginates internally with 400ms inter-page sleep. For a
   // 30-day window with No Pong AU volume the response is typically 1-2
   // pages (≤500 orders) so the call completes in under a second.
   const allOrders = await cin7FetchAll(env, 'SalesOrders', { fields, where });
 
-  // Filter to truly-open: no dispatchedDate, not voided. Pre-classifier so
-  // downstream aggregator only sees actionable orders.
+  // Keep/drop, per order:
+  //   • Voided/cancelled → always drop (defensive; server already filters).
+  //   • Despatched (dispatchedDate set) → keep until the day AFTER the
+  //     despatch date, i.e. while dispatchedDay >= yesterday. This is the
+  //     new retention behaviour — previously ANY dispatchedDate dropped it.
+  //   • Not yet despatched → original rule: ETD is today or in the future.
   return allOrders
-    .filter((o) => !o?.dispatchedDate)
     .filter((o) => {
       const status = String(o?.status || '').toUpperCase();
-      return !['VOID', 'VOIDED', 'CANCELLED'].includes(status);
+      if (['VOID', 'VOIDED', 'CANCELLED'].includes(status)) return false;
+
+      const dispatchedDay = dispatchedLocalDate(o?.dispatchedDate);
+      if (dispatchedDay) {
+        // Despatched: visible through the despatch day and the day after it,
+        // then drops. (today <= dispatchedDay + 1)  ⟺  (dispatchedDay >= yesterday)
+        return dispatchedDay >= yesterdayLocalDate;
+      }
+
+      // Still open: only actionable orders with an ETD of today or later.
+      const deliveryDay = parseDeliveryDate(o?.estimatedDeliveryDate);
+      return !!deliveryDay && deliveryDay >= todayLocalDate;
     })
     // Reshape so deliveryDate flows from estimatedDeliveryDate (the actual
-    // ETD field per v2.2.27e probe). createdDate/dispatchedDate/lineItems
-    // are passed through as-is.
+    // ETD field per v2.2.27e probe). createdDate/lineItems pass through as-is.
+    // dispatchedDay is the Sydney-local despatch date (null when still open) —
+    // the aggregator turns it into the is_dispatched flag + display date.
     .map((o) => ({
       id: o.id,
       reference: o.reference,
@@ -443,7 +516,8 @@ async function fetchOpenSalesOrdersLive(env, todayLocalDate) {
       firstName: o.firstName,
       lastName: o.lastName,
       createdDate: o.createdDate,
-      dispatchedDate: o.dispatchedDate, // null by filter above
+      dispatchedDate: o.dispatchedDate || null,
+      dispatchedDay: dispatchedLocalDate(o.dispatchedDate),
       deliveryDate: o.estimatedDeliveryDate || null,
       lineItems: Array.isArray(o.lineItems) ? o.lineItems : [],
     }));
@@ -483,9 +557,17 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
       ? previousBusinessDay(deliveryDate)
       : deliveryDate;
 
+    // Despatched = marked shipped in CIN7 but retained on the TV until the
+    // day after the despatch date (see fetchOpenSalesOrdersLive). These are
+    // ready-and-waiting-for-pickup, not actionable picks.
+    const isDispatched = !!o?.dispatchedDay;
+
     // past-due = must-ship-by date strictly BEFORE today. Same-day still
     // counts as actionable (warehouse can still ship), so it's not red.
-    const isPastDue = mustShipBy ? dateBefore(mustShipBy, todayLocalDate) : false;
+    // A despatched order is done — never flag it past-due.
+    const isPastDue = (!isDispatched && mustShipBy)
+      ? dateBefore(mustShipBy, todayLocalDate)
+      : false;
     if (isPastDue) pastDueCount++;
 
     // Line items: filter children (parentId > 0) and zero-qty rows (zeroed-
@@ -506,6 +588,8 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
       delivery_date: deliveryDate,
       must_ship_by: mustShipBy,
       is_past_due: isPastDue,
+      is_dispatched: isDispatched,
+      dispatched_date: o?.dispatchedDay || null,
       all_fulfillable: allFulfillable,
       group: cls.group,
       retailer: cls.retailer,
@@ -520,8 +604,11 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
     else otherDistributors.push(record);
   }
 
-  // Sort. Coles + Woolies: must-ship-by ascending (nulls to the end).
+  // Sort. Coles + Woolies: must-ship-by ascending (nulls to the end), with
+  // despatched (ready-for-pickup) orders sunk below the still-to-pick ones
+  // so active picks stay at the top of each column.
   const sortByMustShipBy = (a, b) => {
+    if (!!a.is_dispatched !== !!b.is_dispatched) return a.is_dispatched ? 1 : -1;
     const aKey = a.must_ship_by || '9999-12-31';
     const bKey = b.must_ship_by || '9999-12-31';
     return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
@@ -530,8 +617,9 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
   woolies.sort(sortByMustShipBy);
   // Other distributors: by CIN7 reference ascending (older reference =
   // longer wait = more urgent). Numeric-aware comparison so SO-1009 sorts
-  // before SO-1010.
+  // before SO-1010. Despatched orders sink to the bottom here too.
   otherDistributors.sort((a, b) => {
+    if (!!a.is_dispatched !== !!b.is_dispatched) return a.is_dispatched ? 1 : -1;
     const ar = String(a.reference || '');
     const br = String(b.reference || '');
     return ar.localeCompare(br, undefined, { numeric: true, sensitivity: 'base' });

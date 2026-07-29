@@ -2551,6 +2551,26 @@
         color: #C62828;
         font-weight: 700;
       }
+      /* Despatched but retained (v2.2.90): ready + waiting for the carrier.
+         Green tint + badge so the floor reads it as "done, don't re-pick"
+         at a glance rather than a fresh order to action. */
+      #tab-au-logistics .log-order.dispatched {
+        border-color: #1F8B4C;
+        background: #F2FBF5;
+      }
+      #tab-au-logistics .log-dispatched-badge {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 800;
+        color: #1F8B4C;
+        background: #E3F5E9;
+        border: 1px solid #9FD8B4;
+        border-radius: 4px;
+        padding: 1px 6px;
+        margin-bottom: 3px;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+      }
       #tab-au-logistics .log-line {
         display: flex;
         align-items: center;
@@ -2767,9 +2787,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.89</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.90</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.90 &mdash; 29 July 2026 (📦 Despatched Coles/Woolies orders stay on the Logistics tab until the day after despatch)</h4>
+    <ul>
+      <li><strong>Despatched orders no longer vanish the instant they're marked shipped.</strong> The warehouse has to mark Coles/Woolworths EDI orders despatched in CIN7 <em>before</em> the freight is actually collected &mdash; so the stock is still on the dock, but the order used to drop straight off the Logistics tab. It now <strong>stays visible until the day after its despatch date</strong>, so the team still knows a ready order is waiting to be picked up on that day.</li>
+      <li><strong>Retained orders are flagged, not confused with fresh picks.</strong> A despatched order shows a green <em>&ldquo;✓ Despatched &lt;date&gt; &middot; awaiting pickup&rdquo;</em> badge and a green tint, and sinks to the bottom of its column so active picks stay at the top. It never shows as red/past-due &mdash; it's done, just not collected.</li>
+      <li><strong>Backend (<code>src/logistics.js</code>).</strong> <code>fetchOpenSalesOrdersLive()</code> no longer drops an order the moment <code>dispatchedDate</code> is set; instead it keeps despatched orders while <code>dispatchedDay &gt;= yesterday</code> (Sydney local). The server-side ETD floor is widened from <em>today</em> to <em>today &minus; 2 days</em> so retained orders aren't excluded at source, with the precise keep/drop done in JS. Despatch dates are resolved in Sydney local time (<code>dispatchedLocalDate()</code>) so a UTC instant near midnight lands on the right calendar day.</li>
+    </ul>
+
     <h4>v2.2.89 &mdash; 20 July 2026 (🔧 Stock diagnostic reported the pre-fix field)</h4>
     <ul>
       <li><strong>The diagnostic was lying about itself.</strong> <code>/api/au/stock/debug</code> shipped in v2.2.85 with <code>dashboardReads.field</code> hardcoded to <code>openPurchaseOrders</code>. v2.2.86 changed the real code to read <code>incoming</code>, but the diagnostic kept reporting the old name &mdash; so it returned <code>incoming: 0</code> for every SKU and read as though the bug were still live. It now mirrors <code>fetchStockBySku</code> exactly, fallback included.</li>
@@ -8787,7 +8814,16 @@ function _logRenderDistributorList(listId, orders, emptyMsg) {
     return;
   }
   list.innerHTML = orders.map((o) => {
-    const cls = o.is_past_due ? 'log-order past-due' : 'log-order';
+    // Despatched takes precedence over past-due styling: the order's been
+    // marked shipped in CIN7, so it's ready-and-waiting, not overdue.
+    const cls = o.is_dispatched
+      ? 'log-order dispatched'
+      : (o.is_past_due ? 'log-order past-due' : 'log-order');
+    // "Awaiting pickup" badge — shows the despatch date so the team knows
+    // which day the carrier is due. The card drops off the morning after.
+    const dispatchedBadge = o.is_dispatched
+      ? `<div class="log-dispatched-badge">✓ Despatched${o.dispatched_date ? ` ${_logEscape(o.dispatched_date)}` : ''} &middot; awaiting pickup</div>`
+      : '';
     const dateLine = o.must_ship_by
       ? `Must ship by ${_logEscape(o.must_ship_by)}${o.delivery_date && o.delivery_date !== o.must_ship_by ? ` &middot; delivery ${_logEscape(o.delivery_date)}` : ''}`
       : (o.delivery_date ? `Delivery ${_logEscape(o.delivery_date)}` : 'No delivery date');
@@ -8817,6 +8853,7 @@ function _logRenderDistributorList(listId, orders, emptyMsg) {
           <span class="log-order-label">${_logEscape(o.distributor_label || o.company || '—')}${o.is_past_due ? ' · PAST DUE' : ''}</span>
           <span class="log-order-ref">${_logEscape(o.reference || '')}</span>
         </div>
+        ${dispatchedBadge}
         <div class="log-order-date">${dateLine}</div>
         ${lineRows || '<div class="log-empty" style="padding:4px 0;">No line items</div>'}
       </div>`;
