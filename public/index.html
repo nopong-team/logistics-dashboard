@@ -2819,9 +2819,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.95</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.96</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.96 &mdash; 29 July 2026 (📈 New-seller run rate + fixed the &ldquo;No April sales&rdquo; label)</h4>
+    <ul>
+      <li><strong>Fixed a misleading &ldquo;No April sales&rdquo; badge on the Incoming-by-SKU table.</strong> The label was hard-coded (a leftover from the old April static snapshot). What it actually means is &ldquo;no sales in the run-rate window&rdquo; &mdash; the trailing 3 <em>complete</em> months &mdash; so it now reads <strong>&ldquo;No recent sales&rdquo;</strong> with a tooltip that spells that out.</li>
+      <li><strong>Brand-new SKUs now get a provisional run rate instead of reading &ldquo;no sales&rdquo;.</strong> The run rate averages the last 3 <em>complete</em> months, so a SKU that only started selling this month (e.g. <code>AU-B-SB-BCF-35</code> / <code>-NPO-35</code> &mdash; Spearmint Breeze black tins, launched July at ~1,400 tins/mo each) showed zero and sank to the bottom with no Days-left &mdash; even while it was a top seller. Now, if a SKU has no trailing-window history but <em>is</em> selling this month, its run rate (and Days left) is derived from the current month&rsquo;s sales so far and marked with an <strong>asterisk *</strong> so it&rsquo;s clear it&rsquo;s provisional. It firms up to the normal basis once it has a full month of history. The stable trailing-3-month rate is unchanged for every SKU that already had sales.</li>
+      <li><strong>Secret Scenta now drops off the reorder screen entirely.</strong> v2.2.95 hid Secret Scenta (<code>AU-SS…</code>) only once fully sold out; a 23-unit tail (<code>AU-SS25-VLB-35</code>) was still showing. Since it&rsquo;s an annual one-off that&rsquo;s never reordered, it now leaves this reorder/PO table regardless of leftover stock. Its run-down stock still shows on the <em>Inventory SKUs</em> tab.</li>
+    </ul>
     <h4>v2.2.95 &mdash; 29 July 2026 (🫥 Sold-out Secret Scenta drops off the Incoming-by-SKU table)</h4>
     <ul>
       <li><strong>Depleted Secret Scenta (AU-SS…) lines no longer clutter the top of the "Incoming stock by SKU" table.</strong> Secret Scenta is an annual one-off &mdash; a single PO per year (SS25 last year, SS26 this year) with no follow-up reorder &mdash; so once last year's run sells through it just sits at zero. And because zero stock ranks as &ldquo;critical&rdquo;, it was getting bumped to the <em>top</em> of the list (e.g. <code>AU-SS25-BCF-35</code>). Now any Secret Scenta SKU with <strong>no stock on hand and nothing incoming</strong> is dropped from the table entirely.</li>
@@ -9934,7 +9940,7 @@ const AU_RISK_BADGE = {
   'low-incoming':       '<span class="badge warn">Low · PO inbound</span>',
   'monitor':            '<span class="badge" style="background:#FEF3C7;color:#92400E;border-color:#FCD34D;">Monitor</span>',
   'stable':             '<span class="badge ok">Stable</span>',
-  'no-sales':           '<span class="badge" style="background:#F3F4F6;color:#6B7280;border-color:#E5E7EB;">No April sales</span>',
+  'no-sales':           '<span class="badge" style="background:#F3F4F6;color:#6B7280;border-color:#E5E7EB;" title="No sales in the trailing 3 complete months (the run-rate window) and none yet this month — stock on hand but not currently selling.">No recent sales</span>',
   'inactive':           '<span class="badge" style="background:#EFEFEF;color:#6D6D6D;border-color:#D5D5D5;">Inactive</span>',
 };
 
@@ -9963,21 +9969,18 @@ function _auFilterIncomingBySize(rows) {
   return rows.filter(r => _auSizeFromSku(r.sku) === AU_INCOMING_SIZE_FILTER);
 }
 
-// v2.2.95: Secret Scenta (AU-SS…, incl. black-tin AU-B-SS…) is an annual
-// one-off limited edition — one PO per year (SS25 last year, SS26 this year)
-// and the old year is never reordered. Once last year's run sells through, its
-// rows just sit at zero and — because zero stock ranks "critical" — get bumped
-// to the TOP of the Incoming-by-SKU table. Drop any Secret Scenta line that's
-// fully depleted (no stock on hand AND nothing incoming) so only a live SS
-// line ever shows. Same AU-(B-)?SS pattern the forecast already excludes on.
-// The incoming guard means a freshly-ordered SS26 (0 stock, PO on the way)
-// still shows — it only disappears once it's genuinely done.
-function _auIsDepletedSecretScenta(r) {
-  if (!/^AU-(?:B-)?SS\d/.test(String(r && r.sku || ''))) return false;
-  return !((r.current_stock || 0) > 0) && !((r.incoming_qty || 0) > 0);
+// v2.2.96: Secret Scenta (AU-SS…, incl. black-tin AU-B-SS…) is an annual
+// one-off limited edition — one PO per year, never reordered. Per Melanie it
+// has no place on this reorder / PO screen at all, regardless of any leftover
+// stock, so drop EVERY Secret Scenta line here. Its run-down stock still shows
+// on the Inventory SKUs tab. Same AU-(B-)?SS pattern the Forecast excludes on.
+// (v2.2.95 hid only fully-depleted SS; widened to all SS per the 2026-07-29
+// review — a 23-unit tail was still surfacing AU-SS25-VLB-35.)
+function _auIsSecretScenta(r) {
+  return /^AU-(?:B-)?SS\d/.test(String(r && r.sku || ''));
 }
 function _auFilterIncomingRows(rows) {
-  return _auFilterIncomingBySize(rows).filter(r => !_auIsDepletedSecretScenta(r));
+  return _auFilterIncomingBySize(rows).filter(r => !_auIsSecretScenta(r));
 }
 
 function setAuIncomingSizeFilter(size) {
@@ -10079,7 +10082,11 @@ function renderAuIncomingBySku() {
     return `<tr>
       <td><div class="sku-name">${r.sku}</div></td>
       <td class="num">${stockCell}</td>
-      <td class="num">${r.run_rate_per_day > 0 ? r.run_rate_per_day.toFixed(1) : '<span style="color:var(--text-light)">—</span>'}</td>
+      <td class="num">${r.run_rate_per_day > 0
+        ? (r.rate_provisional
+            ? `<span title="Provisional — this SKU has no sales in the trailing 3 complete months yet, so this rate (and Days left) is based on the current month's sales so far. Firms up once it has full-month history.">${r.run_rate_per_day.toFixed(1)}<span style="color:#854F0B;font-weight:600;">*</span></span>`
+            : r.run_rate_per_day.toFixed(1))
+        : '<span style="color:var(--text-light)">—</span>'}</td>
       <td class="num">${daysCell}</td>
       <td class="num">${nextDaysCell}</td>
       <td class="num">${incCell}</td>
