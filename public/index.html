@@ -2819,9 +2819,14 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.94</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.95</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.95 &mdash; 29 July 2026 (🫥 Sold-out Secret Scenta drops off the Incoming-by-SKU table)</h4>
+    <ul>
+      <li><strong>Depleted Secret Scenta (AU-SS…) lines no longer clutter the top of the "Incoming stock by SKU" table.</strong> Secret Scenta is an annual one-off &mdash; a single PO per year (SS25 last year, SS26 this year) with no follow-up reorder &mdash; so once last year's run sells through it just sits at zero. And because zero stock ranks as &ldquo;critical&rdquo;, it was getting bumped to the <em>top</em> of the list (e.g. <code>AU-SS25-BCF-35</code>). Now any Secret Scenta SKU with <strong>no stock on hand and nothing incoming</strong> is dropped from the table entirely.</li>
+      <li><strong>This year's SS still shows the moment it's live.</strong> The rule only hides a fully-depleted line &mdash; as soon as SS26 has stock or an open PO on the way, it appears again, so placing this year's order brings it straight back. Applies to the on-screen table and its CSV export; uses the same <code>AU-(B-)?SS…</code> pattern the Forecast already excludes on.</li>
+    </ul>
     <h4>v2.2.94 &mdash; 29 July 2026 (🧹 Removed the empty Amazon-truth column + fake source pills)</h4>
     <ul>
       <li><strong>Dropped the <em>FBA AU (Amazon &middot; truth)</em> column from the Inventory SKUs table.</strong> It was always an empty <code>— (need SP-API)</code> placeholder waiting on a direct Amazon SP-API connection that the team decided not to pursue &mdash; CIN7 is the agreed source of truth for Amazon FBA stock. The remaining FBA column is now simply labelled <strong>FBA AU (CIN7)</strong>. The now-dead &ldquo;FBA sync drift&rdquo; badge and the <code>|FBA Amazon − FBA CIN7|</code> table hint are gone too, and the CSV export drops the empty <em>FBA Amazon (truth)</em> column.</li>
@@ -9958,6 +9963,23 @@ function _auFilterIncomingBySize(rows) {
   return rows.filter(r => _auSizeFromSku(r.sku) === AU_INCOMING_SIZE_FILTER);
 }
 
+// v2.2.95: Secret Scenta (AU-SS…, incl. black-tin AU-B-SS…) is an annual
+// one-off limited edition — one PO per year (SS25 last year, SS26 this year)
+// and the old year is never reordered. Once last year's run sells through, its
+// rows just sit at zero and — because zero stock ranks "critical" — get bumped
+// to the TOP of the Incoming-by-SKU table. Drop any Secret Scenta line that's
+// fully depleted (no stock on hand AND nothing incoming) so only a live SS
+// line ever shows. Same AU-(B-)?SS pattern the forecast already excludes on.
+// The incoming guard means a freshly-ordered SS26 (0 stock, PO on the way)
+// still shows — it only disappears once it's genuinely done.
+function _auIsDepletedSecretScenta(r) {
+  if (!/^AU-(?:B-)?SS\d/.test(String(r && r.sku || ''))) return false;
+  return !((r.current_stock || 0) > 0) && !((r.incoming_qty || 0) > 0);
+}
+function _auFilterIncomingRows(rows) {
+  return _auFilterIncomingBySize(rows).filter(r => !_auIsDepletedSecretScenta(r));
+}
+
 function setAuIncomingSizeFilter(size) {
   if (size !== 'all' && size !== '35' && size !== '85') size = 'all';
   AU_INCOMING_SIZE_FILTER = size;
@@ -9990,7 +10012,7 @@ function renderAuIncomingBySku() {
     tb.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-secondary);">No per-SKU view yet.</td></tr>`;
     return;
   }
-  const rows = _auFilterIncomingBySize(AU_INCOMING_BY_SKU);
+  const rows = _auFilterIncomingRows(AU_INCOMING_BY_SKU);
   if (rows.length === 0) {
     const sizeLabel = AU_INCOMING_SIZE_FILTER === 'all' ? 'any size' : `${AU_INCOMING_SIZE_FILTER} g`;
     tb.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-secondary);">No SKUs match the ${sizeLabel} filter.</td></tr>`;
@@ -10218,7 +10240,7 @@ function downloadAuIncomingCSV() {
   // finished tins only (raw rollup reverted, see DECISIONS.md 2026-05-27).
   // v2.2.42: stock_loose_tins + stock_from_cartons + stock_carton_count added
   // as drill-down columns so the spreadsheet view matches the tooltip.
-  const rows = _auFilterIncomingBySize(AU_INCOMING_BY_SKU || []);
+  const rows = _auFilterIncomingRows(AU_INCOMING_BY_SKU || []);
   const lines = [[
     'SKU', 'Current stock', 'Run rate (units/day)', 'Days left',
     'Next PO (days)', 'Incoming qty', 'PO ref', 'Risk',
