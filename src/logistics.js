@@ -542,16 +542,21 @@ async function fetchOpenSalesOrdersLive(env, todayLocalDate) {
       const status = String(o?.status || '').toUpperCase();
       if (['VOID', 'VOIDED', 'CANCELLED'].includes(status)) return false;
 
-      const dispatchedDay = dispatchedLocalDate(o?.dispatchedDate);
-      if (dispatchedDay) {
-        // Despatched: visible through the despatch day and the day after it,
-        // then drops. (today <= dispatchedDay + 1)  ⟺  (dispatchedDay >= yesterday)
-        return dispatchedDay >= yesterdayLocalDate;
-      }
-
-      // Still open: only actionable orders with an ETD of today or later.
+      // v2.2.98: retention keys on the ETD (the must-ship-by / freight-
+      // collection date), NOT the despatch-marking date. The warehouse marks
+      // an order despatched in CIN7 when it's STAGED — often days before the
+      // freight is actually collected (≈ the ETD). The old rule keyed retention
+      // on the despatch date, so a staged order dropped off the TV while its
+      // stock was still on the dock awaiting pickup — e.g. Coles R-50397940A:
+      // ETD 2 Aug, marked despatched 28 Jul → vanished 30 Jul, ~5 days before
+      // collection. Keep EVERY order — despatched or not — until the day AFTER
+      // its ETD (etdDay >= yesterday), then drop. Despatched orders still get
+      // the "awaiting pickup" badge + sink to the bottom (see the aggregator),
+      // they just no longer disappear early. This also removes the old rule's
+      // conflict with the server-side ETD floor (today−2): a despatched-but-
+      // retained order whose ETD was future was fetched then wrongly dropped.
       const deliveryDay = parseDeliveryDate(o?.estimatedDeliveryDate);
-      return !!deliveryDay && deliveryDay >= todayLocalDate;
+      return !!deliveryDay && deliveryDay >= yesterdayLocalDate;
     })
     // Reshape so deliveryDate flows from estimatedDeliveryDate (the actual
     // ETD field per v2.2.27e probe). createdDate/lineItems pass through as-is.
