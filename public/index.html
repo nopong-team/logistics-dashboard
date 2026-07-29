@@ -2819,9 +2819,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.96</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.97</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.97 &mdash; 29 July 2026 (🧮 Distributors channel no longer double-counts Woo orders)</h4>
+    <ul>
+      <li><strong>Fixed: the Sales-by-Channel &ldquo;Distributors&rdquo; figure was hugely over-stated because it double-counted Woo orders.</strong> CIN7 mirrors every WooCommerce order for fulfilment, carrying the customer&rsquo;s company name &mdash; and the old rule counted <em>any</em> company-named CIN7 order as a distributor. So all your stockists&rsquo; Woo orders (Go Vita, pharmacies, etc.) were counted <strong>twice</strong>: once under Woo and again under Distributors. For July 2026 that inflated Distributors from a true <strong>~$36k</strong> to <strong>~$118k</strong> (~$81k of it was Woo orders already counted elsewhere).</li>
+      <li><strong>Distributors is now an explicit allowlist</strong> of the accounts that actually place backend/EDI wholesale orders directly in CIN7 &mdash; <em>Momentum Foods, AVO Trading, Favaro Hair Spa &amp; Kafe, Sunshine Coast Health Products</em> &mdash; per Melanie&rsquo;s CIN7 &ldquo;Channel = Backend&rdquo; export. Everything else with a company name is treated as the Woo order it is. Even these distributors&rsquo; occasional Woo-store orders (they come in with a numeric Woo order number) are excluded so they&rsquo;re not double-counted either.</li>
+      <li><strong>Corrected figures:</strong> May $75k&rarr;<strong>$0</strong> (no backend distributor orders that month), June $90k&rarr;<strong>$5.5k</strong>, July $118k&rarr;<strong>$35.9k</strong>. Applied to the live attribution and backfilled across history, so past months read true too. (New distributor to add? It&rsquo;s a one-line change.)</li>
+    </ul>
     <h4>v2.2.96 &mdash; 29 July 2026 (📈 New-seller run rate + fixed the &ldquo;No April sales&rdquo; label)</h4>
     <ul>
       <li><strong>Fixed a misleading &ldquo;No April sales&rdquo; badge on the Incoming-by-SKU table.</strong> The label was hard-coded (a leftover from the old April static snapshot). What it actually means is &ldquo;no sales in the run-rate window&rdquo; &mdash; the trailing 3 <em>complete</em> months &mdash; so it now reads <strong>&ldquo;No recent sales&rdquo;</strong> with a tooltip that spells that out.</li>
