@@ -107,8 +107,11 @@ const KV_INVENTORY_KEY = 'au:inventory:v3';
 // au:pos:v10 (v2.2.86, 2026-07-20) — empty_tins_incoming was always 0 because
 // fetchStockBySku read a CIN7 field name that doesn't exist. Cached entries
 // carry those zeros, so bump rather than serve them.
+// au:pos:v11 (v2.2.96, 2026-07-29) — incomingBySku rows gain rate_provisional;
+// brand-new SKUs with no trailing-window sales now get a provisional run rate
+// from the current month instead of reading "no sales".
 // Future bumps: any time the response shape or filter logic changes.
-const KV_POS_KEY       = 'au:pos:v10';
+const KV_POS_KEY       = 'au:pos:v11';
 // Per-month sales: `au:sales:YYYY-MM:v4`. Helper below to build the key —
 // kept versioned so a payload-shape bump invalidates cleanly. v2 (2026-05-11):
 // `refunds` is now populated from /CreditNotes (was always 0 in v1 because
@@ -2058,7 +2061,7 @@ function shapePoRows(rawPos) {
 // build_incoming_stock_by_sku() rule-for-rule, with one substantive change
 // per Melanie's pick: run rate is now a TRAILING 3-COMPLETE-MONTH average
 // instead of single-month-divided-by-30 (CA-style smoothing).
-function buildIncomingBySku(inventory, posRows, monthSalesPayloads, emptyTins = {}) {
+function buildIncomingBySku(inventory, posRows, monthSalesPayloads, emptyTins = {}, currentMonthPayload = null) {
   // monthSalesPayloads is an array (newest → oldest) of { skuSales, month }
   // objects from getMonthSales(). v2.2.20: each skuSales row's total_tins
   // now sums col + woo2 + dist + woo + amz — i.e. all five AU channels
@@ -2081,6 +2084,24 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads, emptyTins = 
     for (const row of payload.skuSales) {
       const cur = tinsByBase.get(row.sku) || 0;
       tinsByBase.set(row.sku, cur + (row.total_tins || 0));
+    }
+  }
+
+  // v2.2.96: current (incomplete) month sales — the basis for a PROVISIONAL run
+  // rate on brand-new SKUs that have no trailing-window history yet. Kept in a
+  // separate map so it never dilutes the real trailing-3-complete-month rate.
+  // Only trusted when the payload is genuinely THIS calendar month (UTC), so a
+  // stale/mislabelled payload can't quietly feed the provisional path.
+  const currentTinsByBase = new Map();
+  let currentDaysElapsed = 0;
+  {
+    const nowCur = new Date();
+    const curYm = `${nowCur.getUTCFullYear()}-${String(nowCur.getUTCMonth() + 1).padStart(2, '0')}`;
+    if (currentMonthPayload?.month === curYm && Array.isArray(currentMonthPayload.skuSales)) {
+      currentDaysElapsed = nowCur.getUTCDate(); // days elapsed so far this month (>= 1)
+      for (const row of currentMonthPayload.skuSales) {
+        currentTinsByBase.set(row.sku, (currentTinsByBase.get(row.sku) || 0) + (row.total_tins || 0));
+      }
     }
   }
 
@@ -2209,7 +2230,19 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads, emptyTins = 
     const stockBreakdown = baseStock.get(sku) || { loose: 0, fromCartons: 0, cartonCount: 0, fba: 0 };
     const stock = stockBreakdown.loose + stockBreakdown.fromCartons + stockBreakdown.fba;
     const tins  = tinsByBase.get(sku) || 0;
-    const rate  = totalDays > 0 ? tins / totalDays : 0;
+    let rate  = totalDays > 0 ? tins / totalDays : 0;
+    // v2.2.96: a brand-new SKU (no sales across the trailing 3 complete months)
+    // that IS selling this month would otherwise read "no sales" and sink to the
+    // bottom with no days-left — even when it's a top seller (e.g. AU-B-SB-*-35,
+    // Spearmint Breeze, launched July 2026 at ~1,400 tins/mo). If it has current-
+    // (partial-)month sales, derive a PROVISIONAL rate from those (tins ÷ days
+    // elapsed this month) so it gets a real days-left + risk. `rate_provisional`
+    // drives an asterisk in the UI so it's clear this isn't a full-3-month basis.
+    let rateProvisional = false;
+    if (rate === 0 && currentDaysElapsed > 0) {
+      const curTins = currentTinsByBase.get(sku) || 0;
+      if (curTins > 0) { rate = curTins / currentDaysElapsed; rateProvisional = true; }
+    }
     const daysLeft = rate > 0 ? stock / rate : null;
     const inc = incoming.get(sku) || { qty: 0, pos: [] };
 
@@ -2237,6 +2270,7 @@ function buildIncomingBySku(inventory, posRows, monthSalesPayloads, emptyTins = 
       stock_from_cartons: Math.round(stockBreakdown.fromCartons),
       stock_carton_count: Math.round(stockBreakdown.cartonCount),
       run_rate_per_day: Math.round(rate * 10) / 10,
+      rate_provisional: rateProvisional,   // v2.2.96: true = based on current (partial) month only
       days_left:        daysLeft !== null ? Math.round(daysLeft * 10) / 10 : null,
       next_po_days:     nextPo.days,
       next_po_ref:      nextPo.ref,
@@ -2302,6 +2336,18 @@ async function buildAuPosPayload(env) {
     }
   }
 
+  // 2b. Current (incomplete) month — feeds the provisional run rate for
+  //     brand-new SKUs with no trailing-window history yet (v2.2.96). Best-
+  //     effort: if it fails, the provisional path simply doesn't fire.
+  const curNow = new Date();
+  const currentMonth = `${curNow.getUTCFullYear()}-${String(curNow.getUTCMonth() + 1).padStart(2, '0')}`;
+  let currentMonthPayload = null;
+  try {
+    currentMonthPayload = await getMonthSales(env, currentMonth);
+  } catch (e) {
+    console.warn(`AU POs: current-month sales fetch failed for ${currentMonth}:`, e?.message || e);
+  }
+
   // 3. POs from CIN7 — fetch ALL, filter to "open" client-side. Server-side
   //    where-clause was unreliable (see fetchAllPurchaseOrders comment).
   const rawPos = await fetchAllPurchaseOrders(env);
@@ -2312,7 +2358,7 @@ async function buildAuPosPayload(env) {
   const observedLeadTimes = buildObservedLeadTimes(rawPos);
 
   // 4. Derive incoming-by-SKU
-  const incomingBySku = buildIncomingBySku(inventory, pos, monthPayloads, emptyTins);
+  const incomingBySku = buildIncomingBySku(inventory, pos, monthPayloads, emptyTins, currentMonthPayload);
 
   return {
     pos,
@@ -2323,6 +2369,7 @@ async function buildAuPosPayload(env) {
       // tooltip can show "trailing 3 months: Feb / Mar / Apr 2026".
       months: monthPayloads.map((p) => p.month),
       missingMonths: monthList.filter((m) => !monthPayloads.some((p) => p.month === m)),
+      provisionalFromMonth: currentMonthPayload?.month || null, // v2.2.96
       note: 'All 5 channels (Coles + Woolies + Distributors + Woo + Amazon). Full demand picture.',
     },
     lastSync: new Date().toISOString(),
