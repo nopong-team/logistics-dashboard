@@ -27,6 +27,13 @@ import { redactSecrets } from './redact.js';
 
 const SS_V1_BASE = 'https://ssapi.shipstation.com';
 
+// ShipStation store id for "AU Woo LIVE" (WooCommerce, https://www.nopong.com.au),
+// confirmed from GET /stores on 2026-07-30. Used for the on-hold KPI box so it
+// counts ONLY the live Woo store — never "AU Woo Staging" (337135) or any other
+// store. If the store is ever recreated in ShipStation, re-check the id via the
+// /api/au/logistics/ss-stores diagnostic and update this constant.
+const WOO_LIVE_STORE_ID = 341347;
+
 // Service code / requested-service patterns that indicate an Express /
 // faster-than-standard shipping option. Matched case-insensitively against
 // ShipStation v1's `serviceCode` and `requestedShippingService` fields. Add
@@ -207,6 +214,42 @@ async function listShipmentsForLocalDate(env, localDate, { maxPages = 10, pageSi
   return all;
 }
 
+/**
+ * List all ShipStation stores (v1 `GET /stores`). Returns a trimmed shape —
+ * enough to identify which store is "Woo Live" vs "Woo Staging" without
+ * leaking secrets. `showInactive=true` so a paused store still shows.
+ * v1 returns a bare array (not the paginated { ... } wrapper).
+ */
+export async function listShipStationStores(env) {
+  const data = await ssFetch(env, '/stores', { showInactive: 'true' });
+  const stores = Array.isArray(data) ? data : (Array.isArray(data?.stores) ? data.stores : []);
+  return stores.map((s) => ({
+    store_id: s?.storeId ?? null,
+    store_name: s?.storeName ?? null,
+    marketplace: s?.marketplaceName ?? null,
+    account_name: s?.accountName ?? null,
+    integration_url: s?.integrationUrl ?? null,
+    active: s?.active ?? null,
+  }));
+}
+
+/**
+ * Count orders in ShipStation with orderStatus=on_hold for ONE store
+ * (v1 `GET /orders?orderStatus=on_hold&storeId=<id>`). Returns the total the
+ * API reports (page 1 is enough — v1 gives `total` across all pages). We ask
+ * for pageSize=1 to keep the response tiny; we only want the count.
+ */
+export async function countOnHoldOrdersForStore(env, storeId) {
+  if (!storeId) return 0;
+  const data = await ssFetch(env, '/orders', {
+    orderStatus: 'on_hold',
+    storeId,
+    page: 1,
+    pageSize: 1,
+  });
+  return Number(data?.total || 0);
+}
+
 // ─── Public aggregator ─────────────────────────────────────────────────────
 
 /**
@@ -233,14 +276,18 @@ export async function buildShipStationSnapshot(env, { localDate /*, tzOffsetMinu
     expressIntlOpenOrders: [],
     wholesaleOpen: 0,
     wholesaleOpenOrders: [],
+    wooLiveOnHold: null,
   };
   if (!env.SHIPSTATION_API_KEY || !env.SHIPSTATION_API_SECRET) {
     return { ...zero, error: 'SHIPSTATION_API_KEY and/or SHIPSTATION_API_SECRET not configured' };
   }
   try {
-    const [openOrders, shipments] = await Promise.all([
+    const [openOrders, shipments, wooLiveOnHold] = await Promise.all([
       listAwaitingShipment(env),
       listShipmentsForLocalDate(env, localDate),
+      // On-hold count for the AU Woo LIVE store only. Best-effort: on any error
+      // it resolves to null so the other KPIs still render (box shows "—").
+      countOnHoldOrdersForStore(env, WOO_LIVE_STORE_ID).catch(() => null),
     ]);
 
     let shippedTodayItems = 0;
@@ -301,6 +348,7 @@ export async function buildShipStationSnapshot(env, { localDate /*, tzOffsetMinu
       expressIntlOpenOrders: expressIntlSummaries,
       wholesaleOpen: wholesaleSummaries.length,
       wholesaleOpenOrders: wholesaleSummaries,
+      wooLiveOnHold,
     };
   } catch (e) {
     return { ...zero, error: redactSecrets(e?.message || String(e)) };
