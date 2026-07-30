@@ -2447,7 +2447,7 @@
       /* ── KPI row ── */
       #tab-au-logistics .log-kpi-row {
         display: grid;
-        grid-template-columns: repeat(5, 1fr);
+        grid-template-columns: repeat(6, 1fr);
         gap: 10px;
         flex-shrink: 0;
       }
@@ -2726,8 +2726,13 @@
       }
       @media (max-width: 1200px) {
         #tab-au-logistics.active { height: auto; overflow: visible; }
-        #tab-au-logistics .log-kpi-row { grid-template-columns: repeat(3, 1fr); }
         #tab-au-logistics .log-main-row { grid-template-columns: 1fr; }
+      }
+      /* Keep all six KPI boxes on one line down to fairly narrow widths — the
+         numbers are small (thousands at most), so they stay legible; only
+         collapse to 3-up on genuinely narrow screens (phones). */
+      @media (max-width: 820px) {
+        #tab-au-logistics .log-kpi-row { grid-template-columns: repeat(3, 1fr); }
       }
     </style>
 
@@ -2828,9 +2833,13 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.101</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.102</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.102 &mdash; 30 July 2026 (💅 Logistics: all six KPI boxes on one line)</h4>
+    <ul>
+      <li><strong>The KPI strip now fits all six boxes across in a single row</strong> (was five-wide, so the new &ldquo;On hold&rdquo; box wrapped to a second line). Each box is a touch narrower &mdash; the counts top out in the thousands, so they don&rsquo;t need the extra width. Collapses to 3-up only on genuinely narrow screens.</li>
+    </ul>
     <h4>v2.2.101 &mdash; 30 July 2026 (🔧 On-hold box: count per store client-side)</h4>
     <ul>
       <li><strong>Fixed: the &ldquo;On hold&rdquo; box counted every store, not just Woo Live.</strong> It read <strong>7</strong> (4 Woo Live + 3 Woo Staging) because ShipStation&rsquo;s v1 <code>/orders?storeId=</code> server-side filter doesn&rsquo;t actually narrow the result. Now we fetch the on-hold orders and count only those whose own store id is <strong>AU Woo LIVE</strong> (via each order&rsquo;s <code>advancedOptions.storeId</code>), so the box shows the correct <strong>4</strong>.</li>
