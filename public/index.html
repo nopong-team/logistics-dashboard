@@ -2770,6 +2770,11 @@
         <div class="log-card-value" id="log-kpi-wholesale">—</div>
         <div class="log-card-sub" id="log-kpi-wholesale-sub">Open orders</div>
       </div>
+      <div class="log-card">
+        <div class="log-card-label">On hold</div>
+        <div class="log-card-value" id="log-kpi-onhold">—</div>
+        <div class="log-card-sub">Woo Live · on-hold orders</div>
+      </div>
     </div>
 
     <!-- Main row (v2.2.43): three equal columns — Coles | Woolworths | Other
@@ -2823,9 +2828,14 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.99</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.100</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.100 &mdash; 30 July 2026 (🚚 Logistics: new &ldquo;On hold&rdquo; KPI box — Woo Live only)</h4>
+    <ul>
+      <li><strong>New &ldquo;On hold&rdquo; box on the Logistics KPI strip.</strong> Shows the count of orders currently in <code>on_hold</code> status in ShipStation for the <strong>AU Woo LIVE</strong> store only (store 341347, nopong.com.au) &mdash; deliberately excludes AU Woo Staging and every other store. Sits alongside Open queue / Shipped today / Items today / Express-Intl / Wholesale and refreshes on the same 60-second cadence.</li>
+      <li>Backend: <code>countOnHoldOrdersForStore()</code> in <code>src/shipstation.js</code> filters ShipStation v1 <code>/orders</code> by <code>orderStatus=on_hold</code> + <code>storeId</code>; the count joins the ShipStation snapshot as <code>wooLiveOnHold</code> (best-effort &mdash; a fetch hiccup shows &ldquo;—&rdquo; and never dims the other KPIs). A genuine zero shows as <strong>0</strong>. The live store id was confirmed via a new read-only <code>/api/au/logistics/ss-stores</code> diagnostic.</li>
+    </ul>
     <h4>v2.2.99 &mdash; 30 July 2026 (🚚 Logistics: despatched orders no longer run the stock/kit check)</h4>
     <ul>
       <li><strong>Fixed: a despatched order was still showing &ldquo;KIT N cartons&rdquo; as if stock needed assembling.</strong> Once an order is marked despatched in CIN7, it&rsquo;s already picked and the stock has left the system &mdash; so running the packed/kit/short check against <em>current</em> on-hand stock is meaningless (and reads as a shortfall, because that stock is already gone). A despatched Sunshine Coast order was telling the team to kit cartons for an order that was already complete.</li>
@@ -8869,6 +8879,10 @@ function _logisticsRender(data) {
   document.getElementById('log-kpi-shipped-items').textContent = ss.connected ? _logFmt(ss.shippedTodayItems) : '—';
   document.getElementById('log-kpi-express').textContent = ss.connected ? _logFmt(ss.expressIntlOpen) : '—';
   document.getElementById('log-kpi-wholesale').textContent = ss.connected ? _logFmt(ss.wholesaleOpen) : '—';
+  // On-hold (Woo Live store only). null = couldn't fetch → show "—"; a real 0
+  // is a valid count and shows as 0.
+  document.getElementById('log-kpi-onhold').textContent =
+    (ss.connected && ss.wooLiveOnHold != null) ? _logFmt(ss.wooLiveOnHold) : '—';
 
   // Waiva Clark flag — backend sets ss.waiva_clark_open when any open wholesale
   // order has Waiva Clark in the company field. Paints the Wholesale KPI card

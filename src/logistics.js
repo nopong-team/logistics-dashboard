@@ -45,7 +45,7 @@ import {
   normalizeAuSku,
   cin7FetchAll,
 } from './cin7.js';
-import { buildShipStationSnapshot } from './shipstation.js';
+import { buildShipStationSnapshot, listShipStationStores } from './shipstation.js';
 import { redactSecrets } from './redact.js';
 
 export const logisticsRoutes = new Hono();
@@ -723,6 +723,18 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
 }
 
 // ─── Endpoint ──────────────────────────────────────────────────────────────
+
+// Read-only diagnostic: list ShipStation stores so we can identify which one
+// is "Woo Live" (vs Woo Staging) for the on-hold KPI box. Behind SSO like
+// everything else; returns no PII. Safe to leave in place.
+logisticsRoutes.get('/logistics/ss-stores', async (c) => {
+  try {
+    const stores = await listShipStationStores(c.env);
+    return c.json({ ok: true, stores });
+  } catch (e) {
+    return c.json({ ok: false, error: redactSecrets(e?.message || String(e)) }, 500);
+  }
+});
 
 logisticsRoutes.get('/logistics', async (c) => {
   const env = c.env;
