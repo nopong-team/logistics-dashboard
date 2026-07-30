@@ -45,7 +45,7 @@ import {
   normalizeAuSku,
   cin7FetchAll,
 } from './cin7.js';
-import { buildShipStationSnapshot, listShipStationStores } from './shipstation.js';
+import { buildShipStationSnapshot, listShipStationStores, onHoldStoreBreakdown } from './shipstation.js';
 import { redactSecrets } from './redact.js';
 
 export const logisticsRoutes = new Hono();
@@ -729,8 +729,11 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
 // everything else; returns no PII. Safe to leave in place.
 logisticsRoutes.get('/logistics/ss-stores', async (c) => {
   try {
-    const stores = await listShipStationStores(c.env);
-    return c.json({ ok: true, stores });
+    const [stores, onHoldByStore] = await Promise.all([
+      listShipStationStores(c.env),
+      onHoldStoreBreakdown(c.env).catch(() => ({})),
+    ]);
+    return c.json({ ok: true, stores, onHoldByStore });
   } catch (e) {
     return c.json({ ok: false, error: redactSecrets(e?.message || String(e)) }, 500);
   }

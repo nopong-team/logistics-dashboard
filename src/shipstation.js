@@ -234,20 +234,52 @@ export async function listShipStationStores(env) {
 }
 
 /**
- * Count orders in ShipStation with orderStatus=on_hold for ONE store
- * (v1 `GET /orders?orderStatus=on_hold&storeId=<id>`). Returns the total the
- * API reports (page 1 is enough — v1 gives `total` across all pages). We ask
- * for pageSize=1 to keep the response tiny; we only want the count.
+ * Count orders in ShipStation with orderStatus=on_hold for ONE store.
+ *
+ * NOTE (2026-07-30): the v1 `/orders?storeId=<id>` server-side filter does NOT
+ * reliably narrow the result — a query for the Woo LIVE store came back with
+ * the on-hold total across ALL stores (7 = 4 LIVE + 3 Staging). So instead of
+ * trusting `total`, we fetch the on-hold orders (a small set) and count the
+ * ones whose own store id matches, client-side. Each v1 order carries its
+ * store under `advancedOptions.storeId` (with a top-level `storeId` fallback).
  */
 export async function countOnHoldOrdersForStore(env, storeId) {
   if (!storeId) return 0;
-  const data = await ssFetch(env, '/orders', {
-    orderStatus: 'on_hold',
-    storeId,
-    page: 1,
-    pageSize: 1,
-  });
-  return Number(data?.total || 0);
+  const wanted = Number(storeId);
+  let count = 0;
+  for (let page = 1; page <= 10; page++) {
+    const data = await ssFetch(env, '/orders', {
+      orderStatus: 'on_hold',
+      page,
+      pageSize: 500,
+    });
+    const orders = Array.isArray(data?.orders) ? data.orders : [];
+    for (const o of orders) {
+      const sid = Number(o?.advancedOptions?.storeId ?? o?.storeId ?? NaN);
+      if (sid === wanted) count++;
+    }
+    const totalPages = data?.pages || 1;
+    if (page >= totalPages) break;
+  }
+  return count;
+}
+
+/**
+ * Diagnostic: on-hold order count grouped by store id (client-side), so we can
+ * confirm the per-store split matches ShipStation's UI. Returns { "<id>": n }.
+ */
+export async function onHoldStoreBreakdown(env) {
+  const byStore = {};
+  for (let page = 1; page <= 10; page++) {
+    const data = await ssFetch(env, '/orders', { orderStatus: 'on_hold', page, pageSize: 500 });
+    const orders = Array.isArray(data?.orders) ? data.orders : [];
+    for (const o of orders) {
+      const sid = String(o?.advancedOptions?.storeId ?? o?.storeId ?? 'unknown');
+      byStore[sid] = (byStore[sid] || 0) + 1;
+    }
+    if (page >= (data?.pages || 1)) break;
+  }
+  return byStore;
 }
 
 // ─── Public aggregator ─────────────────────────────────────────────────────

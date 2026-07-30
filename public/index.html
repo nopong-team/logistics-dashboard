@@ -2828,9 +2828,13 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.100</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.101</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.101 &mdash; 30 July 2026 (🔧 On-hold box: count per store client-side)</h4>
+    <ul>
+      <li><strong>Fixed: the &ldquo;On hold&rdquo; box counted every store, not just Woo Live.</strong> It read <strong>7</strong> (4 Woo Live + 3 Woo Staging) because ShipStation&rsquo;s v1 <code>/orders?storeId=</code> server-side filter doesn&rsquo;t actually narrow the result. Now we fetch the on-hold orders and count only those whose own store id is <strong>AU Woo LIVE</strong> (via each order&rsquo;s <code>advancedOptions.storeId</code>), so the box shows the correct <strong>4</strong>.</li>
+    </ul>
     <h4>v2.2.100 &mdash; 30 July 2026 (🚚 Logistics: new &ldquo;On hold&rdquo; KPI box — Woo Live only)</h4>
     <ul>
       <li><strong>New &ldquo;On hold&rdquo; box on the Logistics KPI strip.</strong> Shows the count of orders currently in <code>on_hold</code> status in ShipStation for the <strong>AU Woo LIVE</strong> store only (store 341347, nopong.com.au) &mdash; deliberately excludes AU Woo Staging and every other store. Sits alongside Open queue / Shipped today / Items today / Express-Intl / Wholesale and refreshes on the same 60-second cadence.</li>
