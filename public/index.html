@@ -2823,9 +2823,14 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.98</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.99</span> &middot; July 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.99 &mdash; 30 July 2026 (🚚 Logistics: despatched orders no longer run the stock/kit check)</h4>
+    <ul>
+      <li><strong>Fixed: a despatched order was still showing &ldquo;KIT N cartons&rdquo; as if stock needed assembling.</strong> Once an order is marked despatched in CIN7, it&rsquo;s already picked and the stock has left the system &mdash; so running the packed/kit/short check against <em>current</em> on-hand stock is meaningless (and reads as a shortfall, because that stock is already gone). A despatched Sunshine Coast order was telling the team to kit cartons for an order that was already complete.</li>
+      <li><strong>Despatched orders now skip the stock check entirely.</strong> Each line just shows what shipped (a green ✓ and the carton/unit count), and the card keeps its &ldquo;✓ Despatched · awaiting pickup&rdquo; badge. Only orders still to pick run the packed/kit/short comparison.</li>
+    </ul>
     <h4>v2.2.98 &mdash; 30 July 2026 (🚚 Logistics: despatched orders stay until the day after their ETD, not their despatch date)</h4>
     <ul>
       <li><strong>Fixed: Coles/Woolies orders were disappearing off the Logistics tab days too early.</strong> v2.2.90 kept a despatched order visible until the day after its <em>despatch date</em> — but the team marks an order despatched in CIN7 when it&rsquo;s <strong>staged</strong>, often days before the freight is actually collected (which happens around the <strong>ETD</strong>). So a Coles order with an ETD of 2 Aug that was marked despatched on 28 Jul vanished on 30 Jul &mdash; ~5 days before pickup, with the stock still sitting on the dock. That&rsquo;s exactly the &ldquo;ready-but-not-gone&rdquo; problem the retention rule was meant to solve, just keyed on the wrong date.</li>
@@ -8956,8 +8961,11 @@ function _logRenderDistributorList(listId, orders, emptyMsg) {
       // payload that predates fulfil_state.
       const state = li.fulfil_state || (li.is_fulfillable ? 'ready' : 'short');
       let tick, qty, rowCls;
-      if (state === 'ready') {
-        // Enough PACKED cartons on the floor — ship as-is.
+      if (state === 'ready' || state === 'dispatched') {
+        // 'ready'      — enough PACKED cartons on the floor, ship as-is.
+        // 'dispatched' — already shipped out of CIN7 (v2.2.99): no stock check,
+        //                just show what went. The order card carries the
+        //                "✓ Despatched · awaiting pickup" badge for context.
         tick = `<span class="log-line-tick ok">✓</span>`;
         qty = `${_logFmt(li.cartons_needed)} ${_logEscape(unit)}`;
         rowCls = 'log-line';

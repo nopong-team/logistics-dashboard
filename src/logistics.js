@@ -335,7 +335,7 @@ function classifyDistributor(order) {
  * line's SKU and the baseSku (in case stock is held against the rolled-up
  * base only). For Alt UOM lines we always check by the line code.
  */
-function analyseLineItem(item, stockBySku) {
+function analyseLineItem(item, stockBySku, isDispatched = false) {
   const code = String(item?.code || '').trim();
   const qty = Number(item?.qty ?? item?.quantity ?? 0) || 0;
   const uomSize = Number(item?.uomSize ?? 0) || 0;
@@ -362,6 +362,35 @@ function analyseLineItem(item, stockBySku) {
   const cartonsNeeded = altUom ? (qty / uomSize) : qty;
   // tinsNeeded: total tins this line equates to.
   const tinsNeeded = altUom ? qty : qty * multiplier;
+
+  const unitLabel = isCartonish ? 'cartons' : 'units';
+
+  // v2.2.99: a DESPATCHED order is already picked and shipped OUT of CIN7 — its
+  // stock has left on-hand, so running the packed/kit/short check against
+  // current stock is meaningless. It wrongly read "kit N cartons" for an order
+  // that's already complete (Mel 2026-07-30: "if it's dispatched, the cartons
+  // are already picked; it shouldn't be pulling from existing stock"). Skip the
+  // stock comparison entirely and mark the line complete — the order card
+  // already carries the "✓ Despatched · awaiting pickup" badge.
+  if (isDispatched) {
+    return {
+      sku: code || null,
+      base_sku: baseSku || null,
+      name: name || null,
+      qty_raw: qty,
+      uom_size: uomSize || 1,
+      cartons_needed: cartonsNeeded,
+      cartons_available: cartonsNeeded,
+      kittable_cartons: 0,
+      cartons_to_kit: 0,
+      tins_needed: tinsNeeded,
+      tins_available: tinsNeeded,
+      unit_label: unitLabel,
+      is_fulfillable: true,
+      fulfil_state: 'dispatched',
+      gap_display: `${cartonsNeeded} ${unitLabel}`,
+    };
+  }
 
   // ── Warehouse ON-HAND stock, in the LINE's own unit ───────────────────────
   //
@@ -423,7 +452,6 @@ function analyseLineItem(item, stockBySku) {
   const fulfilState = isFulfillable ? 'ready' : (canKit ? 'kit' : 'short');
   const cartonsToKit = Math.max(0, cartonsNeeded - cartonsAvailable);
 
-  const unitLabel = isCartonish ? 'cartons' : 'units';
   const gapDisplay =
     fulfilState === 'ready' ? `${cartonsNeeded} ${unitLabel}`
     : fulfilState === 'kit' ? `${cartonsAvailable}/${cartonsNeeded} packed · kit ${cartonsToKit}`
@@ -632,7 +660,7 @@ function aggregateDistributorOrders(rawOrders, stockBySku, todayLocalDate) {
     const lines = rawLines
       .filter((li) => (Number(li?.parentId) || 0) === 0)
       .filter((li) => (Number(li?.qty ?? li?.quantity ?? 0) || 0) > 0)
-      .map((li) => analyseLineItem(li, stockBySku));
+      .map((li) => analyseLineItem(li, stockBySku, isDispatched));
 
     const allFulfillable = lines.length > 0 && lines.every((l) => l.is_fulfillable);
 
