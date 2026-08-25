@@ -833,13 +833,23 @@ async function pollExistingReportJobs(env, market, maxJobs, deadlineMs) {
   // is plenty. Without this guard, manual admin loops + cron racing each
   // other can eat through MAX_ATTEMPTS in a few minutes and prematurely mark
   // a still-processing report as failed.
+  //
+  // v2.51 — poll least-recently-polled first, not lowest-id first. `ORDER BY id
+  // ASC LIMIT 3` meant three low-id jobs sitting in Amazon's IN_PROGRESS queue
+  // consumed every poll slot, tick after tick, and higher-id jobs were never
+  // looked at — the exact starvation Phase B0 (POST) was fixed for in v2.40,
+  // left unfixed in Phase B1 (poll). It shows up whenever several ranges are
+  // in flight at once, i.e. precisely during a multi-range recovery: the
+  // newest, most-wanted months queue behind the oldest. Fair round-robin
+  // ordering means every in-flight job is checked each tick.
   const jobs = await env.DB.prepare(
     `SELECT * FROM report_jobs
      WHERE source = 'amazon' AND market = ? AND status = 'pending'
        AND amazon_report_id IS NOT NULL
        AND (last_polled_at IS NULL
             OR (julianday('now') - julianday(last_polled_at)) * 86400.0 > ?)
-     ORDER BY id ASC LIMIT ?`,
+     ORDER BY last_polled_at IS NOT NULL, last_polled_at ASC, id ASC
+     LIMIT ?`,
   ).bind(market, MIN_POLL_INTERVAL_S, maxJobs).all();
   let advanced = 0;
   for (const job of (jobs.results || [])) {
@@ -1119,6 +1129,12 @@ export async function runAmazonReportsTick(env, market, options = {}) {
   const startMs    = Date.now();
   const deadlineMs = startMs + (options.budgetMs || CRON_TICK_BUDGET_MS);
   const maxJobs    = options.maxJobsPerPhase || 3;
+  // Polling is a single cheap GET per job (~500ms), so it gets a much larger
+  // per-tick allowance than ingestion (which downloads, gunzips and parses a
+  // whole report). Both still stop at the shared wall-clock deadline. Without
+  // this, a recovery of N ranges took N/3 ticks just to NOTICE the reports
+  // were ready, on top of Amazon's own generation time.
+  const maxPollJobs = options.maxPollJobsPerTick || 12;
 
   let seeded = 0, posted = 0, polled = 0, ingested = 0;
   let postError = null;
@@ -1131,7 +1147,7 @@ export async function runAmazonReportsTick(env, market, options = {}) {
       postError = r.lastError;
     }
     if (Date.now() < deadlineMs) {
-      polled = await pollExistingReportJobs(env, market, maxJobs, deadlineMs);
+      polled = await pollExistingReportJobs(env, market, maxPollJobs, deadlineMs);
     }
     if (Date.now() < deadlineMs) {
       ingested = await ingestReadyJobs(env, market, maxJobs, deadlineMs);
