@@ -105,6 +105,13 @@ const FBA_INVENTORY_MAX_PAGES = 10;
 // ranges are seeded once and never re-run.
 const ACTIVE_RANGE_STALE_HOURS = 24;
 
+// v2.52 — how far the incremental Orders watermark may be held back by an
+// order that hasn't settled yet. The watermark means "every order at or before
+// this instant is final"; an unsettled order in the window pins it. A payment
+// that never authorises would otherwise pin it forever, so the hold is bounded:
+// past this, the watermark moves on and the safety-net sweeps own the tail.
+const MAX_WATERMARK_HOLD_HOURS = 72;
+
 // v2.50 — self-healing report ranges.
 //
 // A `failed` range used to be a permanent dead end: seedReportJobsIfNeeded()
@@ -344,9 +351,22 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
   const mp = AMAZON_MARKETPLACES[market];
   if (!mp) throw new Error(`Unknown Amazon market: ${market}`);
 
-  const action       = options.action || 'amazon-incremental';
-  const isBackfill   = action === 'amazon-backfill';
-  const statusFilter = isBackfill ? null : 'Unshipped,Shipped';
+  const action     = options.action || 'amazon-incremental';
+  // v2.52 — no server-side OrderStatuses filter, ever.
+  //
+  // The incremental used to ask Amazon for 'Unshipped,Shipped' only. A brand-new
+  // order is 'Pending' while payment authorises, so it was excluded from the
+  // response — and the watermark then advanced to the newest order Amazon DID
+  // return, stepping straight over it. `CreatedAfter=watermark` on the next tick
+  // starts after the skipped order, so the incremental never looked at it again;
+  // it existed only if a later safety-net sweep happened to cover it. Orders
+  // that stayed Pending longer than the 2-day short sweep's window were found
+  // only by the Sunday 45-day sweep, which is why CA August still showed 7.4%
+  // recovered (62 orders) after every other guard had run.
+  //
+  // Fetching unfiltered costs nothing extra (same call, same page size) and is
+  // what makes the watermark hold below possible: we cannot refuse to step over
+  // an order we were never shown.
 
   // Get watermark.
   await env.DB.prepare(
@@ -367,7 +387,6 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
       MarketplaceIds: mp.id,
       CreatedAfter:   watermarkBefore,
     };
-    if (statusFilter) params.OrderStatuses = statusFilter;
   }
 
   let data;
@@ -411,12 +430,22 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
   const newNext = data?.payload?.NextToken || null;
 
   // Filter: defensive marketplace check + skip canceled/pending.
-  const usable = orders.filter((o) => {
-    if (o.MarketplaceId && o.MarketplaceId !== mp.id) return false;
+  const inMarket = orders.filter((o) => !(o.MarketplaceId && o.MarketplaceId !== mp.id) && !!o.AmazonOrderId);
+  const usable   = inMarket.filter((o) => {
     const st = o.OrderStatus || '';
-    if (st === 'Canceled' || st === 'Pending' || st === 'PendingAvailability') return false;
-    return !!o.AmazonOrderId;
+    return st !== 'Canceled' && st !== 'Pending' && st !== 'PendingAvailability';
   });
+  // Orders that may still become countable. 'Canceled' is final and is NOT
+  // unsettled — holding the watermark for a cancellation would pin it forever.
+  const unsettled = inMarket.filter((o) => {
+    const st = o.OrderStatus || '';
+    return st === 'Pending' || st === 'PendingAvailability';
+  });
+  let oldestUnsettled = null;
+  for (const o of unsettled) {
+    const pd = o.PurchaseDate || '';
+    if (pd && (oldestUnsettled === null || pd < oldestUnsettled)) oldestUnsettled = pd;
+  }
 
   let watermarkAfter = watermarkBefore;
   let ordersAdded   = 0;
@@ -454,6 +483,51 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
     }
   }
 
+  // ── Watermark hold (v2.52) ────────────────────────────────────────────────
+  //
+  // The watermark's contract is "every order at or before this instant is
+  // final". Advancing it past an order that is still Pending breaks that
+  // contract permanently, because CreatedAfter=watermark never looks back —
+  // that single step is what has been quietly losing orders all along.
+  //
+  // So: never advance to or past the oldest unsettled order in this page. Back
+  // off one second before it, and the next tick re-scans from there and keeps
+  // re-scanning until it settles (or is cancelled, which is final and does not
+  // hold). Bounded by MAX_WATERMARK_HOLD_HOURS so a payment that never
+  // authorises cannot freeze the sync — past that the watermark moves on and
+  // the safety-net sweeps own the tail, which is the situation we're in today
+  // for every order rather than just the pathological ones.
+  //
+  // The hold must be STICKY across a paginated drain. Each page re-reads the
+  // watermark from D1, so without this a later page — which never sees the
+  // unsettled order sitting on an earlier one — would compute a watermark past
+  // it and silently undo the hold. The caller threads the tightest hold seen so
+  // far back in as `holdFloor`.
+  let heldBy = null;
+  const holdFloor = options.holdFloor || null;
+  if (holdFloor && holdFloor < watermarkAfter) {
+    watermarkAfter = holdFloor > watermarkBefore ? holdFloor : watermarkBefore;
+    heldBy = { at: holdFloor, capped: false, applied: watermarkAfter };
+  }
+  if (oldestUnsettled) {
+    // Normalise to Amazon's own second-precision shape. The watermark is
+    // compared as a STRING against PurchaseDate values throughout this
+    // function, so a stray '.000Z' from toISOString() would put a millisecond
+    // field up against a 'Z' and make the ordering depend on ASCII punctuation.
+    const isoSec = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const holdTo = isoSec(Date.parse(oldestUnsettled) - 1000);
+    if (holdTo < watermarkAfter) {
+      const floor = isoSec(Date.now() - MAX_WATERMARK_HOLD_HOURS * 3600_000);
+      // Don't hold further back than the floor, and never rewind behind where
+      // this run started — the scan has to keep moving forward.
+      const bounded = holdTo > floor ? holdTo : floor;
+      if (bounded < watermarkAfter) {
+        watermarkAfter = bounded > watermarkBefore ? bounded : watermarkBefore;
+        heldBy = { at: oldestUnsettled, capped: bounded === floor, applied: watermarkAfter };
+      }
+    }
+  }
+
   // Heartbeat: always update last_synced_at on a successful run, even if no
   // new orders came back. Same rationale as runBackfillChunk in src/admin.js
   // — the chip on the dashboard reads this field to answer "when did we
@@ -478,6 +552,12 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
   ).bind(
     market, action, ordersAdded, watermarkBefore, watermarkAfter, Date.now() - startMs,
   ).run();
+  if (heldBy) {
+    console.log(
+      `Amazon ${market}: watermark held at ${heldBy.applied} by unsettled order at ` +
+      `${heldBy.at}${heldBy.capped ? ` (capped at the ${MAX_WATERMARK_HOLD_HOURS}h floor)` : ''}`,
+    );
+  }
 
   return {
     ok:               true,
@@ -487,6 +567,8 @@ export async function runAmazonOrdersChunk(env, market, options = {}) {
     pagesFetched:     1,
     rowsFetched:      orders.length,
     ordersAdded,
+    unsettledSeen:    unsettled.length,
+    watermarkHeld:    heldBy ? heldBy.applied : null,
     watermarkBefore,
     watermarkAfter,
     nextToken:        newNext,
