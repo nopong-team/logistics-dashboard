@@ -203,6 +203,13 @@ async function runWooCronSync(env) {
 // wall-clock guard each). Markets run in parallel — Workers Free scheduled
 // handlers have a 30s wall-clock cap and the sequential path could push past
 // it when both markets have heavy report ingests in the same tick.
+// Per-tick bounds for the incremental Orders drain. Scheduled handlers have a
+// 30s wall-clock cap shared with the Reports tick and the gated safety-net, so
+// the drain stays deliberately small — it only needs to outpace order volume
+// across a held-back window, not backfill.
+const MAX_ORDER_PAGES        = 4;
+const ORDER_DRAIN_BUDGET_MS  = 8000;
+
 async function runAmazonCronSync(env) {
   if (!(env.AMAZON_REFRESH_TOKEN && env.AMAZON_LWA_CLIENT_ID && env.AMAZON_LWA_CLIENT_SECRET)) {
     console.log('Amazon cron sync skipped: secrets not configured');
@@ -210,7 +217,27 @@ async function runAmazonCronSync(env) {
   }
   async function syncOne(market) {
     try {
-      const ord = await runAmazonOrdersChunk(env, market, { action: 'amazon-incremental' });
+      // v2.52 — drain up to MAX_ORDER_PAGES pages per tick instead of exactly
+      // one. Holding the watermark behind an unsettled order (see
+      // runAmazonOrdersChunk) means the scan window no longer collapses to
+      // "everything since the last tick" — it can span up to 72h, which for CA
+      // is comfortably more than one 100-order page. One page per tick would
+      // then never reach the newest orders. The tightest hold is threaded
+      // through every page so a later page can't undo an earlier page's hold.
+      let ord = null, token = null, hold = null, pages = 0;
+      const drainUntil = Date.now() + ORDER_DRAIN_BUDGET_MS;
+      do {
+        ord = await runAmazonOrdersChunk(env, market, {
+          action: 'amazon-incremental', nextToken: token, holdFloor: hold,
+        });
+        if (!ord.ok) break;                       // rate-limited — resume next tick
+        if (ord.watermarkHeld && (!hold || ord.watermarkHeld < hold)) hold = ord.watermarkHeld;
+        token = ord.more ? ord.nextToken : null;
+        pages++;
+      } while (token && pages < MAX_ORDER_PAGES && Date.now() < drainUntil);
+      if (token) {
+        console.log(`Amazon cron ${market}: stopped after ${pages} page(s) with more pending — resumes next tick`);
+      }
       if (ord.ordersAdded > 0) {
         await invalidateAmazonSalesCache(env, market);
         console.log(
