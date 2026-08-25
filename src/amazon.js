@@ -105,6 +105,28 @@ const FBA_INVENTORY_MAX_PAGES = 10;
 // ranges are seeded once and never re-run.
 const ACTIVE_RANGE_STALE_HOURS = 24;
 
+// v2.50 — self-healing report ranges.
+//
+// A `failed` range used to be a permanent dead end: seedReportJobsIfNeeded()
+// skipped it forever ("manual intervention required"), so one transient failure
+// silently erased that half-month of Amazon SKU data with nothing to flag it.
+// That is exactly how CA lost 2026-05-2h, 2026-06-1h/2h, 2026-07-2h and both
+// 2026-08 halves — the dashboard still showed the month, just with a fraction
+// of the units, which is worse than showing nothing.
+//
+// Two guards replace the dead end:
+//   MIN_RANGE_OPEN_HOURS   — don't POST a range until its window has been open
+//                            this long. Every range was previously first POSTed
+//                            at 04:00 UTC on the 1st of its month, when the
+//                            window held no shipments yet and Amazon answers
+//                            CANCELLED (= "no data for this range"), which the
+//                            poller then recorded as a hard failure.
+//   FAILED_RANGE_RETRY_HOURS — retry a failed range on a cooldown instead of
+//                            never. Covers genuinely transient failures too
+//                            (2026-07-2h died as "Stuck in IN_PROGRESS").
+const MIN_RANGE_OPEN_HOURS     = 12;
+const FAILED_RANGE_RETRY_HOURS = 6;
+
 // ─── SKU map (lifted verbatim from legacy backend/server.js) ───────────────
 //
 // Maps Amazon seller SKUs (canonical CA-/US- codes AND FNSKU-style aliases)
@@ -510,8 +532,34 @@ export async function runAmazonSafetyNetBackfill(env, market, {
   // recovered. That "recovered %" is the completeness signal the Data Health
   // tab reads — a silent undercount finally becomes visible from inside the
   // system, because the safety-net re-counts against Amazon's own truth.
-  const reconcileFloor = recordReconcile ? amazonReconcileFloor() : null;
-  const reconcileBefore = recordReconcile ? await snapshotAmazonMonths(env, market, reconcileFloor) : null;
+  //
+  // v2.50 — the BEFORE snapshot survives chunking. A 45-day CA window is ~14
+  // pages and does not fit one call, so the sweep is driven as several chunked
+  // requests (see the Data Health "Re-verify now" button). Previously each call
+  // took its own BEFORE snapshot and only recorded when it finished the whole
+  // window in one go, so for CA the reconciliation could never be written at
+  // all — and a naive chunked version would diff the last chunk against counts
+  // the earlier chunks had already topped up, reporting a falsely clean ~0%.
+  // Stash BEFORE in KV on the first call; every continuation reuses it.
+  const reconcileFloor  = recordReconcile ? amazonReconcileFloor() : null;
+  const pendingKey      = `amazon-reconcile-pending-${market.toLowerCase()}`;
+  let   reconcileBefore = null;
+  if (recordReconcile) {
+    if (startToken && env.CACHE) {
+      const pend = await env.CACHE.get(pendingKey, 'json').catch(() => null);
+      if (pend?.floor === reconcileFloor) reconcileBefore = pend.before || null;
+    }
+    if (!reconcileBefore) {
+      reconcileBefore = await snapshotAmazonMonths(env, market, reconcileFloor);
+      if (env.CACHE) {
+        try {
+          await env.CACHE.put(pendingKey, JSON.stringify({
+            floor: reconcileFloor, before: reconcileBefore, startedAt: new Date().toISOString(),
+          }));
+        } catch (e) { /* best-effort telemetry — never fail the sweep on KV */ }
+      }
+    }
+  }
   let nextToken     = startToken;
   let pagesFetched  = 0;
   let ordersUpserted = 0;
@@ -614,6 +662,7 @@ export async function runAmazonSafetyNetBackfill(env, market, {
     reconcile = { ranAt: new Date().toISOString(), sinceISO, sinceDays, worstRecoveredPct: worstPct, months };
     try {
       await env.CACHE.put(`amazon-reconcile-${market.toLowerCase()}`, JSON.stringify(reconcile));
+      await env.CACHE.delete(pendingKey);
     } catch (e) { /* KV write best-effort — never fail the sweep on telemetry */ }
   }
 
@@ -689,6 +738,11 @@ async function seedReportJobsIfNeeded(env, market) {
   const ranges = buildReportRanges();
   let seeded = 0;
   for (const r of ranges) {
+    // Never POST a range whose window has only just opened — Amazon answers
+    // CANCELLED for a range with no data, and CANCELLED is indistinguishable
+    // from a real failure. Wait until the window has plausibly accumulated
+    // shipments; the range is seeded on a later tick instead of dying on the 1st.
+    if (Date.now() - Date.parse(r.data_start_time) < MIN_RANGE_OPEN_HOURS * 3600_000) continue;
     // Most recent job for this (market, range_label). Age computed in SQL —
     // SQLite's strftime('%Y-%m-%dT%H:%M:%SZ','now') format ('YYYY-MM-DD HH:MM:SS' UTC) doesn't
     // round-trip cleanly through JS Date, but julianday() handles it natively.
@@ -700,8 +754,10 @@ async function seedReportJobsIfNeeded(env, market) {
     ).bind(market, r.range_label).first();
     if (last) {
       if (last.status === 'pending' || last.status === 'ready') continue; // in-flight
-      if (last.status === 'failed') continue; // manual intervention required
-      if (last.status === 'ingested') {
+      if (last.status === 'failed') {
+        // Retry on a cooldown rather than never (see FAILED_RANGE_RETRY_HOURS).
+        if ((last.age_hours ?? 0) < FAILED_RANGE_RETRY_HOURS) continue;
+      } else if (last.status === 'ingested') {
         if (!r.isActive) continue; // frozen — historical, never re-seed
         if ((last.age_hours ?? 0) < ACTIVE_RANGE_STALE_HOURS) continue; // fresh enough
       }
