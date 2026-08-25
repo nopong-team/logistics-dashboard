@@ -1367,8 +1367,13 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.50</span> &middot; August 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.51</span> &middot; August 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.51 &mdash; 25 August 2026 (⏱️ Report polling no longer starves the newest months)</h4>
+    <ul>
+      <li><strong>Fixed: in-flight reports were polled lowest-id-first, three per tick.</strong> Three old reports sitting in Amazon&rsquo;s processing queue consumed every poll slot, tick after tick, so newer ranges were never even checked &mdash; they queued behind the oldest. This is the same starvation that was fixed for report <em>submission</em> in v2.40 and left in place for report <em>polling</em>. It only bites when several ranges are in flight at once &mdash; which is exactly what a multi-range recovery is, so the v2.50 backfill was delivering May before July and August. Polling is now least-recently-polled first, so every in-flight report is checked every tick.</li>
+      <li><strong>Polling allowance raised from 3 to 12 per market per tick.</strong> A poll is one cheap status GET; an ingest downloads, unzips and parses a whole report. They were sharing a single limit sized for the expensive one, which meant a recovery of N ranges spent N/3 cron ticks just noticing the reports were ready. Ingestion is unchanged at 3, and both still stop at the same wall-clock budget.</li>
+    </ul>
     <h4>v2.50 &mdash; 25 August 2026 (🩹 Amazon SKU reports now heal themselves &mdash; and a missing half-month is finally visible)</h4>
     <ul>
       <li><strong>Fixed: a failed SKU report killed that half-month permanently.</strong> Amazon per-SKU data arrives as one report per half-month. If a report failed, the seeder skipped it forever (&ldquo;manual intervention required&rdquo;) &mdash; nothing ever retried it. Combined with the fact that every range was first requested at 04:00&nbsp;UTC on the 1st of its month, when the window still held no shipments and Amazon answers <em>CANCELLED</em> (its way of saying &ldquo;no data&rdquo;), whole half-months were being written off on day one. Canada had lost <strong>2026-05 2nd half, both halves of June, 2026-07 2nd half and both halves of August</strong>; the US had lost the same six. Ranges now retry on a 6-hour cooldown, and are no longer requested until their window has been open 12 hours.</li>
