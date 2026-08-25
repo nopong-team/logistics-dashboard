@@ -1367,8 +1367,15 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.49</span> &middot; July 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.50</span> &middot; August 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.50 &mdash; 25 August 2026 (🩹 Amazon SKU reports now heal themselves &mdash; and a missing half-month is finally visible)</h4>
+    <ul>
+      <li><strong>Fixed: a failed SKU report killed that half-month permanently.</strong> Amazon per-SKU data arrives as one report per half-month. If a report failed, the seeder skipped it forever (&ldquo;manual intervention required&rdquo;) &mdash; nothing ever retried it. Combined with the fact that every range was first requested at 04:00&nbsp;UTC on the 1st of its month, when the window still held no shipments and Amazon answers <em>CANCELLED</em> (its way of saying &ldquo;no data&rdquo;), whole half-months were being written off on day one. Canada had lost <strong>2026-05 2nd half, both halves of June, 2026-07 2nd half and both halves of August</strong>; the US had lost the same six. Ranges now retry on a 6-hour cooldown, and are no longer requested until their window has been open 12 hours.</li>
+      <li><strong>This is what made July look wrong.</strong> CA July showed 1,371 Amazon orders against only 599 units sold, because only 1&ndash;15 July had ever been ingested &mdash; 16&ndash;31 July was missing outright. August had no per-SKU data at all. Orders and revenue were never affected (they come from a separate feed); it was only the per-SKU breakdown that was short. The missing periods are being re-fetched now.</li>
+      <li><strong>New check &mdash; &ldquo;Amazon CA/US: SKU report coverage&rdquo;.</strong> Every other Amazon check inspects the rows we already hold for internal consistency; none of them could see a half-month that never arrived, because missing rows can&rsquo;t be inconsistent &mdash; the month just quietly read low. Data Health now reports, per market, whether every closed half-month has an ingested report, names any that don&rsquo;t, and says plainly that per-SKU figures for those periods are understated. This is the check that would have caught it in May.</li>
+      <li><strong>Fixed: &ldquo;Re-verify now&rdquo; always failed on Canada.</strong> A 45-day CA sweep is ~14 paged Amazon calls and ran past the edge request timeout, so the button ended in <em>Re-verify failed</em> &mdash; and even had it returned, the old endpoint only recorded a result when it covered the whole window in a single call, so the badge could never have gone green. The sweep now runs as short chunks driven to completion, carrying its &ldquo;before&rdquo; snapshot across them so the recovered-orders figure stays honest. The button shows progress as it goes.</li>
+    </ul>
     <h4>v2.49 &mdash; 29 July 2026 (🔄 &ldquo;Re-verify now&rdquo; button on the Amazon completeness check)</h4>
     <ul>
       <li><strong>New self-serve button in the Data Health panel.</strong> When the &ldquo;Amazon CA/US: completeness&rdquo; check shows amber or red (or any time you want to force a fresh check), a <strong>Re-verify now</strong> button runs the same 45-day deep safety-net the Sunday cron runs &mdash; for that market &mdash; straight from your logged-in session. It re-counts stored Amazon orders against Amazon&rsquo;s own totals, recovers any the live sync missed, then re-reads the result so the badge updates on its own &mdash; no waiting until Sunday, no terminal or keys. The button shows progress in place (&ldquo;Re-verifying…&rdquo; &rarr; &ldquo;Recovered N — refreshing…&rdquo;). Per-market so each run stays well under the request timeout.</li>
@@ -10549,6 +10556,33 @@ async function runDataHealthChecks() {
     }
   }
 
+  // ── Check 3f0: Amazon SKU-report coverage — is any half-month MISSING? ──
+  // Amazon per-SKU data arrives as one report per half-month. Every check above
+  // this line inspects rows we already have; none can see a half-month whose
+  // report never landed, because missing rows can't be inconsistent — the month
+  // simply reads low. That is what made CA July show 1,371 orders against 599
+  // units: 2026-07-2h had died `failed` and, before v2.50, nothing ever retried
+  // it. This check reads the per-range job state so a hole is loud, not silent.
+  if (audit?.amazon?.reportCoverage) {
+    for (const mkt of ['CA', 'US']) {
+      const cov = audit.amazon.reportCoverage[mkt];
+      if (!cov || !Array.isArray(cov.ranges) || cov.ranges.length === 0) continue;
+      const missing  = cov.missing  || [];
+      const inFlight = cov.inFlight || [];
+      const fmt = (r) => r.label.replace(/-1h$/, ' 1st half').replace(/-2h$/, ' 2nd half');
+      if (missing.length > 0) {
+        checks.push({ status: 'fail', name: `Amazon ${mkt}: SKU report coverage`,
+          detail: `${missing.length} closed half-month${missing.length > 1 ? 's have' : ' has'} no ingested SKU report — ${missing.map(fmt).join(', ')}. Per-SKU units and revenue for those periods are understated (orders are unaffected — they come from a different feed). These re-seed automatically within ${6}h; if one keeps failing, check its error in report_jobs.` });
+      } else if (inFlight.length > 0) {
+        checks.push({ status: 'warn', name: `Amazon ${mkt}: SKU report coverage`,
+          detail: `All closed half-months are ingested; ${inFlight.length} range${inFlight.length > 1 ? 's are' : ' is'} still fetching (${inFlight.map(fmt).join(', ')}). Per-SKU figures for those periods will keep climbing until they land.` });
+      } else {
+        checks.push({ status: 'pass', name: `Amazon ${mkt}: SKU report coverage`,
+          detail: `All ${cov.ranges.length} half-month SKU reports in the window are ingested — no missing periods, so per-SKU totals cover the full months shown.` });
+      }
+    }
+  }
+
   // ── Check 3f: Amazon completeness — verified against Amazon's OWN counts ──
   // THIS is the check that would have caught the mid-2026 undercount. Every other
   // Amazon check above only inspects the data we have for internal consistency
@@ -10828,19 +10862,35 @@ window.runAmazonReverify = async function(btn) {
   btn.disabled = true;
   btn.textContent = 'Re-verifying…';
   try {
-    const qs = market ? `?market=${market}&days=45` : '?days=45';
-    const r = await fetch('/api/admin/amazon/safetynet' + qs, {
-      method: 'POST',
-      credentials: 'include'  // carry the Cloudflare Access JWT cookie
-    });
-    if (!r.ok) {
-      const body = await r.text().catch(() => '');
-      throw new Error(`HTTP ${r.status}: ${body.slice(0, 200) || r.statusText}`);
-    }
-    const data = await r.json();
-    const recovered = Array.isArray(data.results)
-      ? data.results.reduce((s, x) => s + (x.ordersUpserted || 0), 0)
-      : 0;
+    // v2.50 — drive the sweep as a chunked loop instead of one long request.
+    // A 45-day CA window is ~14 paged SP-API calls (~90s); as a single request
+    // it exceeded the edge timeout, so the button always ended in "Re-verify
+    // failed" — and because the old endpoint only recorded a reconciliation
+    // when it covered the whole window in one call, it could never have turned
+    // the badge green either. Short chunks + nextToken finish the same window.
+    let token = null, recovered = 0, chunks = 0;
+    const MAX_CHUNKS = 30;   // 30 × 20s of SP-API paging ≫ any 45-day window
+    do {
+      const qs = `?days=45&chunkMs=20000`
+        + (market ? `&market=${market}` : '')
+        + (token ? `&nextToken=${encodeURIComponent(token)}` : '');
+      const r = await fetch('/api/admin/amazon/safetynet' + qs, {
+        method: 'POST',
+        credentials: 'include'  // carry the Cloudflare Access JWT cookie
+      });
+      if (!r.ok) {
+        const body = await r.text().catch(() => '');
+        throw new Error(`HTTP ${r.status}: ${body.slice(0, 200) || r.statusText}`);
+      }
+      const data = await r.json();
+      const res  = (Array.isArray(data.results) ? data.results : [])[0] || {};
+      if (res.error) throw new Error(res.error);
+      recovered += res.ordersUpserted || 0;
+      token = (res.more && res.nextToken) ? res.nextToken : null;
+      chunks++;
+      if (token) btn.textContent = `Re-verifying… ${recovered.toLocaleString()} checked`;
+    } while (token && chunks < MAX_CHUNKS);
+    if (token) throw new Error(`Sweep still had more pages after ${MAX_CHUNKS} chunks — stopped rather than loop forever.`);
     btn.textContent = recovered > 0 ? `Recovered ${recovered.toLocaleString()} — refreshing…` : 'Verified — refreshing…';
     // Any recovered orders should show, so bust the Amazon sales cache, then
     // re-run the audit so the completeness check reflects the fresh sweep.

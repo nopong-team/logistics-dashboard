@@ -441,12 +441,56 @@ async function amazonLineIdCoverage(env, market, activeStart) {
   return { missing: res?.missing || 0, withId: res?.with_id || 0 };
 }
 
+// v2.50 — SKU-report range coverage.
+//
+// Every other Amazon check inspects the rows we HAVE for internal consistency
+// (duplicates, mapping, market separation, line ids). None of them can see a
+// half-month whose report never landed, because a missing range leaves no rows
+// to be inconsistent — the month just quietly reads low. CA showed 1,371 July
+// orders against 599 units for exactly this reason: 2026-07-2h had died as
+// `failed` and nothing ever retried it, so only 1–15 July was ever ingested.
+//
+// This returns, per market, the latest job status for every half-month range in
+// the reporting window that has fully closed. A closed range with no `ingested`
+// job means that half-month's SKU data is missing outright.
+async function amazonReportCoverage(env, market) {
+  const res = await env.DB.prepare(
+    `SELECT j.range_label, j.status, j.data_end_time, j.error,
+            (julianday('now') - julianday(j.updated_at)) * 24.0 AS age_hours
+     FROM report_jobs j
+     WHERE j.source = 'amazon' AND j.market = ?
+       AND j.id IN (SELECT MAX(id) FROM report_jobs
+                    WHERE source = 'amazon' AND market = ? GROUP BY range_label)
+     ORDER BY j.range_label`,
+  ).bind(market, market).all();
+  const now = Date.now();
+  const ranges = [];
+  for (const r of (res.results || [])) {
+    // Half-month labels only ('YYYY-MM-1h' / '-2h'); ignore one-off backfill
+    // labels like 'au-csv-backfill', which have no recurring window to cover.
+    if (!/^\d{4}-\d{2}-[12]h$/.test(r.range_label || '')) continue;
+    const end = Date.parse(r.data_end_time);
+    ranges.push({
+      label:   r.range_label,
+      status:  r.status,
+      closed:  Number.isFinite(end) ? end <= now : true,
+      error:   r.error || null,
+      ageHours: r.age_hours ?? null,
+    });
+  }
+  // A range still in flight (pending/ready) isn't missing — it's mid-recovery.
+  const missing  = ranges.filter((r) => r.closed && r.status !== 'ingested'
+                                     && r.status !== 'pending' && r.status !== 'ready');
+  const inFlight = ranges.filter((r) => r.status === 'pending' || r.status === 'ready');
+  return { ranges, missing, inFlight };
+}
+
 async function buildAmazonAudit(env) {
   const { startDate } = buildMonthWindow();
   const activeStart = activeRangeStart();
   const [caSku, usSku, caState, usState, caJobs, usJobs, caSuperseded, usSuperseded,
          caDupIdentity, usDupIdentity, caCoverage, usCoverage,
-         caReconcile, usReconcile] = await Promise.all([
+         caReconcile, usReconcile, caRanges, usRanges] = await Promise.all([
     env.DB.prepare(
       `SELECT COUNT(DISTINCT dashboard_sku) AS n
        FROM amazon_items
@@ -488,6 +532,10 @@ async function buildAmazonAudit(env) {
     // Health "Amazon completeness" check.
     env.CACHE ? env.CACHE.get('amazon-reconcile-ca', 'json') : Promise.resolve(null),
     env.CACHE ? env.CACHE.get('amazon-reconcile-us', 'json') : Promise.resolve(null),
+    // Per-half-month SKU-report coverage. Powers the "SKU report coverage"
+    // check — the one that sees a month missing rather than merely inconsistent.
+    amazonReportCoverage(env, 'CA'),
+    amazonReportCoverage(env, 'US'),
   ]);
 
   const splitSignals = (s) => (s ? String(s).split(',').filter(Boolean) : []);
@@ -536,6 +584,10 @@ async function buildAmazonAudit(env) {
     // data match Amazon's own count at the last deep sweep" signal. Each is
     // { ranAt, sinceISO, worstRecoveredPct, months:[…] } or null (never swept).
     reconcile: { CA: caReconcile || null, US: usReconcile || null },
+    // Half-month SKU-report coverage per market: { ranges, missing, inFlight }.
+    // `missing` non-empty = that half-month's Amazon SKU rows were never
+    // ingested, so every per-SKU figure covering it is understated.
+    reportCoverage: { CA: caRanges, US: usRanges },
   };
 }
 

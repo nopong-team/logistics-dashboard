@@ -393,12 +393,21 @@ adminRoutes.post('/amazon/safetynet', async (c) => {
   const one       = (c.req.query('market') || '').toUpperCase();
   const days      = Math.min(Math.max(parseInt(c.req.query('days') || '45', 10) || 45, 1), 180);
   const nextToken = c.req.query('nextToken') || null;
+  // v2.50: per-call wall-clock budget. A 45-day CA sweep needs ~14 paged
+  // requests and blows past the edge request timeout in one shot — the UI's
+  // "Re-verify now" therefore drives it as a chunked loop, passing a short
+  // chunkMs and feeding nextToken back until `more` is false. Default stays
+  // 90s so the cron path is unchanged.
+  const chunkMs   = Math.min(Math.max(parseInt(c.req.query('chunkMs') || '90000', 10) || 90000, 5000), 90000);
   const markets   = one ? [one] : ['CA', 'US'];
   const results = [];
   for (const m of markets) {
     if (!['CA', 'US'].includes(m)) { results.push({ market: m, error: 'market must be CA or US' }); continue; }
     try {
-      const r = await runAmazonSafetyNetBackfill(c.env, m, { sinceDays: days, nextToken, recordReconcile: days >= 30 && !nextToken });
+      // recordReconcile no longer excludes continuation calls — the sweep keeps
+      // its BEFORE snapshot in KV across chunks and writes the result on the
+      // chunk that finishes the window.
+      const r = await runAmazonSafetyNetBackfill(c.env, m, { sinceDays: days, nextToken, wallClockBudgetMs: chunkMs, recordReconcile: days >= 30 });
       if (r.ordersUpserted > 0) await invalidateAmazonSalesCache(c.env, m);
       results.push(r);
     } catch (e) { results.push({ market: m, error: redactSecrets(e?.message || String(e)) }); }
