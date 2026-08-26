@@ -53,6 +53,33 @@ export const adminRoutes = new Hono();
 
 const WOO_STATUSES_ALL = 'any'; // backfill stores everything; queries filter at read time
 
+// The ONLY fields we ever read off a Woo order — see buildWooOrderStatements:
+// id / status / date_created / total / currency, plus each line item's
+// sku / name / quantity / total. `raw_json` is deliberately written as NULL, so
+// nothing else in the payload is consumed anywhere in this codebase.
+//
+// Passing `_fields` makes WooCommerce skip assembling billing, shipping,
+// meta_data, tax_lines, coupon_lines, refunds and _links for every order it
+// returns — materially less work per order on the STORE side (these are
+// authenticated REST calls, so they bypass page caching and hit PHP + MySQL
+// directly every time) and a much smaller response body. What we store is
+// unchanged.
+//
+// Top-level fields ONLY, on purpose. WP's `_fields` nested dot-notation
+// (`line_items.sku`) does not reliably filter inside a numerically-indexed
+// array, and a silent miss there would land orders with EMPTY line items —
+// order_items rows vanish and every per-SKU number on the dashboard goes wrong
+// without erroring. Taking `line_items` whole costs a little payload and
+// removes that failure mode entirely.
+//
+// `number` is deliberately NOT requested. The orders.number column is written
+// but never read — no API route and no part of the frontend touches it — and
+// $order->get_order_number() fires the woocommerce_order_number filter on the
+// store for every row, which a sequential-order-number plugin can make
+// expensive. buildWooOrderStatements already falls back to String(o.id), so the
+// column stays populated and existing rows are untouched.
+const WOO_ORDER_FIELDS = 'id,status,date_created,total,currency,line_items';
+
 function storeFromEnv(env, market) {
   const key = market.toUpperCase();
   const lookup = {
@@ -218,6 +245,7 @@ export async function runBackfillChunk(env, market, pages, action = 'backfill') 
       page: String(page),
       orderby: 'date',
       order: 'asc',
+      _fields: WOO_ORDER_FIELDS,
     });
     pagesFetched++;
     allOrders.push(...woo.data);
@@ -331,6 +359,7 @@ export async function runWooSafetyNetBackfill(env, market, { sinceDays = 30 } = 
       page: String(page),
       orderby: 'modified',
       order: 'asc',
+      _fields: WOO_ORDER_FIELDS,
     });
     pagesFetched++;
     allOrders.push(...woo.data);
