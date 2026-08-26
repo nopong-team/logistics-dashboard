@@ -1367,8 +1367,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.52</span> &middot; August 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.53</span> &middot; August 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.53 &mdash; 26 August 2026 (⚡ Woo order sync asks the stores for less)</h4>
+    <ul>
+      <li><strong>The order sync now requests only the fields we actually store.</strong> Every Woo <code>/orders</code> call was pulling the complete order object &mdash; billing, shipping, all <code>meta_data</code>, tax lines, coupon lines, the refunds array and <code>_links</code> &mdash; when the sync reads just <strong>id, status, date_created, total, currency</strong> plus each line item's <strong>sku, name, quantity, total</strong>. <code>raw_json</code> has always been written as NULL, so none of the rest was ever used. A <code>_fields</code> parameter now scopes the request to that list.</li>
+      <li><strong>Why it matters on the store side.</strong> These are authenticated REST calls, so they bypass page caching entirely and hit PHP + MySQL on every request. Assembling the full object per order is the expensive part, and it scales with rows returned &mdash; so the saving is small on a routine 15-minute tick (a handful of orders) and large exactly where it counts: the 100-order backfill pages, the catch-up tick after any cron downtime, and the weekly modified-date safety-net sweep, which re-pulls up to 4,000 orders per market.</li>
+      <li><strong><code>number</code> dropped from the request too.</strong> The <code>orders.number</code> column is written but read by nothing &mdash; no API route, no part of the frontend &mdash; and <code>get_order_number()</code> fires a filter on the store for every row that a sequential-order-number plugin can make costly. <code>buildWooOrderStatements</code> already fell back to the order id, so the column stays populated and existing rows are untouched.</li>
+      <li><strong>Line items taken whole, deliberately.</strong> WP's <code>_fields</code> nested dot-notation (<code>line_items.sku</code>) doesn't reliably filter inside a numerically-indexed array, and a silent miss there would land orders with EMPTY line items &mdash; <code>order_items</code> rows would vanish and every per-SKU figure would go wrong without anything erroring. The remaining payload is worth trimming but only behind a live check, not on an assumption.</li>
+      <li><strong>Nothing stored changes.</strong> Same rows, same columns, same values &mdash; only the request narrows. Applies to CA, US and AU (see AU v2.2.103); the reconcile path already used <code>_fields=id</code> and is untouched.</li>
+    </ul>
     <h4>v2.52 &mdash; 25 August 2026 (🎯 The order sync stops stepping over orders &mdash; root cause of the completeness drift)</h4>
     <ul>
       <li><strong>Fixed the cause, not the symptom.</strong> The 15-minute incremental asked Amazon only for <em>Unshipped</em> and <em>Shipped</em> orders. A brand-new order sits in <em>Pending</em> while payment authorises, so it was excluded from the reply &mdash; and the watermark then advanced to the newest order Amazon <em>did</em> return, stepping straight over it. Because the next run starts strictly after the watermark, that order was never looked at again by the incremental. It existed only if a later safety-net sweep happened to cover it, and anything still Pending after two days fell past the short sweep&rsquo;s window too, leaving only the Sunday 45-day sweep to find it. That is the entire drift: <strong>CA August was 7.4% (62 orders) short</strong> until the weekly sweep caught up.</li>
@@ -2852,9 +2860,16 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; Australia Dashboard &middot; Data from CIN7 &middot; Metorik (Woo) &middot; Amazon SP-API
   <br>
-  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.102</span> &middot; July 2026 &middot;
+  <span class="version-toggle" onclick="toggleChangelog('changelog-panel-au')">v2.2.103</span> &middot; August 2026 &middot;
   <span id="au-data-stamp" style="color:var(--text-light);"></span>
   <div id="changelog-panel-au" class="changelog-panel">
+    <h4>v2.2.103 &mdash; 26 August 2026 (⚡ Woo AU sync asks nopong.com.au for less)</h4>
+    <ul>
+      <li><strong>The AU Woo pull now requests only the fields we store.</strong> The 15-minute sync was fetching the complete order object from nopong.com.au &mdash; billing, shipping, all <code>meta_data</code>, tax lines, coupon lines, refunds, <code>_links</code> &mdash; and keeping eleven values out of it. It now asks for <strong>id, status, date_created, total, currency</strong> and each line item's <strong>sku, name, quantity, total</strong>, and nothing else. <code>number</code> is dropped too: the column is written but read by nothing, and it costs the store a filter call per order.</li>
+      <li><strong>What this does and doesn't change on the site.</strong> The AU cron is one request every 15 minutes (~96/day), each returning only orders created since the last tick &mdash; usually a handful. That was never a load problem and still isn't. The win lands on the heavy calls: a manual backfill page (100 full orders), and the catch-up tick after any Worker downtime. AU is not in the weekly safety-net sweep, so it has no weekly burst to save on.</li>
+      <li><strong>Reminder of scope.</strong> This affects the D2C website channel only. Coles, Woolworths, Distributors, Amazon AU, stock-on-hand and POs all come from CIN7 and are untouched by this change.</li>
+      <li><strong>No change to any number on the dashboard.</strong> Same rows into <code>orders</code> and <code>order_items</code>, same values &mdash; only the request to Woo narrows.</li>
+    </ul>
     <h4>v2.2.102 &mdash; 30 July 2026 (💅 Logistics: all six KPI boxes on one line)</h4>
     <ul>
       <li><strong>The KPI strip now fits all six boxes across in a single row</strong> (was five-wide, so the new &ldquo;On hold&rdquo; box wrapped to a second line). Each box is a touch narrower &mdash; the counts top out in the thousands, so they don&rsquo;t need the extra width. Collapses to 3-up only on genuinely narrow screens.</li>
