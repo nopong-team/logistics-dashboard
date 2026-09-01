@@ -1367,8 +1367,17 @@
 <footer class="dash-footer">
   No Pong Natural Products &middot; North America Dashboard &middot; Live data from WooCommerce, Amazon, Xero, SalesBinder &amp; Logiwa
   <br>
-  <span class="version-toggle" onclick="toggleChangelog()">v2.53</span> &middot; August 2026
+  <span class="version-toggle" onclick="toggleChangelog()">v2.54</span> &middot; September 2026
   <div id="changelog-panel" class="changelog-panel">
+    <h4>v2.54 &mdash; 1 September 2026 (🚨 every month column was labelled with the wrong month)</h4>
+    <ul>
+      <li><strong>The bug.</strong> On the 1st of each month, anyone opening the dashboard from Australia before about 2pm AEST saw <em>every</em> month column shifted by one. The column headed <strong>Aug 2026</strong> was showing <strong>July's</strong> numbers, and August's real numbers were sitting under a <strong>Sep 2026</strong> heading. Nothing was missing from the database and nothing errored &mdash; the figures were simply captioned with the wrong month, which is why it read as "the August numbers aren't coming through".</li>
+      <li><strong>The cause.</strong> Two different clocks decided what "the last six months" meant. The Worker buckets every <code>monthly[]</code> / <code>monthlyQty[]</code> array it returns against a rolling window anchored to <code>America/Toronto</code> (the canonical business timezone, per <code>src/timezone.js</code>). This page built its own window &mdash; the six column <em>labels</em> &mdash; from <code>new Date()</code> in the <strong>viewer's</strong> timezone. Brisbane runs 14 hours ahead of Toronto, so from midnight to 2pm AEST the browser is already on the next calendar day, and on the 1st that is the next <strong>month</strong>. The Worker sent Mar&ndash;Aug; the page labelled those same six slots Apr&ndash;Sep.</li>
+      <li><strong>The fix.</strong> The page now derives its window from <code>America/Toronto</code> too, mirroring <code>buildMonthWindow()</code> in <code>src/timezone.js</code> exactly. Labels and data are computed from the same calendar month regardless of where the dashboard is opened from. The weekly picker was anchored to the viewer's clock in the same way and is fixed alongside it &mdash; it was offering a week bucket Toronto hadn't reached yet, which rendered as an empty "current week".</li>
+      <li><strong>It now flags itself instead of waiting to be spotted.</strong> A new <strong>Month window alignment</strong> check on the Data Health tab compares the window this page is labelling against <code>monthWindowStart</code> from <code>/api/audit</code> and goes <strong>red</strong> if they ever disagree, naming both. This class of fault produces plausible-looking numbers in every cell, so it can't be caught by eye &mdash; the check is the safeguard, not the reading.</li>
+      <li><strong>Sales caches are now scoped to the month window.</strong> <code>woo-sales-{market}</code> and <code>amazon-sales-{market}</code> gain a <code>-{YYYY-MM}</code> suffix. The cached arrays are six positional slots that only mean anything against the window they were built for, so a rollover has to miss the cache rather than serve six one-month-stale slots for the remainder of the 15-minute TTL. Read and invalidate both go through one key builder so the cron's cache-bust keeps matching.</li>
+      <li><strong>Not the cause, but worth knowing:</strong> the underlying August data is intact &mdash; Woo CA 1,645 orders / 2,808 line items, Woo US 137 / 216, Amazon CA 1,184 SKU rows, Amazon US 249, no blank SKUs, no duplicates, no missing <code>local_date</code>. The only genuine gap is <strong>31 August on Amazon</strong> (1 row vs a ~30/day norm), which is the normal SP-API reporting lag and backfills itself on the next report refresh.</li>
+    </ul>
     <h4>v2.53 &mdash; 26 August 2026 (⚡ Woo order sync asks the stores for less)</h4>
     <ul>
       <li><strong>The order sync now requests only the fields we actually store.</strong> Every Woo <code>/orders</code> call was pulling the complete order object &mdash; billing, shipping, all <code>meta_data</code>, tax lines, coupon lines, the refunds array and <code>_links</code> &mdash; when the sync reads just <strong>id, status, date_created, total, currency</strong> plus each line item's <strong>sku, name, quantity, total</strong>. <code>raw_json</code> has always been written as NULL, so none of the rest was ever used. A <code>_fields</code> parameter now scopes the request to that list.</li>
@@ -3775,19 +3784,38 @@
 
 const FX = 1.4412;   // 1 USD = 1.4412 CAD
 
-// Dynamic rolling 6-month window ending at the current month
+// The canonical business timezone. MUST stay identical to BUSINESS_TZ in
+// src/timezone.js — the Worker buckets every monthly[] / monthlyQty[] array it
+// returns against ITS window, and this file only supplies the LABELS for those
+// slots. If the two windows disagree by a month, every column on the dashboard
+// silently shows the wrong month's data (see the v2.54 changelog entry).
+const BUSINESS_TZ = 'America/Toronto';
+const _bizYmFmt   = new Intl.DateTimeFormat('en-CA', { timeZone: BUSINESS_TZ, year: 'numeric', month: '2-digit' });
+const _bizDayFmt  = new Intl.DateTimeFormat('en-CA', { timeZone: BUSINESS_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+
+// 'YYYY-MM' / 'YYYY-MM-DD' for "now" in the business timezone, NOT the
+// viewer's. A Brisbane browser is 14–16h ahead of Toronto, so between midnight
+// and ~14:00 AEST it is already on the next calendar day — and on the 1st of
+// the month, the next MONTH.
+function businessYearMonth() { return _bizYmFmt.format(new Date()); }
+function businessToday()     { return _bizDayFmt.format(new Date()); }
+
+// Dynamic rolling 6-month window ending at the current business month.
+// Mirrors buildMonthWindow() in src/timezone.js exactly.
 function buildMonthWindow() {
-  const now = new Date();
+  const [y, m] = businessYearMonth().split('-').map(Number);
   const map = {};
   const labels = [];
+  const months = [];
   for (let i = 5; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    // Use local date parts — toISOString() converts to UTC which shifts the month in eastern timezones
-    const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    let mm = m - i, yy = y;
+    while (mm <= 0) { mm += 12; yy -= 1; }
+    const ym = `${yy}-${String(mm).padStart(2, '0')}`;
     map[ym] = 5 - i;
-    labels.push(d.toLocaleString('en-US', { month: 'short', year: 'numeric' }));
+    months.push(ym);
+    labels.push(new Date(yy, mm - 1, 1).toLocaleString('en-US', { month: 'short', year: 'numeric' }));
   }
-  return { monthMap: map, labels };
+  return { monthMap: map, labels, months, startDate: `${months[0]}-01` };
 }
 const MW = buildMonthWindow();
 const MONTHS = MW.labels;
@@ -3833,7 +3861,10 @@ function getWeekKey(dateStr) {
 // Weeks run Mon–Sun but split at month boundaries.
 function buildWeekOptions() {
   const periods = [];
-  const now = new Date();
+  // Anchored to the business timezone, not the viewer's — otherwise a Brisbane
+  // browser offers a week bucket that Toronto (and therefore the data) has not
+  // reached yet, which renders as an empty "current week".
+  const now = new Date(businessToday());
   let d = new Date(WEEKLY_START_DATE);
   while (d <= now) {
     // Find the end of this period: either Sunday or last day of month, whichever comes first
@@ -10444,6 +10475,33 @@ async function runDataHealthChecks() {
     const r = await fetch('/api/audit');
     if (r.ok) audit = await r.json();
   } catch (e) { /* audit endpoint optional */ }
+
+  // ── Check 0: month-window alignment (browser vs Worker) ──
+  // The Worker returns monthly[] / monthlyQty[] arrays bucketed against ITS
+  // rolling 6-month window (America/Toronto). This page only supplies the
+  // LABELS for those six slots. If the two windows ever disagree, every column
+  // is captioned with the wrong month and nothing errors — the exact failure
+  // that made August 2026 read as July for anyone loading the dashboard from
+  // Australia on the 1st. This check makes that state impossible to miss.
+  {
+    const serverStarts = [...new Set(
+      ['CA', 'US']
+        .map(mkt => audit?.woo?.[mkt]?.monthWindowStart)
+        .filter(Boolean)
+    )];
+    if (!serverStarts.length) {
+      checks.push({ status: 'warn', name: 'Month window alignment',
+        detail: 'Could not read the Worker month window from /api/audit — column months are unverified.' });
+    } else if (serverStarts.length > 1 || serverStarts[0] !== MW.startDate) {
+      checks.push({ status: 'fail', name: 'Month window alignment',
+        detail: `Column labels start ${MW.startDate} but the Worker is returning data from `
+              + `${serverStarts.join(' / ')}. Every month column is showing the wrong month's `
+              + `numbers. Reload after ${BUSINESS_TZ} rolls over, or redeploy if it persists.` });
+    } else {
+      checks.push({ status: 'pass', name: 'Month window alignment',
+        detail: `Browser and Worker agree: ${MW.months[0]} → ${MW.months[5]} (${BUSINESS_TZ}).` });
+    }
+  }
 
   // ── Check 1: WooCommerce per-SKU sum ≈ channel total revenue (gap = shipping + tax) ──
   // IMPORTANT: compare 6-month window to 6-month window.

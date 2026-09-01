@@ -16,13 +16,21 @@
  */
 
 import { Hono } from 'hono';
-import { buildMonthWindow, getWeekKey } from './timezone.js';
+import { buildMonthWindow, getWeekKey, getBusinessYearMonth } from './timezone.js';
 import { toIsoUtc } from './diagnostics.js';
 
 export const wooRoutes = new Hono();
 
 // Cache TTL for the aggregated /sales response blob (seconds).
 const SALES_TTL_SECONDS = 15 * 60;
+
+// KV key for the aggregated /sales blob, SCOPED TO THE ROLLING MONTH WINDOW.
+// The cached monthly[]/monthlyQty[] arrays are six positional slots that only
+// mean anything against the window they were built for, so the key has to move
+// when the window does — otherwise a month rollover serves six slots that are
+// all one month stale until the TTL lapses. Read and invalidate MUST both go
+// through this function or the cron's cache-bust silently stops matching.
+const wooSalesKey = (m) => `woo-sales-${m}-${getBusinessYearMonth()}`;
 
 // Currency for each market. The dashboard displays this on the per-market tile.
 const MARKET_CURRENCY = { CA: 'CAD', US: 'USD', AU: 'AUD' };
@@ -97,7 +105,11 @@ wooRoutes.get('/sales', async (c) => {
     return c.json({ error: 'D1 binding DB not configured' }, 500);
   }
 
-  const cacheKey = `woo-sales-${market.toLowerCase()}`;
+  // Cache key carries the newest month in the rolling window. The cached blob's
+  // monthly[]/monthlyQty[] arrays are only meaningful against the window they
+  // were built for, so a month rollover MUST miss the cache rather than serve
+  // six slots that are all one month stale for up to SALES_TTL_SECONDS.
+  const cacheKey = wooSalesKey(market.toLowerCase());
   const force = c.req.query('refresh') === '1';
 
   // Read-through cache. CACHE binding is optional — if the KV namespace isn't
@@ -238,5 +250,5 @@ export async function invalidateWooSalesCache(env, market) {
   if (!env?.CACHE) return;
   const m = String(market || '').toLowerCase();
   if (!m) return;
-  await env.CACHE.delete(`woo-sales-${m}`);
+  await env.CACHE.delete(wooSalesKey(m));
 }
