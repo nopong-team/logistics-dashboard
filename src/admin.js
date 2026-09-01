@@ -411,6 +411,218 @@ adminRoutes.post('/woo/safetynet', async (c) => {
   return c.json({ ok: true, results });
 });
 
+
+// ─── Targeted Woo status re-check (v2.55) ──────────────────────────────────
+//
+// WHY THIS EXISTS, and why it is NOT runWooSafetyNetBackfill.
+//
+// The incremental sync walks forward by `date_created`, so once an order is
+// stored its STATUS is never re-read. Any later transition is invisible:
+//   • pending/failed/on-hold → processing/completed   (revenue UNDER-counted)
+//   • processing/completed   → refunded/cancelled     (revenue OVER-counted)
+//
+// CA/US fix this by re-fetching everything MODIFIED in 30 days. That design
+// does not transfer to AU: AU books ~14,000 orders per 30 days (~9x CA), so the
+// sweep would be ~142 pages of FULL order payloads — authenticated REST calls
+// that bypass page caching and hit PHP + MySQL for every row — and it would
+// still stop at MAX_PAGES=40, covering barely a quarter of the window while
+// silently reporting success.
+//
+// So AU re-checks by TARGET rather than by time, in two cheap passes:
+//
+//   Pass A — orders we HOLD in a non-terminal status. Their ids come from D1,
+//     so we ask Woo only about rows that can actually have moved, via
+//     `include=<ids>` + `_fields=id,status`. ~2,500 ids => ~26 requests
+//     returning two fields each. `_fields` also stops Woo ASSEMBLING billing /
+//     shipping / meta_data / tax / coupon / refund objects server-side, which
+//     is the expensive half of a Woo order response.
+//
+//   Pass B — the reverse direction, which Pass A cannot see: an order we hold
+//     as processing/completed that has since been refunded or cancelled. Asking
+//     for `status=refunded,cancelled` + `modified_after` returns only that tiny
+//     set (~1 page), instead of re-reading every counted order.
+//
+// Together: ~27 requests for the first repair, then 1-3 per weekly run. The AU
+// store already serves ~96 incremental cron requests a day, so this is well
+// inside the noise. Status-only UPDATEs — line items are never touched, so a
+// re-check can never disturb per-SKU history.
+
+// Statuses that can still change into (or out of) the counted set. Anything
+// here is worth asking Woo about; anything else is left alone.
+const WOO_NON_TERMINAL = ['pending', 'failed', 'on-hold', 'checkout-draft', 'pre-ordered'];
+// What /api/woo/sales counts as revenue. Keep in sync with src/woo.js.
+const WOO_COUNTED = ['completed', 'processing'];
+// Statuses that remove an order from revenue once it lands there.
+const WOO_UNCOUNTED_TERMINAL = 'refunded,cancelled';
+
+// Apply {id → status} changes to D1, skipping rows already correct.
+async function applyStatusChanges(env, market, liveById, currentRows) {
+  const stmt = env.DB.prepare(
+    `UPDATE orders SET status = ?, synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+     WHERE id = ? AND market = ?`,
+  );
+  const changes = [];
+  const transitions = {};
+  for (const row of currentRows) {
+    const live = liveById.get(String(row.id));
+    if (!live || live === row.status) continue;
+    transitions[`${row.status}→${live}`] = (transitions[`${row.status}→${live}`] || 0) + 1;
+    changes.push(stmt.bind(live, row.id, market));
+  }
+  for (let i = 0; i < changes.length; i += 500) {
+    await env.DB.batch(changes.slice(i, i + 500));
+  }
+  return { updated: changes.length, transitions };
+}
+
+// Pass A + Pass B. `sinceDate` (YYYY-MM-DD) bounds Pass A; `maxRequests` caps
+// the Woo calls so a one-off repair can be driven in chunks if ever needed.
+export async function runWooStatusRecheck(env, market, { sinceDate = '2026-03-01', refundDays = 30, maxRequests = 60 } = {}) {
+  const startMs = Date.now();
+  const store = storeFromEnv(env, market);
+  if (!store?.url || !store?.key || !store?.secret) {
+    return { market, skipped: true, reason: 'store not configured' };
+  }
+
+  let requests = 0;
+  const placeholders = WOO_NON_TERMINAL.map(() => '?').join(',');
+  const pending = await env.DB.prepare(
+    `SELECT id, status FROM orders
+     WHERE market = ? AND status IN (${placeholders}) AND date_created >= ?
+     ORDER BY date_created DESC`,
+  ).bind(market, ...WOO_NON_TERMINAL, sinceDate).all();
+  const rows = pending.results || [];
+
+  // ── Pass A: ask Woo about exactly the ids we hold as non-terminal ──
+  const liveById = new Map();
+  for (let i = 0; i < rows.length && requests < maxRequests; i += PER_PAGE) {
+    const chunk = rows.slice(i, i + PER_PAGE);
+    const woo = await wooFetch(store, '/orders', {
+      include: chunk.map(r => r.id).join(','),
+      per_page: String(PER_PAGE),
+      status: WOO_STATUSES_ALL,
+      _fields: 'id,status',
+    });
+    requests++;
+    for (const o of woo.data || []) liveById.set(String(o.id), o.status);
+  }
+  const passA = await applyStatusChanges(env, market, liveById, rows);
+
+  // Ids Woo did not return at all — deleted or moved to the trash upstream.
+  // Reported, never guessed at: a missing row is not evidence of a status.
+  const missing = rows.filter(r => !liveById.has(String(r.id))).length;
+
+  // ── Pass B: orders that have LEFT the counted set since we last looked ──
+  let passB = { updated: 0, transitions: {} };
+  let refundSeen = 0;
+  if (requests < maxRequests) {
+    const sinceISO = new Date(Date.now() - refundDays * 86400000).toISOString();
+    const liveOut = new Map();
+    for (let page = 1; page <= 5 && requests < maxRequests; page++) {
+      const woo = await wooFetch(store, '/orders', {
+        status: WOO_UNCOUNTED_TERMINAL,
+        modified_after: sinceISO,
+        per_page: String(PER_PAGE),
+        page: String(page),
+        orderby: 'modified',
+        order: 'asc',
+        _fields: 'id,status',
+      });
+      requests++;
+      for (const o of woo.data || []) liveOut.set(String(o.id), o.status);
+      if (page >= woo.totalPages) break;
+    }
+    refundSeen = liveOut.size;
+    if (liveOut.size) {
+      const ids = [...liveOut.keys()];
+      const held = [];
+      // D1 caps a statement at 100 bound parameters; 90 ids + market + the
+      // counted-status binds stays safely under it.
+      for (let i = 0; i < ids.length; i += 90) {
+        const slice = ids.slice(i, i + 90);
+        const res = await env.DB.prepare(
+          `SELECT id, status FROM orders
+           WHERE market = ? AND status IN (${WOO_COUNTED.map(() => '?').join(',')})
+             AND id IN (${slice.map(() => '?').join(',')})`,
+        ).bind(market, ...WOO_COUNTED, ...slice).all();
+        held.push(...(res.results || []));
+      }
+      passB = await applyStatusChanges(env, market, liveOut, held);
+    }
+  }
+
+  const durationMs = Date.now() - startMs;
+  await env.DB.prepare(
+    `INSERT INTO sync_logs
+       (run_at, source, market, action, pages_fetched, orders_added, items_added,
+        watermark_before, watermark_after, status, duration_ms)
+     VALUES (strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'woo', ?, 'woo-status-recheck', ?, ?, 0, ?, ?, 'ok', ?)`,
+  ).bind(market, requests, passA.updated + passB.updated, sinceDate, sinceDate, durationMs).run();
+
+  return {
+    market,
+    checked: rows.length,
+    wooRequests: requests,
+    reinstated: passA.updated,       // non-terminal → counted (or other)
+    withdrawn:  passB.updated,       // counted → refunded/cancelled
+    transitions: { ...passA.transitions, ...passB.transitions },
+    missingFromWoo: missing,
+    refundCandidatesSeen: refundSeen,
+    more: rows.length > requests * PER_PAGE,
+    durationMs,
+  };
+}
+
+// Live status probe for specific order ids — the ground truth when D1 and the
+// store appear to disagree. Read-only; writes nothing.
+// GET /api/admin/woo/order-status?market=AU&ids=3491827,3495770
+adminRoutes.get('/woo/order-status', async (c) => {
+  const market = (c.req.query('market') || 'AU').toUpperCase();
+  const ids = (c.req.query('ids') || '').split(',').map(x => x.trim()).filter(Boolean);
+  if (!ids.length) return c.json({ error: 'ids required' }, 400);
+  const store = storeFromEnv(c.env, market);
+  if (!store?.url) return c.json({ error: `store ${market} not configured` }, 500);
+  try {
+    const woo = await wooFetch(store, '/orders', {
+      include: ids.join(','), per_page: '100', status: WOO_STATUSES_ALL,
+      _fields: 'id,status,date_created,date_modified,total',
+    });
+    const held = await c.env.DB.prepare(
+      `SELECT id, status, total FROM orders WHERE market = ? AND id IN (${ids.map(() => '?').join(',')})`,
+    ).bind(market, ...ids).all();
+    const heldById = new Map((held.results || []).map(r => [String(r.id), r]));
+    return c.json({
+      ok: true,
+      compared: ids.map(id => ({
+        id,
+        d1_status:   heldById.get(String(id))?.status ?? null,
+        woo_status:  (woo.data || []).find(o => String(o.id) === String(id))?.status ?? '(not returned)',
+        woo_modified:(woo.data || []).find(o => String(o.id) === String(id))?.date_modified ?? null,
+      })),
+    });
+  } catch (e) {
+    return c.json({ ok: false, error: redactSecrets(e?.message || String(e)) }, 500);
+  }
+});
+
+// Manual trigger / one-off repair.
+// POST /api/admin/woo/status-recheck?market=AU[&since=2026-03-01][&refundDays=30]
+adminRoutes.post('/woo/status-recheck', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'D1 binding DB not configured' }, 500);
+  const market = (c.req.query('market') || 'AU').toUpperCase();
+  if (!['CA', 'US', 'AU'].includes(market)) {
+    return c.json({ error: 'market must be CA, US or AU' }, 400);
+  }
+  const since = c.req.query('since') || '2026-03-01';
+  const refundDays = Math.min(Math.max(parseInt(c.req.query('refundDays') || '30', 10) || 30, 1), 120);
+  const maxRequests = Math.min(Math.max(parseInt(c.req.query('maxRequests') || '60', 10) || 60, 1), 200);
+  try {
+    return c.json({ ok: true, result: await runWooStatusRecheck(c.env, market, { sinceDate: since, refundDays, maxRequests }) });
+  } catch (e) {
+    return c.json({ ok: false, error: redactSecrets(e?.message || String(e)) }, 500);
+  }
+});
+
 // Manual trigger for the Amazon Orders safety-net (verification + on-demand
 // catch-up). POST /api/admin/amazon/safetynet?market=CA[&days=45][&nextToken=…]
 // Returns the sweep result including nextToken/more so a caller can drive a full

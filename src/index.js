@@ -12,7 +12,7 @@
 
 import { Hono } from 'hono';
 import { wooRoutes, invalidateWooSalesCache } from './woo.js';
-import { adminRoutes, runBackfillChunk, runWooSafetyNetBackfill } from './admin.js';
+import { adminRoutes, runBackfillChunk, runWooSafetyNetBackfill, runWooStatusRecheck } from './admin.js';
 import { salesBinderRoutes, runSalesBinderCronSync } from './salesbinder.js';
 import { amazonRoutes, runAmazonOrdersChunk, runAmazonReportsTick, runAmazonInventoryCronSync, runAmazonSafetyNetBackfill, invalidateAmazonSalesCache } from './amazon.js';
 import { diagnosticsRoutes } from './diagnostics.js';
@@ -421,6 +421,27 @@ async function runWooSafetyNetCron(env) {
     } catch (e) {
       console.error(`Woo safety-net ${market} failed:`, redactSecrets(e?.message || String(e)));
     }
+  }
+  // AU is NOT in the loop above on purpose. It books ~14,000 orders per 30 days
+  // (~9x CA), so a modified-date sweep would be ~142 pages of full order
+  // payloads and would still stop at MAX_PAGES=40 — a quarter of the window,
+  // reported as a success. AU instead re-checks by target: the ids we hold in a
+  // non-terminal status, plus the small refunded/cancelled set. ~27 requests on
+  // the first run, 1-3 thereafter. See runWooStatusRecheck for the full note.
+  try {
+    const r = await runWooStatusRecheck(env, 'AU', { sinceDate: '2026-03-01' });
+    if (r.skipped) {
+      console.log(`Woo status re-check AU: skipped (${r.reason})`);
+    } else {
+      console.log(
+        `Woo status re-check AU: ${r.checked} candidate(s) in ${r.wooRequests} request(s), ` +
+        `${r.reinstated} reinstated, ${r.withdrawn} withdrawn, ${r.missingFromWoo} missing upstream` +
+        (r.more ? ' [request cap hit — rerun to finish]' : '') +
+        ` (${r.durationMs}ms)`,
+      );
+    }
+  } catch (e) {
+    console.error('Woo status re-check AU failed:', redactSecrets(e?.message || String(e)));
   }
 }
 
