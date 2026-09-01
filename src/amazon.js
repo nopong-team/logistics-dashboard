@@ -36,6 +36,7 @@
 import { Hono } from 'hono';
 import {
   buildMonthWindow, getWeekKey, toBusinessLocalDate, easternIsoMidnight, getBusinessToday,
+  getBusinessYearMonth,
 } from './timezone.js';
 import { redactSecrets } from './redact.js';
 import { toIsoUtc } from './diagnostics.js';
@@ -81,7 +82,10 @@ const MIN_POLL_INTERVAL_S = 90;
 
 // /api/amazon/sales KV cache TTL (seconds).
 const SALES_TTL_SECONDS = 15 * 60;
-const SALES_KV_KEY = (market) => `amazon-sales-${market.toLowerCase()}`;
+// Scoped to the rolling month window — see the matching note in src/woo.js.
+// Both the read path and invalidateAmazonSalesCache() go through this, so the
+// cron's cache-bust keeps matching the key the read path actually wrote.
+const SALES_KV_KEY = (market) => `amazon-sales-${market.toLowerCase()}-${getBusinessYearMonth()}`;
 
 // /api/amazon/inventory cache windows. We use a "stale-while-revalidate" pattern:
 // the KV entry lives for 24h (so a stale snapshot is always there to serve while
@@ -1427,7 +1431,7 @@ amazonRoutes.get('/sales', handleAmazonSalesRequest);
 // calls /sku-sales as a separate fetch (loadAmazonSkuSales in
 // public/index.html). Without this alias, that fetch 404s, the catch
 // silently logs "not available", and the per-SKU Amazon columns stay empty
-// even when the data is in D1. The same KV cache key (amazon-sales-{market})
+// even when the data is in D1. The same KV cache key (amazon-sales-{market}-{YYYY-MM})
 // serves both routes; refresh on either invalidates for both.
 amazonRoutes.get('/sku-sales', handleAmazonSalesRequest);
 
